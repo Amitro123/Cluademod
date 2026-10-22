@@ -113,6 +113,27 @@ The export is a markdown checklist between `<!-- followups:start -->` and `<!-- 
 
 Tests: `claude plugin test plugins/followups`.
 
+## rtl-toggle: Hebrew and English on one line
+
+| Toggle off | Toggle on |
+|---|---|
+| ![Toggle off: embedded Hebrew renders out of order](assets/rtl-toggle-off.png) | ![Toggle on: embedded Hebrew renders in correct order](assets/rtl-toggle-on.png) |
+
+A line that starts in English but is mostly Hebrew (or Arabic, or another right-to-left script) can render out of order, with the Hebrew words shifted. This mod fixes those lines in your messages and Claude's.
+
+```text
+/plugin install rtl-toggle@clawd-hud
+```
+
+- **A button above the prompt** (`עברית: פעיל` / `עברית: כבוי`) turns the fix on or off for the session. `/rtl` does the same on every surface, and `/rtl on`, `/rtl off` and `/rtl status` set or report it.
+- **What it changes:** a line that starts with an English letter but has at least as many RTL words as LTR words gets one invisible leading RLM (U+200F). That gives the line a right-to-left base direction and right alignment, like a line that starts in Hebrew. Nothing else in the text changes.
+- **What it leaves alone:** code blocks (fenced and indented), lines that already start in Hebrew, lines with no RTL text, and inline code, links and URLs, which aren't counted. Table rows are fixed cell by cell, except in the terminal.
+- **Limits:** the mod API has no `dir` or alignment prop, so alignment comes only from the RLM. That works where the surface picks the direction per block (the desktop app). In a terminal it depends on the terminal's own bidi support. Messages already on screen keep their layout until they're drawn again.
+
+It also lives in its own repo, [Amitro123/RTL-claude-mod](https://github.com/Amitro123/RTL-claude-mod), which has the full rules and the performance notes.
+
+Tests: `claude plugin test plugins/rtl-toggle`.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
