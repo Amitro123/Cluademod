@@ -67,6 +67,21 @@ Set with `claude plugin configure clawd-hud@clawd-hud`, or in the plugin setting
 
 **0.4.0**: the hard-task smoke break, the eureka lightbulb and the loop coaster. **0.3.0**: the error mood.
 
+## task-hud: to-dos and sub-agents
+
+A second mod in this marketplace, installed on its own:
+
+```text
+/plugin install task-hud@clawd-hud
+```
+
+- **A progress bar above the prompt** once Claude writes a to-do list (`TodoWrite`, or `TaskCreate`/`TaskUpdate`): it's titled with the prompt that started the work, fills as each to-do gets ticked off (`Tasks 4/5 · 80%`), and shows the one in progress (`Now: Write the script`). When it shares the band with `clawd-hud`, it draws above the spark. A finished list clears on your next prompt.
+- **A Sub-agents pane** that opens the first time Claude sends out a sub-agent, and reopens with `/task-hud`. Each agent gets a pixel creature in its own color that walks while it works. Its card shows the task's description, the agent type and model (`general-purpose · Opus 5.5`), its tokens and run time, the current step (`Step 3 · Reading pre-outline.md`), the steps before it and a progress line. Cards are grouped into **Running** and **Finished**. A finished agent closes its eyes and lists what it did (`Wrote script.md`). A failed one turns gray. **Clear** drops the finished cards.
+
+Nobody knows ahead of time how many steps a sub-agent will take, so a running agent's line creeps toward 90% as it works and fills only when it finishes. The token count is the size of the agent's context on its latest request.
+
+Tests: `claude plugin test plugins/task-hud`.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
