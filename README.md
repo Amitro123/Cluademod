@@ -1,10 +1,30 @@
-# clawd-hud — a pixel spark for Claude Code
+# claudemod: mods for Claude Code
+
+Four mods, each installed on its own:
+
+| Mod | What it does |
+|---|---|
+| [clawd-hud](#clawd-hud-a-pixel-spark) | A pixel spark above the prompt, usage batteries, a prompt-cache timer and a context meter |
+| [task-hud](#task-hud-to-dos-and-sub-agents) | A to-do progress bar, and a pane with a pixel creature for each sub-agent |
+| [followups](#followups-dont-lose-what-claude-notices) | Claude flags what it notices, asks whether to track it, and keeps a to-do you can export |
+| [rtl-toggle](#rtl-toggle-hebrew-and-english-on-one-line) | Fixes the reading order of lines that mix English and Hebrew |
+
+Add the marketplace once, then install the ones you want:
+
+```text
+/plugin marketplace add Amitro123/claudemod
+/plugin install <mod>@claudemod
+```
+
+If you added this marketplace before it was renamed from `clawd-hud`, remove it with `/plugin marketplace remove clawd-hud`, add it again, and reinstall your mods as `<mod>@claudemod`.
+
+## clawd-hud: a pixel spark
 
 ![clawd-hud demo](assets/clawd-hud.gif)
 
 A Claude Code plugin that puts a little animated spark above the prompt, with a pixel battery for each of your usage limits, and adds a prompt-cache timer and a context meter beside the model picker. It works on personal plans and on enterprise seats.
 
-## What it shows
+### What it shows
 
 **Above the prompt (the `AbovePrompt` band)**
 - **The spark** on the left. What it does follows what Claude is doing:
@@ -34,30 +54,29 @@ A Claude Code plugin that puts a little animated spark above the prompt, with a 
 
 In a terminal (which can't draw SVG) the same readings show up as a text spark `✦(•_•)` and `▰▰▰▱▱` batteries. A one-line summary also goes to the status bar.
 
-## Install
+### Install
 
 ```text
-/plugin marketplace add Amitro123/claudemod
-/plugin install clawd-hud@clawd-hud
+/plugin install clawd-hud@claudemod
 ```
 
-## Options
+### Options
 
-Set with `claude plugin configure clawd-hud@clawd-hud`, or in the plugin settings:
+Set with `claude plugin configure clawd-hud@claudemod`, or in the plugin settings:
 
 | Option | Values | Default | What it does |
 |---|---|---|---|
 | `plan` | `auto`, `personal`, `enterprise` | `auto` | Which limits to show. `auto` switches to enterprise as soon as the account reports a monthly spend limit (`spend_limit`). |
 | `cacheTtl` | `auto`, `5m`, `1h` | `auto` | The cache timer's length. `auto` is 1h on personal plans and 5m on enterprise. |
 
-## How it works
+### How it works
 
 - `hooks/register.tsx` hooks `session.start`, `session.measure`, `turn.start`, `tool.call`, `turn.complete` and `ui.render`, keeps its state in atoms, and redraws the spark 8 times a second.
 - `hooks/scene.ts` paints one frame of a mood on an 88×20 pixel stage. Every motion is a plain function of the time since the mood began, so a redraw lands on the same frame and never restarts an animation.
 - `hooks/gauges.ts` draws the batteries, the bolt and the capsule as plain SVG, so the demo renderer uses the exact same art.
 - `tests/plan.test.tsx` checks the personal and enterprise views, the spend-cap overflow and both cache timers. Run it with `claude plugin test plugins/clawd-hud`.
 
-## Changelog
+### Changelog
 
 **0.6.0**: a new look. The spark mascot, its scenes, the stage and the batteries, bolt and capsule are all new, drawn by a new animation engine. Everything else carries over: plans, timers, loop detection, the hard-task and eureka moments.
 
@@ -73,10 +92,8 @@ Set with `claude plugin configure clawd-hud@clawd-hud`, or in the plugin setting
 
 <sub>The creatures, the task bar and the progress lines are drawn by the mod's own `art.ts`; the window around them is a mock-up of the desktop app.</sub>
 
-A second mod in this marketplace, installed on its own:
-
 ```text
-/plugin install task-hud@clawd-hud
+/plugin install task-hud@claudemod
 ```
 
 - **A progress bar above the prompt** once Claude writes a to-do list (`TodoWrite`, or `TaskCreate`/`TaskUpdate`): it's titled with the prompt that started the work, fills as each to-do gets ticked off (`Tasks 4/5 · 80%`), and shows the one in progress (`Now: Write the script`). When it shares the band with `clawd-hud`, it draws above the spark. A finished list clears on your next prompt.
@@ -95,7 +112,7 @@ Tests: `claude plugin test plugins/task-hud`.
 While Claude works, it often notices things outside the task: a flaky test, a stale doc, a bug in nearby code. Those get lost unless somebody writes them down. This mod writes them down.
 
 ```text
-/plugin install followups@clawd-hud
+/plugin install followups@claudemod
 ```
 
 - **Claude flags what it notices.** The mod gives Claude a `flag` tool and a short system-prompt section on when to use it: things outside the current task that need attention later. Claude doesn't fix them unless you ask.
@@ -122,7 +139,7 @@ Tests: `claude plugin test plugins/followups`.
 A line that starts in English but is mostly Hebrew (or Arabic, or another right-to-left script) can render out of order, with the Hebrew words shifted. This mod fixes those lines in your messages and Claude's.
 
 ```text
-/plugin install rtl-toggle@clawd-hud
+/plugin install rtl-toggle@claudemod
 ```
 
 - **A button above the prompt** (`עברית: פעיל` / `עברית: כבוי`) turns the fix on or off for the session. `/rtl` does the same on every surface, and `/rtl on`, `/rtl off` and `/rtl status` set or report it.
