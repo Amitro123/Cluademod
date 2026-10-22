@@ -4,7 +4,7 @@
     "name": "Amit Rosen",
     "url": "https://github.com/Amitro123"
   },
-  "description": "Claude Code mods: a pixel spark HUD, a task/sub-agent HUD and a follow-ups tracker",
+  "description": "Claude Code mods: a pixel spark HUD, a task/sub-agent HUD, a follow-ups tracker and an RTL toggle",
   "plugins": [
     {
       "name": "clawd-hud",
@@ -20,6 +20,11 @@
       "name": "followups",
       "source": "./plugins/followups",
       "description": "Claude flags what it notices, asks whether to track it, and keeps a to-do you can export to memory, docs or the README"
+    },
+    {
+      "name": "rtl-toggle",
+      "source": "./plugins/rtl-toggle",
+      "description": "Fixes the reading order of chat lines that mix English and Hebrew (or other RTL) text"
     }
   ]
 }
