@@ -69,6 +69,10 @@ Set with `claude plugin configure clawd-hud@clawd-hud`, or in the plugin setting
 
 ## task-hud: to-dos and sub-agents
 
+![task-hud: the to-do bar above the prompt and the Sub-agents pane](assets/task-hud.png)
+
+<sub>The creatures, the task bar and the progress lines are drawn by the mod's own `art.ts`; the window around them is a mock-up of the desktop app.</sub>
+
 A second mod in this marketplace, installed on its own:
 
 ```text
@@ -83,6 +87,10 @@ Nobody knows ahead of time how many steps a sub-agent will take, so a running ag
 Tests: `claude plugin test plugins/task-hud`.
 
 ## followups: don't lose what Claude notices
+
+![followups: a flag waiting above the prompt and the To-do pane with Export to](assets/followups.png)
+
+<sub>A mock-up of the layout. While Claude is working, it asks in the question dialog; the band shown here holds a flag whose dialog was closed without an answer.</sub>
 
 While Claude works, it often notices things outside the task: a flaky test, a stale doc, a bug in nearby code. Those get lost unless somebody writes them down. This mod writes them down.
 
