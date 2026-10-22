@@ -119,6 +119,21 @@ describe('flag → ask → to-do → export', () => {
     await pane.unmount()
   })
 
+  test('Docs export starts docs/FOLLOW-UPS.md in a project without a docs folder', async ($, on) => {
+    // $.fs.write creates missing directories, so a fresh project needs nothing first.
+    const files: Record<string, string> = { 'README.md': '# My project\n' }
+    engine(on, files)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await $.command.run({ command: 'followup', args: 'Check Docs export when docs/ does not exist' } as never)
+
+    const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+    await pane.press({ key: 'export-docs' })
+    expect(files['docs/FOLLOW-UPS.md']).toMatch(/^<!-- followups:start -->\n# Follow-ups\n\n- \[ \] Check Docs export/)
+    expect(files['README.md']).toBe('# My project\n')
+    expect(await texts(pane)).toMatch(/Exported 1 to docs\/FOLLOW-UPS\.md/)
+    await pane.unmount()
+  })
+
   test('the model is told when to flag', async ($, on) => {
     on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'hi', scope: 'shared' as const }] }))
     const r = await $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: [], tools: [], outputStyle: null, traits: [] } as never)
