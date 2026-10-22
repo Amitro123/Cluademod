@@ -82,6 +82,29 @@ Nobody knows ahead of time how many steps a sub-agent will take, so a running ag
 
 Tests: `claude plugin test plugins/task-hud`.
 
+## followups: don't lose what Claude notices
+
+While Claude works, it often notices things outside the task: a flaky test, a stale doc, a bug in nearby code. Those get lost unless somebody writes them down. This mod writes them down.
+
+```text
+/plugin install followups@clawd-hud
+```
+
+- **Claude flags what it notices.** The mod gives Claude a `flag` tool and a short system-prompt section on when to use it: things outside the current task that need attention later. Claude doesn't stop to fix them; it flags them and carries on.
+- **You're asked about each one** in a band above the prompt: *"Claude noticed something. Track it?"*, with the title, the detail, the file and line, and **Add to to-do** (`a`), **Skip** (`s`) or **Add all**.
+- **A To-do pane** lists what you kept. Click an item to tick it off, ✕ removes it, and `/followup <text>` adds one by hand. The list is saved per project and comes back in the next session.
+- **Export to:**
+
+| Button | Writes to | Why |
+|---|---|---|
+| Memory | `CLAUDE.md` | Claude reads it at the start of every session |
+| Docs | `docs/FOLLOW-UPS.md` | a page of its own |
+| README | `README.md`, under *Known issues & follow-ups* | visible to everyone |
+
+The export is a markdown checklist between `<!-- followups:start -->` and `<!-- followups:end -->` markers. Exporting again replaces that section in place, and the rest of the file is left alone.
+
+Tests: `claude plugin test plugins/followups`.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
