@@ -90,8 +90,8 @@ While Claude works, it often notices things outside the task: a flaky test, a st
 /plugin install followups@clawd-hud
 ```
 
-- **Claude flags what it notices.** The mod gives Claude a `flag` tool and a short system-prompt section on when to use it: things outside the current task that need attention later. Claude doesn't stop to fix them; it flags them and carries on.
-- **You're asked about each one** in a band above the prompt: *"Claude noticed something. Track it?"*, with the title, the detail, the file and line, and **Add to to-do** (`a`), **Skip** (`s`) or **Add all**.
+- **Claude flags what it notices.** The mod gives Claude a `flag` tool and a short system-prompt section on when to use it: things outside the current task that need attention later. Claude doesn't fix them unless you ask.
+- **Claude stops and asks you about each one** in the question dialog: *Claude noticed: "Fix the flaky upload test" (Fails 1 in 5 runs · tests/upload.test.ts:42). Add it to your follow-ups?* You answer **Add to to-do** or **Not needed**, or type your own wording, which is kept as the title. Claude gets your answer back and carries on. If you close the dialog without answering, the item waits in a band above the prompt with **Add to to-do** (`a`), **Skip** (`s`) and **Add all**, so it isn't lost.
 - **A To-do pane** lists what you kept. Click an item to tick it off, ✕ removes it, and `/followup <text>` adds one by hand. The list is saved per project and comes back in the next session.
 - **Export to:**
 

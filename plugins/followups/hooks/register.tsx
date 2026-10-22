@@ -16,7 +16,7 @@ const TOOL = 'mcp__followups__flag'
 // The model reads this in every request: when to flag, and when not to.
 const GUIDANCE = `# Follow-ups
 While you work you may notice things outside the task at hand that need attention later: a bug or broken behavior in nearby code, a failing or flaky test you didn't cause, a missing or stale doc, a TODO/FIXME, a security or performance concern, a config that looks wrong, or a step you skipped. The person tends to lose these if they aren't written down.
-When you notice one, call ${TOOL} once for it, with a short imperative title ("Fix the flaky upload test") and a one-line detail; add \`where\` (file:line, command, URL) when there is one. The person is asked whether to keep it, so don't ask them yourself, don't fix it unless they asked, and keep going with the task. Mention it in one line in your reply. Don't flag the task you were asked to do, its normal next steps, or something you are about to fix anyway.`
+When you notice one, call ${TOOL} once for it, with a short imperative title ("Fix the flaky upload test") and a one-line detail; add \`where\` (file:line, command, URL) when there is one. The tool stops and asks the person in a dialog whether to keep it and returns their answer, so don't ask them yourself. Don't fix it unless they asked, and keep going with the task. Don't flag the task you were asked to do, its normal next steps, or something you are about to fix anyway.`
 
 // Where each export goes, and the heading its section gets there.
 const TARGETS = {
@@ -40,6 +40,33 @@ const storeKey = async ($: EngineInterface) => `items:${await $.session.root()}`
 
 async function save($: EngineInterface) {
   await $.store.set(await storeKey($), await read($, items))
+}
+
+const ADD = 'Add to to-do'
+const SKIP = 'Not needed'
+
+// Stops the turn on the engine's own question dialog and answers the tool with what the person
+// chose. Typing under "Other" keeps it under their wording. A dismissed dialog (or a run with
+// no one to ask) leaves the flag in the band above the prompt, so it is never lost.
+async function ask($: EngineInterface, flag: Flag): Promise<string> {
+  const extra = [flag.detail, flag.where].filter(Boolean).join(' · ')
+  let answer: string
+  try {
+    answer = await $.ui.ask(`Claude noticed: "${flag.title}"${extra ? ` (${extra})` : ''}. Add it to your follow-ups?`, {
+      header: 'Follow-up',
+      options: [ADD, SKIP],
+    })
+  } catch {
+    answer = ''
+  }
+  if (!answer.trim()) {
+    await update($, pending, list => [...list, flag])
+    return `The person didn't answer; "${flag.title}" waits above the prompt for them. Carry on with the task.`
+  }
+  if (answer === SKIP) return `The person skipped "${flag.title}". Don't flag or raise it again. Carry on with the task.`
+  const kept = answer === ADD ? flag : { ...flag, title: clip(answer.trim(), 120) }
+  await keep($, [kept])
+  return `The person added "${kept.title}" to their follow-ups. Don't fix it now unless they ask. Carry on with the task.`
 }
 
 async function keep($: EngineInterface, flags: Flag[]) {
@@ -88,7 +115,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.tool.register({
       name: 'flag',
-      description: 'Flag something you noticed that needs attention later (outside the current task). The person is asked whether to add it to their follow-up to-do list; you do not wait for the answer.',
+      description: 'Flag something you noticed that needs attention later (outside the current task). The person is asked in a dialog whether to add it to their follow-up to-do list; the result is their answer.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -132,8 +159,7 @@ export const register: Register = on => {
       where: clip(String(input.where ?? '').trim(), 160),
       at,
     }
-    await update($, pending, list => [...list, flag])
-    return { result: `Flagged "${title}". The person will be asked whether to add it to their follow-ups. Carry on with the task.` }
+    return { result: await ask($, flag) }
   })
 
   on('command.run', { command: 'followups' }, async $ => {

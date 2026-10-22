@@ -46,41 +46,57 @@ const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<unknown[]> 
   (await ui.findAll({ type: 'Text' })).map(t => String((t as { text?: string }).text ?? '')).join(' | ')
 
 describe('flag → ask → to-do → export', () => {
-  test('Claude flags, the person keeps one and skips one, then exports to the README', async ($, on) => {
+  test('each flag stops on a dialog: add, skip, reworded, or left for the band', async ($, on) => {
     const files: Record<string, string> = { 'README.md': '# My project\n\nIntro.\n' }
     engine(on, files)
+    // The person's answers, in order; null dismisses the dialog.
+    const answers: (string | null)[] = ['Add to to-do', 'Not needed', 'Rotate the staging key too', null]
+    const asked: string[] = []
+    // $.ui.ask is an AskUserQuestion tool call: this stands for the dialog.
+    on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+      const question = e.questions[0]!.question
+      asked.push(question)
+      const a = answers.shift()
+      if (a === null || a === undefined) throw new Error('dismissed')
+      return { result: { questions: e.questions, answers: { [question]: a } } } as never
+    })
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
 
-    const r = await $.tool.call({ tool: TOOL, title: 'Fix the flaky upload test', detail: 'Fails 1 in 5 runs', where: 'tests/upload.test.ts:42' } as never)
-    expect(String(r.result)).toMatch(/Flagged/)
-    await $.tool.call({ tool: TOOL, title: 'Rotate the leaked dev key' } as never)
+    const added = await $.tool.call({ tool: TOOL, title: 'Fix the flaky upload test', detail: 'Fails 1 in 5 runs', where: 'tests/upload.test.ts:42' } as never)
+    expect(String(added.result)).toMatch(/added "Fix the flaky upload test"/)
+    expect(asked[0]).toMatch(/Claude noticed: "Fix the flaky upload test" \(Fails 1 in 5 runs · tests\/upload\.test\.ts:42\)/)
+    const skipped = await $.tool.call({ tool: TOOL, title: 'Bump lodash' } as never)
+    expect(String(skipped.result)).toMatch(/skipped/)
+    const reworded = await $.tool.call({ tool: TOOL, title: 'Rotate the leaked dev key' } as never)
+    expect(String(reworded.result)).toMatch(/added "Rotate the staging key too"/)
+    const unanswered = await $.tool.call({ tool: TOOL, title: 'Document RATE_LIMIT' } as never)
+    expect(String(unanswered.result)).toMatch(/didn't answer/)
     const again = await $.tool.call({ tool: TOOL, title: 'fix the flaky  upload test' } as never)
     expect(String(again.result)).toMatch(/Already flagged/)
+    expect(asked.length).toBe(4)
 
+    // The unanswered one waits in the band.
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ ...BAND, surface } as never)
       const text = await texts(ui)
       expect(text).toMatch(/Track it\?/)
-      expect(text).toMatch(/Fix the flaky upload test/)
-      expect(text).toMatch(/\+1 more/)
+      expect(text).toMatch(/Document RATE_LIMIT/)
       await ui.unmount()
     }
-
     const band = await $.ui.mount({ ...BAND, surface: 'desktop' } as never)
-    await band.press({ key: 'add' })
-    expect(await texts(band)).toMatch(/Rotate the leaked dev key/)
     await band.press({ key: 'skip' })
     expect(await texts(band)).not.toMatch(/Track it/)
     await band.unmount()
 
     const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
-    expect(await texts(pane)).toMatch(/1 open · 0 done/)
+    expect(await texts(pane)).toMatch(/2 open · 0 done/)
     await pane.press({ key: 'export-readme' })
     expect(files['README.md']).toMatch(/^# My project/)
     expect(files['README.md']).toMatch(/## Known issues & follow-ups/)
     expect(files['README.md']).toMatch(/- \[ \] Fix the flaky upload test — Fails 1 in 5 runs · `tests\/upload\.test\.ts:42`/)
-    expect(files['README.md']).not.toMatch(/leaked/)
-    expect(await texts(pane)).toMatch(/Exported 1 to README\.md/)
+    expect(files['README.md']).toMatch(/- \[ \] Rotate the staging key too/)
+    expect(files['README.md']).not.toMatch(/lodash/)
+    expect(await texts(pane)).toMatch(/Exported 2 to README\.md/)
     await pane.unmount()
   })
 
