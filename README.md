@@ -117,7 +117,8 @@ While Claude works, it often notices things outside the task: a flaky test, a st
 
 - **Claude flags what it notices.** The mod gives Claude a `flag` tool and a short system-prompt section on when to use it: things outside the current task that need attention later. Claude doesn't fix them unless you ask.
 - **Claude stops and asks you about each one** in the question dialog: *Claude noticed: "Fix the flaky upload test" (Fails 1 in 5 runs · tests/upload.test.ts:42). Add it to your follow-ups?* You answer **Add to to-do** or **Not needed**, or type your own wording, which is kept as the title. Claude gets your answer back and carries on. If you close the dialog without answering, the item waits in a band above the prompt with **Add to to-do** (`a`), **Skip** (`s`) and **Add all**, so it isn't lost.
-- **A To-do pane** lists what you kept. Click an item to tick it off, ✕ removes it, and `/followup <text>` adds one by hand. The list is saved per project and comes back in the next session.
+- **A To-do pane** lists what you kept, colored by status: orange `○` open, blue `◐` in progress, green struck-through `✓` done. A red 🐞 marks bugs (Claude passes `kind: "bug"` to `flag` for broken behavior; `/followup` adds a plain task). **✓ Done** / **↺ Reopen** toggles an item, ✕ removes it, and `/followup <text>` adds one by hand. The header counts open, in progress and done. The list is saved per project and comes back in the next session (lists saved by older versions are migrated).
+- **▶ Start** (per open item, or **Start all open**) marks it in progress and submits a message to Claude with the item's id, title, detail and location, asking it to do the work. When it finishes, Claude calls the `done` tool with that id and the item turns green. `done` is idempotent, rejects unknown ids, and the prompt tells Claude not to use it for unrelated work.
 - **Export to:**
 
 | Button | Writes to | Why |
@@ -126,7 +127,7 @@ While Claude works, it often notices things outside the task: a flaky test, a st
 | Docs | `docs/FOLLOW-UPS.md` | a page of its own |
 | README | `README.md`, under *Known issues & follow-ups* | visible to everyone |
 
-The export is a markdown checklist between `<!-- followups:start -->` and `<!-- followups:end -->` markers. Exporting again replaces that section in place, and the rest of the file is left alone.
+The export is a markdown checklist (`[ ]` open, `[x]` done, in-progress items tagged `_(in progress)_`, bugs `_(bug)_`) between `<!-- followups:start -->` and `<!-- followups:end -->` markers. Exporting again replaces that section in place, and the rest of the file is left alone.
 
 Tests: `claude plugin test plugins/followups`.
 
