@@ -249,6 +249,23 @@ describe('flag → ask → to-do → export', () => {
     await pane.unmount()
   })
 
+  test('"Not needed" is saved per folder and still holds in the next session', async ($, on) => {
+    // An earlier session turned down "Bump lodash" in this folder.
+    const saved: Record<string, unknown> = { 'skipped:/repo': ['bump lodash'] }
+    engine(on, {}, saved)
+    on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+      const q = e.questions[0]!.question
+      return { result: { questions: e.questions, answers: { [q]: 'Not needed' } } } as never
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const again = await $.tool.call({ tool: TOOL, title: 'Bump  Lodash' } as never)
+    expect(String(again.result)).toMatch(/already said "Bump  Lodash" isn't needed/)
+
+    // This session's own "Not needed" joins the saved list.
+    await $.tool.call({ tool: TOOL, title: 'Rename the helper' } as never)
+    expect(saved['skipped:/repo']).toEqual(['bump lodash', 'rename the helper'])
+  })
+
   test('a new session loads the list saved in $.store for the folder', async ($, on) => {
     // The folder's earlier list is already in the store when the session starts.
     engine(on, {}, { 'items:/repo': [{ id: 'old', title: 'Carried over', detail: '', where: '', at: 0, isDone: false }] })
