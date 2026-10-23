@@ -92,13 +92,23 @@ const patchAgent = async ($: EngineInterface, id: string, fn: (a: Agent) => Agen
 const stopTicking = () => { for (const timer of timers.splice(0)) timer.cancel() }
 const isStale = (a: Agent, t: number) => a.state === 'running' && t - (a.updatedAt ?? a.startedAt) > STALE_MS
 
+// An agent stopped for silence alone that does something was still working: it runs again.
+const revive = (a: Agent): Agent => (a.isSilent ? { ...a, state: 'running', endedAt: null, isSilent: false } : a)
+
+async function reviveIfSilent($: EngineInterface, id: string) {
+  if ((await read($, agents)).some(a => a.id === id && a.isSilent)) {
+    await patchAgent($, id, revive)
+    await ensureTicking($)
+  }
+}
+
 async function ensureTicking($: EngineInterface) {
   if (timers.length) return
   timers.push($.clock.every(TICK_MS, async () => {
     const t = await $.clock.now()
     await update($, tick, () => t)
     const list = await update($, agents, l =>
-      l.some(a => isStale(a, t)) ? l.map(a => (isStale(a, t) ? { ...a, state: 'failed', endedAt: a.updatedAt ?? a.startedAt } : a)) : l)
+      l.some(a => isStale(a, t)) ? l.map(a => (isStale(a, t) ? { ...a, state: 'failed', endedAt: a.updatedAt ?? a.startedAt, isSilent: true } : a)) : l)
     if (!list.some(a => a.state === 'running')) stopTicking()
   }))
 }
@@ -214,6 +224,7 @@ export const register: Register = on => {
     if (e.agentId !== undefined) {
       const id = e.agentId
       const act = activityOf(e.tool, e as unknown as Record<string, unknown>)
+      await reviveIfSilent($, id)
       await patchAgent($, id, a => ({ ...a, steps: a.steps + 1, activity: [...a.activity, act].slice(-KEEP_LINES) }))
     }
     return next(e)
@@ -225,6 +236,7 @@ export const register: Register = on => {
     const u = r.usage
     if (e.agentId !== undefined && u) {
       const used = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens + u.output_tokens
+      await reviveIfSilent($, e.agentId)
       await patchAgent($, e.agentId, a => ({ ...a, tokens: used }))
     }
     return r
@@ -234,7 +246,7 @@ export const register: Register = on => {
     if (e.agentId !== undefined) {
       const t = await $.clock.now()
       const failed = e.reason === 'error' || e.reason === 'refusal' || e.isAborted
-      await patchAgent($, e.agentId!, a => ({ ...a, state: failed ? 'failed' : 'done', endedAt: t }))
+      await patchAgent($, e.agentId!, a => ({ ...a, state: failed ? 'failed' : 'done', endedAt: t, isSilent: false }))
     }
     return next(e)
   }).catch(($, e, next) => next(e))

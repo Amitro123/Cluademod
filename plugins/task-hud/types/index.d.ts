@@ -14,6 +14,8 @@ export type Agent = {
   endedAt: number | null
   // The last time the agent did anything; one silent for too long is shown as stopped.
   updatedAt: number
+  // Set while it is shown as stopped for that silence alone: anything it does next revives it.
+  isSilent?: boolean
   state: AgentState
   steps: number
   tokens: number

@@ -1,6 +1,6 @@
 {
   "name": "task-hud",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A to-do progress bar above the prompt and a pane of pixel creatures, one per sub-agent Claude sends out",
   "author": { "name": "Amit Rosen", "url": "https://github.com/Amitro123" },
   "repository": "https://github.com/Amitro123/claudemod",

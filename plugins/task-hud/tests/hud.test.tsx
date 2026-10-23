@@ -202,6 +202,23 @@ describe('pane edge cases', () => {
     expect(await tickOf($)).toBe(stopped)
   })
 
+  test('an agent marked stopped for being silent comes back when it does something', async ($, on) => {
+    const clock = engine(on)
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+    await $.agent.spawn(SPAWN)
+    // A long build: nothing for over ten minutes, then the agent carries on.
+    await clock.advance(10 * 60_000 + 1000)
+    await $.tool.call({ tool: 'Read', file_path: '/w/build.log', agentId: 'a1' } as never)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const text = await texts(ui)
+    expect(text).toMatch(/Running · 1/)
+    expect(text).toMatch(/Step 1 · Reading build\.log/)
+    await ui.unmount()
+    const before = await tickOf($)
+    await clock.advance(2000)
+    expect(await tickOf($)).toBeGreaterThan(before)
+  })
+
   test('the timer ends with the session', async ($, on) => {
     const clock = engine(on)
     await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
