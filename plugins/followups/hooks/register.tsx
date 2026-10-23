@@ -131,6 +131,15 @@ async function save($: EngineInterface) {
   await $.store.set(await storeKey($), await read($, items))
 }
 
+// What the person turned down, kept per project like the list, so it isn't offered again later.
+const skippedKey = async ($: EngineInterface) => `skipped:${await $.session.root()}`
+
+async function turnDown($: EngineInterface, title: string) {
+  const t = norm(title)
+  await update($, skipped, l => (l.includes(t) ? l : [...l, t]))
+  await $.store.set(await skippedKey($), await read($, skipped))
+}
+
 const ADD = 'Add to to-do'
 const SKIP = 'Not needed'
 
@@ -153,7 +162,7 @@ async function ask($: EngineInterface, flag: Flag): Promise<string> {
     return `The person didn't answer; "${flag.title}" waits above the prompt for them. Carry on with the task.`
   }
   if (answer === SKIP) {
-    await update($, skipped, l => [...l, norm(flag.title)])
+    await turnDown($, flag.title)
     return `The person skipped "${flag.title}". Don't flag or raise it again. Carry on with the task.`
   }
   const kept = answer === ADD ? flag : { ...flag, title: clip(answer.trim(), 120) }
@@ -271,6 +280,11 @@ export const register: Register = (on, options) => {
       const saved = await $.store.get(await storeKey($))
       if (Array.isArray(saved) && saved.length) await update($, items, () => migrate(saved))
     }
+    const turnedDown = await $.store.get(await skippedKey($))
+    if (Array.isArray(turnedDown)) {
+      const fromStore = turnedDown.filter((t): t is string => typeof t === 'string')
+      await update($, skipped, l => [...new Set([...fromStore, ...l])])
+    }
     return next(e)
   })
 
@@ -371,7 +385,7 @@ export const register: Register = (on, options) => {
             <Button key="add" label="Add to to-do" hotkey="a" variant="primary" onPress={() => keep($, [flag])} />
             <Button key="skip" label="Skip" hotkey="s" onPress={async () => {
               await update($, pending, l => l.filter(f => f.id !== flag.id))
-              await update($, skipped, l => [...l, norm(flag.title)])
+              await turnDown($, flag.title)
             }} />
             {more ? <Button key="add-all" label={`Add all ${list.length}`} onPress={async () => keep($, await read($, pending))} /> : null}
           </Box>
