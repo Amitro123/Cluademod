@@ -20,6 +20,9 @@ const TICK_MS = 500
 // Activity lines kept per agent, and agents kept in the pane.
 const KEEP_LINES = 3
 const KEEP_AGENTS = 24
+// An agent that has done nothing for this long is shown as stopped, so one whose turn never
+// completes (a crash, an abort the engine did not report) cannot keep the timer running.
+const STALE_MS = 10 * 60_000
 
 const timers: { cancel: () => void }[] = []
 // The prompt that started the work, named on the band once a to-do list shows up.
@@ -28,7 +31,7 @@ let lastPrompt = ''
 // ---------- text ----------
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
-const base = (p: unknown) => String(p ?? '').split('/').filter(Boolean).pop() ?? ''
+const base = (p: unknown) => String(p ?? '').split(/[\\/]/).filter(Boolean).pop() ?? ''
 const firstLine = (s: string) => s.trim().split('\n')[0]?.trim() ?? ''
 
 const tok = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n}`)
@@ -81,35 +84,47 @@ const progressOf = (a: Agent) => (a.state !== 'running' ? 1 : Math.min(0.9, a.st
 
 // ---------- updates ----------
 
-const patchAgent = ($: EngineInterface, id: string, fn: (a: Agent) => Agent) =>
-  update($, agents, list => list.map(a => (a.id === id ? fn(a) : a)))
+const patchAgent = async ($: EngineInterface, id: string, fn: (a: Agent) => Agent) => {
+  const t = await $.clock.now()
+  await update($, agents, list => list.map(a => (a.id === id ? { ...fn(a), updatedAt: t } : a)))
+}
+
+const stopTicking = () => { for (const timer of timers.splice(0)) timer.cancel() }
+const isStale = (a: Agent, t: number) => a.state === 'running' && t - (a.updatedAt ?? a.startedAt) > STALE_MS
 
 async function ensureTicking($: EngineInterface) {
   if (timers.length) return
   timers.push($.clock.every(TICK_MS, async () => {
     const t = await $.clock.now()
     await update($, tick, () => t)
-    if (!(await read($, agents)).some(a => a.state === 'running')) {
-      for (const timer of timers.splice(0)) timer.cancel()
-    }
+    const list = await update($, agents, l =>
+      l.some(a => isStale(a, t)) ? l.map(a => (isStale(a, t) ? { ...a, state: 'failed', endedAt: a.updatedAt ?? a.startedAt } : a)) : l)
+    if (!list.some(a => a.state === 'running')) stopTicking()
   }))
 }
 
-async function setTodos($: EngineInterface, next: Todo[]) {
+// `next` is the new list, or a change to the current one (applied atomically, so two calls at once both land).
+async function setTodos($: EngineInterface, next: Todo[] | ((list: Todo[]) => Todo[])) {
   const before = await read($, todos)
-  if (!before.length && next.length) await update($, title, () => clip(firstLine(lastPrompt), 48))
-  await update($, todos, () => next)
+  const after = await update($, todos, list => (typeof next === 'function' ? next(list) : next))
+  if (!before.length && after.length) await update($, title, () => clip(firstLine(lastPrompt), 48))
 }
 
 const isStatus = (s: unknown): s is TodoStatus => s === 'pending' || s === 'in_progress' || s === 'completed'
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    for (const timer of timers.splice(0)) timer.cancel()
+    stopTicking()
     await $.command.register({ name: 'task-hud', description: 'Show the sub-agents pane' })
     if ((await read($, agents)).some(a => a.state === 'running')) await ensureTicking($)
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
+
+  // The session is over: nothing should keep redrawing.
+  on('session.end', async ($, e, next) => {
+    stopTicking()
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'task-hud' }, async $ => {
     await $.ui.open({ id: PANE, title: PANE_TITLE })
@@ -123,7 +138,7 @@ export const register: Register = on => {
     const list = await read($, todos)
     if (list.length && list.every(t => t.status === 'completed')) await update($, todos, () => [])
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
 
   // ---------- the to-do list ----------
 
@@ -139,8 +154,7 @@ export const register: Register = on => {
     const ran = await next(e)
     const id = (ran.result as { task?: { id?: string } } | undefined)?.task?.id
     if (id) {
-      const list = await read($, todos)
-      await setTodos($, [...list, { id, subject: e.subject, activeForm: e.activeForm ?? e.subject, status: 'pending' }])
+      await setTodos($, list => [...list, { id, subject: e.subject, activeForm: e.activeForm ?? e.subject, status: 'pending' }])
     }
     return ran
   }).catch(($, e, next) => next(e))
@@ -167,7 +181,10 @@ export const register: Register = on => {
   on('agent.spawn', async ($, e, next) => {
     const ran = await next(e)
     if (!ran.agentId || e.resume) {
-      if (ran.agentId) await patchAgent($, ran.agentId, a => ({ ...a, state: 'running', endedAt: null }))
+      if (ran.agentId) {
+        await patchAgent($, ran.agentId, a => ({ ...a, state: 'running', endedAt: null }))
+        await ensureTicking($)
+      }
       return ran
     }
     const t = await $.clock.now()
@@ -180,6 +197,7 @@ export const register: Register = on => {
       slot: list.length ? Math.max(...list.map(a => a.slot)) + 1 : 0,
       startedAt: t,
       endedAt: null,
+      updatedAt: t,
       state: 'running',
       steps: 0,
       tokens: 0,
@@ -210,7 +228,7 @@ export const register: Register = on => {
       await patchAgent($, e.agentId, a => ({ ...a, tokens: used }))
     }
     return r
-  })
+  }).catch(async function* ($, e, next) { return yield* next(e) })
 
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) {
@@ -219,7 +237,7 @@ export const register: Register = on => {
       await patchAgent($, e.agentId!, a => ({ ...a, state: failed ? 'failed' : 'done', endedAt: t }))
     }
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
 
   // ---------- the band: the to-do bar ----------
 
@@ -304,7 +322,7 @@ export const register: Register = on => {
               <Text dimColor>{`${tok(a.tokens)} tokens · ${elapsed(a)}`}</Text>
             </Box>
             <Text color={a.state === 'running' ? undefined : color} bold={a.state !== 'running'} wrap="truncate-end">{status}</Text>
-            {lines.map(l => <Text dimColor wrap="truncate-end">{`  ${l}`}</Text>)}
+            {lines.map((l, i) => <Text key={`${a.id}-${i}`} dimColor wrap="truncate-end">{`  ${l}`}</Text>)}
             {Svg
               ? <Svg source={progressLineSvg(progressOf(a), color)} alt={`${Math.round(progressOf(a) * 100)}%`} width={LINE.width} height={LINE.height} />
               : <Text color={color}>{barText(progressOf(a), 20)}</Text>}

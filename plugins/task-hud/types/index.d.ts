@@ -12,6 +12,8 @@ export type Agent = {
   slot: number
   startedAt: number
   endedAt: number | null
+  // The last time the agent did anything; one silent for too long is shown as stopped.
+  updatedAt: number
   state: AgentState
   steps: number
   tokens: number
