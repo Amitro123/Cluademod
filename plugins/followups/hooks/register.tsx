@@ -188,8 +188,11 @@ export const register: Register = on => {
     })
     await $.command.register({ name: 'followups', description: 'Show the follow-up to-do list' })
     await $.command.register({ name: 'followup', description: 'Add a follow-up to the to-do list', argumentHint: '<what to do>' })
+    // $.state outlives a reload, so a list an older version held is migrated in place too.
+    const held = await read($, items)
+    if (held.some(i => !isStatus((i as { status?: unknown }).status))) await update($, items, l => migrate(l))
     // Items kept in this folder before carry over to a new session.
-    if (!(await read($, items)).length) {
+    if (!held.length) {
       const saved = await $.store.get(await storeKey($))
       if (Array.isArray(saved) && saved.length) await update($, items, () => migrate(saved))
     }

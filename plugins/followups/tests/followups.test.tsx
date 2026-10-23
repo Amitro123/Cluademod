@@ -227,6 +227,27 @@ describe('flag → ask → to-do → export', () => {
     await pane.unmount()
   })
 
+  test('a reload keeps the session state, so items held there before statuses are migrated too', async ($, on) => {
+    engine(on, {})
+    // $.state outlives a reload of the mod: an older version left this item with isDone and no status.
+    // The test stands for the host here: it holds that one value and takes the mod's writes.
+    let held: unknown = [{ id: 'old', title: 'Held in state', detail: '', where: '', at: 0, isDone: true }]
+    let version = 1
+    on('state.get', (_, e) => ((e as { key: string }).key === 'items' ? { value: { value: held, version } } : { value: { value: undefined, version: 0 } }) as never)
+    on('state.set', (_, e) => {
+      const w = e as { key: string; value: unknown }
+      if (w.key === 'items') {
+        held = w.value
+        version += 1
+      }
+      return { value: { isSet: true, version } } as never
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/0 open · 0 in progress · 1 done/)
+    await pane.unmount()
+  })
+
   test('a new session loads the list saved in $.store for the folder', async ($, on) => {
     // The folder's earlier list is already in the store when the session starts.
     engine(on, {}, { 'items:/repo': [{ id: 'old', title: 'Carried over', detail: '', where: '', at: 0, isDone: false }] })
