@@ -21,17 +21,12 @@ const PANE = {
 // The engine beneath: a clock, a store, a folder with a README, and the side calls.
 function engine(on: On, files: Record<string, string>, saved: Record<string, unknown> = {}) {
   mock.clock(on, { now: Date.UTC(2026, 9, 22, 12) })
-  // mock.store keeps its entries private, so this is the same four calls over `saved`, which the test can read.
+  // mock.store keeps its entries private, so the two store calls the mod makes run over `saved`, which the test can read.
   on('store.get', (_, e) => ({ value: saved[e.key] }) as never)
   on('store.set', (_, e) => {
     saved[e.key] = e.value
     return { value: undefined } as never
   })
-  on('store.delete', (_, e) => {
-    delete saved[e.key]
-    return { value: undefined } as never
-  })
-  on('store.keys', () => ({ value: Object.keys(saved) }) as never)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: '/repo' }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__followups__${e.name}` } }) as never)
