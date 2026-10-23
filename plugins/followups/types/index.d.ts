@@ -1,5 +1,7 @@
-export type Flag = { id: string; title: string; detail: string; where: string; at: number }
-export type Item = Flag & { isDone: boolean }
+export type Status = 'open' | 'in_progress' | 'done'
+export type Kind = 'bug' | 'task'
+export type Flag = { id: string; title: string; detail: string; where: string; at: number; kind?: Kind }
+export type Item = Flag & { status: Status }
 
 declare module 'claude-code' {
   interface PluginState {

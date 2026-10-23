@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Flag, Item } from '../types'
+import type { Flag, Item, Status } from '../types'
 
 // ---------- state ----------
 
@@ -12,11 +12,18 @@ const exported = atom({ plugin: 'followups', key: 'exported' } as const, '')
 const PANE = 'followups'
 const PANE_TITLE = 'To-do'
 const TOOL = 'mcp__followups__flag'
+const DONE_TOOL = 'mcp__followups__done'
+
+// One accent for the header; status colors for the rows (all read on light and dark themes).
+const ACCENT = '#4f7cff'
+const COLOR = { open: '#e08a1e', in_progress: '#2a9fd6', done: '#1f9d6b', bug: '#e5484d' } as const
+const MARK = { open: '○', in_progress: '◐', done: '✓' } as const
 
 // The model reads this in every request: when to flag, and when not to.
 const GUIDANCE = `# Follow-ups
 While you work you may notice things outside the task at hand that need attention later: a bug or broken behavior in nearby code, a failing or flaky test you didn't cause, a missing or stale doc, a TODO/FIXME, a security or performance concern, a config that looks wrong, or a step you skipped. The person tends to lose these if they aren't written down.
-When you notice one, call ${TOOL} once for it, with a short imperative title ("Fix the flaky upload test") and a one-line detail; add \`where\` (file:line, command, URL) when there is one. The tool stops and asks the person in a dialog whether to keep it and returns their answer, so don't ask them yourself. Don't fix it unless they asked, and keep going with the task. Don't flag the task you were asked to do, its normal next steps, or something you are about to fix anyway.`
+When you notice one, call ${TOOL} once for it, with a short imperative title ("Fix the flaky upload test") and a one-line detail; add \`where\` (file:line, command, URL) when there is one. Set kind to "bug" when the thing is broken behavior (a bug, a failing test, a crash, wrong output); leave kind out for ordinary tasks. The tool stops and asks the person in a dialog whether to keep it and returns their answer, so don't ask them yourself. Don't fix it unless they asked, and keep going with the task. Don't flag the task you were asked to do, its normal next steps, or something you are about to fix anyway.
+When a message says it started a to-do item and gives its id, do that work, and when it is finished call ${DONE_TOOL} with that id (and a short note of what you did). Call ${DONE_TOOL} only for items started that way; never for unrelated work, and not before the work is actually done.`
 
 // Where each export goes, and the heading its section gets there.
 const TARGETS = {
@@ -33,6 +40,18 @@ const END = '<!-- followups:end -->'
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
 const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ')
+export const isStatus = (s: unknown): s is Status => s === 'open' || s === 'in_progress' || s === 'done'
+
+// Items saved before statuses existed carry isDone; map them to a status.
+export function migrate(saved: unknown): Item[] {
+  if (!Array.isArray(saved)) return []
+  return saved.map((raw: Record<string, unknown>) => {
+    const { isDone, ...rest } = raw
+    const status: Status = isStatus(raw.status) ? raw.status : isDone === true ? 'done' : 'open'
+    return { ...rest, status, kind: raw.kind === 'bug' ? 'bug' : 'task' } as Item
+  })
+}
+
 const newId = (at: number) => `${at.toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 
 // Exports and the saved list belong to the project, so both key on its root.
@@ -52,7 +71,7 @@ async function ask($: EngineInterface, flag: Flag): Promise<string> {
   const extra = [flag.detail, flag.where].filter(Boolean).join(' · ')
   let answer: string
   try {
-    answer = await $.ui.ask(`Claude noticed: "${flag.title}"${extra ? ` (${extra})` : ''}. Add it to your follow-ups?`, {
+    answer = await $.ui.ask(`Claude noticed${flag.kind === 'bug' ? ' a bug' : ''}: "${flag.title}"${extra ? ` (${extra})` : ''}. Add it to your follow-ups?`, {
       header: 'Follow-up',
       options: [ADD, SKIP],
     })
@@ -73,9 +92,32 @@ async function keep($: EngineInterface, flags: Flag[]) {
   if (!flags.length) return
   const ids = new Set(flags.map(f => f.id))
   await update($, pending, list => list.filter(f => !ids.has(f.id)))
-  await update($, items, list => [...list, ...flags.map(f => ({ ...f, isDone: false }))])
+  await update($, items, list => [...list, ...flags.map(f => ({ ...f, kind: f.kind ?? 'task', status: 'open' as const }))])
   await save($)
   void $.ui.open({ id: PANE, title: PANE_TITLE })
+}
+
+// The message that starts an item: names it, carries the id, and says how to report back.
+export function startPrompt(list: Item[]): string {
+  const one = (i: Item) =>
+    `- id ${i.id}: ${i.title}${i.kind === 'bug' ? ' (bug)' : ''}${i.detail ? ` — ${i.detail}` : ''}${i.where ? ` [where: ${i.where}]` : ''}`
+  return [
+    list.length === 1 ? 'Start this item from my to-do list:' : `Start these ${list.length} items from my to-do list, one after the other:`,
+    ...list.map(one),
+    `Do the work. When an item is finished, call ${DONE_TOOL} with its id (and a short note). Don't call it for anything else.`,
+  ].join('\n')
+}
+
+async function setStatus($: EngineInterface, ids: Set<string>, status: Status) {
+  await update($, items, l => l.map(i => (ids.has(i.id) ? { ...i, status } : i)))
+  await save($)
+}
+
+async function start($: EngineInterface, which: Item[]) {
+  if (!which.length) return
+  await setStatus($, new Set(which.map(i => i.id)), 'in_progress')
+  // A turn of its own once the session is idle; it may not resolve until then, so not awaited.
+  $.prompt.submit({ text: startPrompt(which) }).catch(() => {})
 }
 
 // The markdown an export writes: the items as a checklist between two markers.
@@ -83,7 +125,8 @@ export function section(target: Target, list: Item[]): string {
   const t = TARGETS[target]
   const lines = list.map(i => {
     const extra = [i.detail, i.where && `\`${i.where}\``].filter(Boolean).join(' · ')
-    return `- [${i.isDone ? 'x' : ' '}] ${i.title}${extra ? ` — ${extra}` : ''}`
+    const tags = `${i.kind === 'bug' ? ' _(bug)_' : ''}${i.status === 'in_progress' ? ' _(in progress)_' : ''}`
+    return `- [${i.status === 'done' ? 'x' : ' '}] ${i.title}${tags}${extra ? ` — ${extra}` : ''}`
   })
   return [START, t.heading, '', ...(t.note ? [`_${t.note}_`, ''] : []), ...lines, END].join('\n')
 }
@@ -124,17 +167,34 @@ export const register: Register = on => {
           title: { type: 'string', description: 'Short imperative title, e.g. "Fix the flaky upload test"' },
           detail: { type: 'string', description: 'One line: what is wrong and why it matters' },
           where: { type: 'string', description: 'Optional file:line, command or URL' },
+          kind: { type: 'string', enum: ['bug', 'task'], description: 'bug for broken behavior; task (default) for anything else' },
         },
         required: ['title'],
       },
       isDeferred: false,
     })
+    await $.tool.register({
+      name: 'done',
+      description: 'Mark a to-do item finished. Call it when you finish an item the person started from their to-do list (the message gave its id), never for unrelated work.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'The item id from the start message' },
+          note: { type: 'string', description: 'Optional: what you did' },
+        },
+        required: ['id'],
+      },
+      isDeferred: false,
+    })
     await $.command.register({ name: 'followups', description: 'Show the follow-up to-do list' })
     await $.command.register({ name: 'followup', description: 'Add a follow-up to the to-do list', argumentHint: '<what to do>' })
+    // $.state outlives a reload, so a list an older version held is migrated in place too.
+    const held = await read($, items)
+    if (held.some(i => !isStatus((i as { status?: unknown }).status))) await update($, items, l => migrate(l))
     // Items kept in this folder before carry over to a new session.
-    if (!(await read($, items)).length) {
+    if (!held.length) {
       const saved = await $.store.get(await storeKey($))
-      if (Array.isArray(saved) && saved.length) await update($, items, () => saved as Item[])
+      if (Array.isArray(saved) && saved.length) await update($, items, () => migrate(saved))
     }
     return next(e)
   })
@@ -146,7 +206,7 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: TOOL }, async ($, e) => {
-    const input = e as unknown as { title?: unknown; detail?: unknown; where?: unknown }
+    const input = e as unknown as { title?: unknown; detail?: unknown; where?: unknown; kind?: unknown }
     const title = clip(String(input.title ?? '').trim(), 120)
     if (!title) return { deny: 'A follow-up needs a title.' }
     const known = [...(await read($, pending)), ...(await read($, items))]
@@ -156,12 +216,26 @@ export const register: Register = on => {
     const at = await $.clock.now()
     const flag: Flag = {
       id: newId(at),
+      kind: input.kind === 'bug' ? 'bug' : 'task',
       title,
       detail: clip(String(input.detail ?? '').trim(), 300),
       where: clip(String(input.where ?? '').trim(), 160),
       at,
     }
     return { result: await ask($, flag) }
+  })
+
+  on('tool.call', { tool: DONE_TOOL }, async ($, e) => {
+    const input = e as unknown as { id?: unknown; note?: unknown }
+    const ref = String(input.id ?? '').trim()
+    const list = await read($, items)
+    const item = list.find(i => i.id === ref) ?? list.find(i => ref && norm(i.title) === norm(ref))
+    if (!item) return { deny: `No to-do item with id "${ref}". Use the id from the start message.` }
+    if (item.status === 'done') return { result: `"${item.title}" is already done. Nothing to change.` }
+    await setStatus($, new Set([item.id]), 'done')
+    const note = clip(String(input.note ?? '').trim(), 200)
+    $.ui.toast(`Done: ${item.title}`)
+    return { result: `Marked "${item.title}" done${note ? ` (${note})` : ''}.` }
   })
 
   on('command.run', { command: 'followups' }, async $ => {
@@ -181,7 +255,7 @@ export const register: Register = on => {
       return { text: `Added to follow-ups: ${waiting.title}` }
     }
     const at = await $.clock.now()
-    await keep($, [{ id: newId(at), title, detail: '', where: '', at }])
+    await keep($, [{ id: newId(at), kind: 'task', title, detail: '', where: '', at }])
     return { text: `Added to follow-ups: ${title}` }
   })
 
@@ -221,9 +295,10 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const list = await read($, items)
     const note = await read($, exported)
-    const open = list.filter(i => !i.isDone).length
+    const count = (st: Status) => list.filter(i => i.status === st).length
+    const [open, doing, done] = [count('open'), count('in_progress'), count('done')]
     const toggle = (id: string) => async () => {
-      await update($, items, l => l.map(i => (i.id === id ? { ...i, isDone: !i.isDone } : i)))
+      await update($, items, l => l.map(i => (i.id === id ? { ...i, status: i.status === 'done' ? ('open' as const) : ('done' as const) } : i)))
       await save($)
     }
     const remove = (id: string) => async () => {
@@ -234,18 +309,27 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="row" gap={2}>
-          <Text bold>☑ To-do</Text>
-          <Text dimColor>{list.length ? `${open} open · ${list.length - open} done` : ''}</Text>
+          <Text bold color={ACCENT}>☑ To-do</Text>
+          <Text dimColor>{list.length ? `${open} open · ${doing} in progress · ${done} done` : ''}</Text>
+          {open > 1 ? <Button key="start-all" label="▶ Start all open" plain onPress={() => start($, list.filter(i => i.status === 'open'))} /> : null}
         </Box>
         {list.length ? (
           <Box flexDirection="column">
             {list.map(i => (
               <Box key={`row-${i.id}`} flexDirection="column">
                 <Box flexDirection="row" justifyContent="space-between" gap={1}>
-                  <Button key={`t-${i.id}`} label={`${i.isDone ? '✓' : '○'} ${i.title}`} plain onPress={toggle(i.id)} />
-                  <Button key={`x-${i.id}`} label="✕" plain onPress={remove(i.id)} />
+                  <Box flexDirection="row" gap={1}>
+                    {i.kind === 'bug' ? <Text color={COLOR.bug} bold>🐞</Text> : null}
+                    <Text color={COLOR[i.status]}>{MARK[i.status]}</Text>
+                    <Text color={COLOR[i.status]} dimColor={i.status === 'done'} strikethrough={i.status === 'done'} wrap="truncate-end">{i.title}</Text>
+                  </Box>
+                  <Box flexDirection="row" gap={1}>
+                    {i.status === 'open' ? <Button key={`s-${i.id}`} label="▶ Start" plain onPress={() => start($, [i])} /> : null}
+                    <Button key={`t-${i.id}`} label={i.status === 'done' ? '↺ Reopen' : '✓ Done'} plain onPress={toggle(i.id)} />
+                    <Button key={`x-${i.id}`} label="✕" plain onPress={remove(i.id)} />
+                  </Box>
                 </Box>
-                {!i.isDone && (i.detail || i.where) ? (
+                {i.status !== 'done' && (i.detail || i.where) ? (
                   <Text dimColor wrap="truncate-end">{`   ${[i.detail, i.where].filter(Boolean).join(' · ')}`}</Text>
                 ) : null}
               </Box>
@@ -260,9 +344,9 @@ export const register: Register = on => {
             {(Object.keys(TARGETS) as Target[]).map(t => (
               <Button key={`export-${t}`} label={TARGETS[t].label} onPress={() => exportTo($, t)} />
             ))}
-            {list.some(i => i.isDone) ? (
+            {list.some(i => i.status === 'done') ? (
               <Button key="clear-done" label="Clear done" plain onPress={async () => {
-                await update($, items, l => l.filter(i => !i.isDone))
+                await update($, items, l => l.filter(i => i.status !== 'done'))
                 await save($)
               }} />
             ) : null}

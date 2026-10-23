@@ -1,9 +1,10 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { section, upsert } from '../hooks/register'
+import { migrate, section, startPrompt, upsert } from '../hooks/register'
 
 const TOOL = 'mcp__followups__flag'
+const DONE = 'mcp__followups__done'
 
 const BAND = {
   plugin: 'followups',
@@ -95,7 +96,7 @@ describe('flag → ask → to-do → export', () => {
     await band.unmount()
 
     const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
-    expect(await texts(pane)).toMatch(/2 open · 0 done/)
+    expect(await texts(pane)).toMatch(/2 open · 0 in progress · 0 done/)
     await pane.press({ key: 'export-readme' })
     expect(files['README.md']).toMatch(/^# My project/)
     expect(files['README.md']).toMatch(/## Known issues & follow-ups/)
@@ -118,7 +119,7 @@ describe('flag → ask → to-do → export', () => {
     const ids = (await pane.findAll({ type: 'Button' } as never)).map(b => String((b as { key?: string }).key))
     const toggle = ids.find(k => k.startsWith('t-'))!
     await pane.press({ key: toggle })
-    expect(await texts(pane)).toMatch(/0 open · 1 done/)
+    expect(await texts(pane)).toMatch(/0 open · 0 in progress · 1 done/)
     await pane.press({ key: 'export-memory' })
     expect(files['CLAUDE.md']!.match(/followups:start/g)?.length).toBe(1)
     expect(files['CLAUDE.md']).toMatch(/- \[x\] Write the migration guide/)
@@ -157,7 +158,7 @@ describe('flag → ask → to-do → export', () => {
     await band.unmount()
 
     const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
-    expect(await texts(pane)).toMatch(/2 open · 0 done/)
+    expect(await texts(pane)).toMatch(/2 open · 0 in progress · 0 done/)
     await pane.unmount()
   })
 
@@ -172,14 +173,14 @@ describe('flag → ask → to-do → export', () => {
 
     // ✕ on the first row.
     await pane.press({ key: (await keys()).find(k => k.startsWith('x-'))! })
-    expect(await texts(pane)).toMatch(/2 open · 0 done/)
+    expect(await texts(pane)).toMatch(/2 open · 0 in progress · 0 done/)
     expect(await texts(pane)).not.toMatch(/One/)
 
     // Tick one off, then Clear done removes only it.
     await pane.press({ key: (await keys()).find(k => k.startsWith('t-'))! })
-    expect(await texts(pane)).toMatch(/1 open · 1 done/)
+    expect(await texts(pane)).toMatch(/1 open · 0 in progress · 1 done/)
     await pane.press({ key: 'clear-done' })
-    expect(await texts(pane)).toMatch(/1 open · 0 done/)
+    expect(await texts(pane)).toMatch(/1 open · 0 in progress · 0 done/)
     expect(await keys()).not.toContain('clear-done')
     await pane.unmount()
   })
@@ -197,7 +198,7 @@ describe('flag → ask → to-do → export', () => {
     const dup = await $.command.run({ command: 'followup', args: '  same   TITLE ' } as never)
     expect(String(dup.text)).toBe('Already in your follow-ups: "Same title".')
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
-    expect(await texts(pane)).toMatch(/1 open · 0 done/)
+    expect(await texts(pane)).toMatch(/1 open · 0 in progress · 0 done/)
     await pane.unmount()
     expect((writes['items:/repo'] as unknown[]).length).toBe(1)
 
@@ -221,8 +222,29 @@ describe('flag → ask → to-do → export', () => {
     await band.unmount()
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
     const text = await texts(pane)
-    expect(text).toMatch(/1 open · 0 done/)
+    expect(text).toMatch(/1 open · 0 in progress · 0 done/)
     expect(text).toMatch(/Fails 1 in 5 runs/)
+    await pane.unmount()
+  })
+
+  test('a reload keeps the session state, so items held there before statuses are migrated too', async ($, on) => {
+    engine(on, {})
+    // $.state outlives a reload of the mod: an older version left this item with isDone and no status.
+    // The test stands for the host here: it holds that one value and takes the mod's writes.
+    let held: unknown = [{ id: 'old', title: 'Held in state', detail: '', where: '', at: 0, isDone: true }]
+    let version = 1
+    on('state.get', (_, e) => ((e as { key: string }).key === 'items' ? { value: { value: held, version } } : { value: { value: undefined, version: 0 } }) as never)
+    on('state.set', (_, e) => {
+      const w = e as { key: string; value: unknown }
+      if (w.key === 'items') {
+        held = w.value
+        version += 1
+      }
+      return { value: { isSet: true, version } } as never
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/0 open · 0 in progress · 1 done/)
     await pane.unmount()
   })
 
@@ -231,9 +253,8 @@ describe('flag → ask → to-do → export', () => {
     engine(on, {}, { 'items:/repo': [{ id: 'old', title: 'Carried over', detail: '', where: '', at: 0, isDone: false }] })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
-    expect(await texts(pane)).toMatch(/1 open · 0 done/)
-    const labels = (await pane.findAll({ type: 'Button' } as never)).map(b => String((b as { text?: string }).text ?? ''))
-    expect(labels).toContain('○ Carried over')
+    expect(await texts(pane)).toMatch(/1 open · 0 in progress · 0 done/)
+    expect(await texts(pane)).toMatch(/○ \| Carried over/)
     await pane.unmount()
   })
 
@@ -242,13 +263,13 @@ describe('flag → ask → to-do → export', () => {
     engine(on, {}, writes)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     await $.command.run({ command: 'followup', args: 'Added by hand' } as never)
-    const stored = async () => writes['items:/repo'] as { title: string; isDone: boolean }[]
+    const stored = async () => writes['items:/repo'] as { title: string; status: string }[]
     expect((await stored()).map(i => i.title)).toEqual(['Carried over', 'Added by hand'])
 
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
     const keys = async () => (await pane.findAll({ type: 'Button' } as never)).map(b => String((b as { key?: string }).key))
     await pane.press({ key: 't-old' })
-    expect((await stored()).find(i => i.title === 'Carried over')?.isDone).toBe(true)
+    expect((await stored()).find(i => i.title === 'Carried over')?.status).toBe('done')
     await pane.press({ key: 'clear-done' })
     expect((await stored()).map(i => i.title)).toEqual(['Added by hand'])
     await pane.press({ key: (await keys()).find(k => k.startsWith('x-'))! })
@@ -265,17 +286,125 @@ describe('flag → ask → to-do → export', () => {
   })
 })
 
+describe('statuses, bugs, start and done', () => {
+  const find = async (ui: { findAll: (q: never) => Promise<unknown[]> }, type: string) => ui.findAll({ type } as never) as Promise<{ key?: string; text?: string; props?: { color?: string; strikethrough?: boolean } }[]>
+
+  test('flag kind bug shows a red marker; ordinary flags do not', async ($, on) => {
+    engine(on, {})
+    on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+      const question = e.questions[0]!.question
+      return { result: { questions: e.questions, answers: { [question]: 'Add to to-do' } } } as never
+    })
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await $.tool.call({ tool: TOOL, title: 'Crash on empty input', kind: 'bug' } as never)
+    await $.tool.call({ tool: TOOL, title: 'Write docs' } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+    const bugs = (await find(pane, 'Text')).filter(t => t.text === '🐞')
+    expect(bugs.length).toBe(1)
+    expect(bugs[0]!.props?.color).toBe('#e5484d')
+    expect(await texts(pane)).toMatch(/2 open · 0 in progress · 0 done/)
+    await pane.unmount()
+  })
+
+  test('Start sets in progress, submits a prompt naming the item and id, and done completes it', async ($, on) => {
+    const files: Record<string, string> = {}
+    engine(on, files)
+    const sent: string[] = []
+    on('prompt.submit', (_, e) => {
+      sent.push(e.text)
+      return { text: e.text }
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'followup', args: 'Rotate the key' } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const keys = async () => (await find(pane, 'Button')).map(b => String(b.key))
+    const sKey = (await keys()).find(k => k.startsWith('s-'))!
+    const id = sKey.slice(2)
+    await pane.press({ key: sKey })
+    expect(sent.length).toBe(1)
+    expect(sent[0]).toContain(id)
+    expect(sent[0]).toContain('Rotate the key')
+    expect(sent[0]).toContain(DONE)
+    expect(await texts(pane)).toMatch(/0 open · 1 in progress · 0 done/)
+    expect(await keys()).not.toContain(sKey)
+    await pane.press({ key: 'export-docs' })
+    expect(files['docs/FOLLOW-UPS.md']).toMatch(/- \[ \] Rotate the key _\(in progress\)_/)
+
+    const unknown = await $.tool.call({ tool: DONE, id: 'nope' } as never)
+    expect(String(unknown.deny ?? unknown.result)).toMatch(/No to-do item with id "nope"/)
+    const ok = await $.tool.call({ tool: DONE, id, note: 'rotated' } as never)
+    expect(String(ok.result)).toMatch(/Marked "Rotate the key" done \(rotated\)/)
+    const again = await $.tool.call({ tool: DONE, id } as never)
+    expect(String(again.result)).toMatch(/already done/)
+    expect(await texts(pane)).toMatch(/0 open · 0 in progress · 1 done/)
+    const title = (await find(pane, 'Text')).find(t => t.text === 'Rotate the key')!
+    expect(title.props?.color).toBe('#1f9d6b')
+    expect(title.props?.strikethrough).toBe(true)
+    await pane.unmount()
+  })
+
+  test('Start all open submits one prompt listing every open item', async ($, on) => {
+    engine(on, {})
+    const sent: string[] = []
+    on('prompt.submit', (_, e) => {
+      sent.push(e.text)
+      return { text: e.text }
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    for (const args of ['One', 'Two']) await $.command.run({ command: 'followup', args } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    await pane.press({ key: 'start-all' })
+    expect(sent.length).toBe(1)
+    expect(sent[0]).toMatch(/One[\s\S]*Two/)
+    expect(await texts(pane)).toMatch(/0 open · 2 in progress · 0 done/)
+    await pane.unmount()
+  })
+
+  test('saved items with isDone migrate to a status on load', async ($, on) => {
+    engine(on, {}, {
+      'items:/repo': [
+        { id: 'a', title: 'Was open', detail: '', where: '', at: 0, isDone: false },
+        { id: 'b', title: 'Was done', detail: '', where: '', at: 0, isDone: true },
+      ],
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/1 open · 0 in progress · 1 done/)
+    await pane.unmount()
+    expect(migrate([{ id: 'a', isDone: true }])[0]).toMatchObject({ status: 'done', kind: 'task' })
+  })
+
+  test('the model is told about kind and done', async ($, on) => {
+    on('prompt.compose', () => ({ sections: [] }))
+    const r = await $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: [], tools: [], outputStyle: null, traits: [] } as never)
+    const text = r.sections[r.sections.length - 1]!.text
+    expect(text).toMatch(/kind to "bug"/)
+    expect(text).toMatch(/mcp__followups__done/)
+  })
+
+  test('export marks bugs and in-progress items; startPrompt names where', () => {
+    const base = { detail: '', where: '', at: 0 }
+    const out = section('docs', [
+      { ...base, id: '1', title: 'A', status: 'in_progress', kind: 'bug' },
+      { ...base, id: '2', title: 'B', status: 'done' },
+    ])
+    expect(out).toContain('- [ ] A _(bug)_ _(in progress)_')
+    expect(out).toContain('- [x] B')
+    expect(startPrompt([{ ...base, id: 'z9', title: 'T', where: 'a.ts:1', status: 'open' }])).toMatch(/id z9: T \[where: a\.ts:1\]/)
+  })
+})
+
 describe('export text', () => {
   test('an export is appended once, then replaced in place', () => {
-    const one = section('docs', [{ id: '1', title: 'A', detail: '', where: '', at: 0, isDone: false }])
+    const one = section('docs', [{ id: '1', title: 'A', detail: '', where: '', at: 0, status: 'open' as const }])
     const first = upsert('# Doc\n', one)
     expect(first).toBe(`# Doc\n\n${one}\n`)
-    const two = section('docs', [{ id: '1', title: 'A', detail: '', where: '', at: 0, isDone: true }])
+    const two = section('docs', [{ id: '1', title: 'A', detail: '', where: '', at: 0, status: 'done' as const }])
     expect(upsert(`${first}\nAfter.\n`, two)).toBe(`# Doc\n\n${two}\n\nAfter.\n`)
   })
 
   const END = '<!-- followups:end -->'
-  const block = (title: string) => section('docs', [{ id: '1', title, detail: '', where: '', at: 0, isDone: false }])
+  const block = (title: string) => section('docs', [{ id: '1', title, detail: '', where: '', at: 0, status: 'open' as const }])
   const count = (s: string, m: string) => s.split(m).length - 1
 
   test('a stray END before START is not paired: the block is appended, not spliced', () => {
