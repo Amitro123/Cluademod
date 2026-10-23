@@ -32,7 +32,8 @@ When a message says it started a to-do item and gives its id, do that work, and 
 // that") and "follow-up" / "follow up" (this mod's own word, in nearly every reply about it).
 export const STOP_PHRASES = [
   'not verified', 'unverified', 'not tested', 'untested', 'no coverage', 'left open', 'still open', 'known gap',
-  'לא אומת', 'לא נבדק', 'לא נבדקו', 'פער', 'פריט המשך',
+  'open question', 'open questions', 'unsure about', 'unsure-about',
+  'לא אומת', 'לא נבדק', 'לא נבדקו', 'פער', 'פריט המשך', 'שאלה פתוחה', 'שאלות פתוחות',
 ]
 export const STOP_MESSAGE = 'You mentioned items that need follow-up. Call mcp__followups__flag for each, or say there are none.'
 
@@ -73,6 +74,11 @@ export function migrate(saved: unknown): Item[] {
 
 // The reply without fenced code blocks (an unclosed fence runs to the end) and inline code.
 export function prose(text: string): string {
+  return outsideFences(text).join('\n').replace(/``[^\n]*?``/g, ' ').replace(/`[^`\n]*`/g, ' ')
+}
+
+// The lines of a reply outside fenced code blocks (an unclosed fence runs to the end).
+function outsideFences(text: string): string[] {
   const out: string[] = []
   let fence = ''
   for (const line of text.split('\n')) {
@@ -82,12 +88,51 @@ export function prose(text: string): string {
     } else if (m) fence = m[1]!
     else out.push(line)
   }
-  return out.join('\n').replace(/``[^\n]*?``/g, ' ').replace(/`[^`\n]*`/g, ' ')
+  return out
+}
+
+// The names a report gives what it leaves open (the model router's routed-worker writes Unsure-about,
+// with its Open questions there), and the other sections a label heading may name.
+const OPEN_SECTIONS = ['open questions', 'open question', 'open items', 'unsure-about', 'unsure about', 'שאלות פתוחות']
+const LABEL_SECTIONS = [...OPEN_SECTIONS, 'findings', 'files', 'changes', 'summary', 'notes', 'next steps', 'deliverable']
+const NONE = /^(?:none|nothing|n\/?a|no|אין|ללא)\.?$/iu
+// "Open questions: none" says nothing is open: the stop check reads past it.
+const OPEN_NONE = /(?:open questions?|open items|unsure[- ]about|שאלות פתוחות|שאלה פתוחה)\**\s*[:—-]?\s*\**\s*(?:none|nothing|n\/?a|אין|ללא)(?![\p{L}\p{N}])\.?/giu
+
+// A section heading: "## Name" (any name), or a label of a known section ("**Name:**", "Name:", "3. Name:"),
+// with whatever follows its colon on the same line.
+function headingOf(line: string): { name: string; rest: string } | null {
+  const hash = /^\s*#{1,6}\s+\**([^*:]+?)\**\s*:?\s*$/u.exec(line)
+  if (hash) return { name: hash[1]!.trim().toLowerCase(), rest: '' }
+  const label = /^\s*(?:\d+\.\s+)?\**([\p{L}][\p{L} -]{1,30}?)\**\s*:\**\s*(.*)$/u.exec(line)
+  if (label && LABEL_SECTIONS.includes(label[1]!.trim().toLowerCase())) {
+    return { name: label[1]!.trim().toLowerCase(), rest: label[2]!.replace(/\*+$/, '').trim() }
+  }
+  return null
+}
+
+// The items under a report's open-questions section, one per bullet or numbered line (or the text
+// after its label); "none" and its kin give nothing. At most 5.
+export function openItems(text: string): string[] {
+  const out: string[] = []
+  const add = (raw: string) => {
+    const item = raw.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '').replace(/\*\*/g, '').trim()
+    if (item && !NONE.test(item)) out.push(clip(item, 200))
+  }
+  let isOpen = false
+  for (const line of outsideFences(text)) {
+    const h = headingOf(line)
+    if (h) {
+      isOpen = OPEN_SECTIONS.includes(h.name)
+      if (isOpen && h.rest) add(h.rest)
+    } else if (isOpen && line.trim()) add(line)
+  }
+  return out.slice(0, 5)
 }
 
 // Phrases as whole words in the prose of a reply, any case. Subagent reports relayed in it count too.
 export function leftOpen(text: string, phrases: string[] = STOP_PHRASES): string[] {
-  const body = prose(text)
+  const body = prose(text).replace(OPEN_NONE, ' ')
   return phrases.filter(p => {
     const src = p.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')
     return !!src && new RegExp(`(?<![\\p{L}\\p{N}_])${src}(?![\\p{L}\\p{N}_])`, 'iu').test(body)
@@ -165,6 +210,20 @@ async function sweep($: EngineInterface, answer: string, reports: string[]) {
   const at = await $.clock.now()
   await update($, pending, l => [...l, ...found.map(f => ({ ...f, id: newId(at), at }))])
   $.ui.toast(found.length === 1 ? 'Claude noticed a possible follow-up: see above the prompt' : `Claude noticed ${found.length} possible follow-ups: see above the prompt`)
+}
+
+// A sub-agent's report that names open questions has them offered in the band at once: read
+// straight from its section, no model, so it works where the after-answer look can't run.
+// Resolves how many it offered.
+async function offerOpenItems($: EngineInterface, report: string): Promise<number> {
+  const known = await knownTitles($)
+  const fresh = openItems(report).filter(t => !known.has(norm(clip(t, 120))))
+  if (!fresh.length) return 0
+  const at = await $.clock.now()
+  const flags: Flag[] = fresh.map(t => ({ id: newId(at), kind: 'task', title: clip(t, 120), detail: "From a sub-agent's open questions", where: '', at }))
+  await update($, pending, l => [...l, ...flags])
+  $.ui.toast(fresh.length === 1 ? 'A sub-agent left an open question: see above the prompt' : `A sub-agent left ${fresh.length} open questions: see above the prompt`)
+  return fresh.length
 }
 
 const newId = (at: number) => `${at.toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -401,7 +460,11 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId !== undefined) {
-      if (e.reason === 'answer' && e.answer.trim()) reports = [...reports, e.answer.trim()].slice(-4)
+      if (e.reason === 'answer' && e.answer.trim()) {
+        reports = [...reports, e.answer.trim()].slice(-4)
+        // Offered in the band: the stop check needn't send Claude back to flag them again.
+        if (await offerOpenItems($, e.answer)) isFlagged = true
+      }
       return r
     }
     const taken = reports
