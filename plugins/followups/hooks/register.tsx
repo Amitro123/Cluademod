@@ -240,6 +240,7 @@ async function exportTo($: EngineInterface, target: Target) {
 
 export const register: Register = (on, options) => {
   const autoDetect = String(options.autoDetect ?? 'on') !== 'off'
+  const openOnStart = String(options.openOnStart ?? 'on') !== 'off'
 
   on('session.start', async ($, e, next) => {
     await $.tool.register({
@@ -285,6 +286,8 @@ export const register: Register = (on, options) => {
       const fromStore = turnedDown.filter((t): t is string => typeof t === 'string')
       await update($, skipped, l => [...new Set([...fromStore, ...l])])
     }
+    // Open work left from an earlier session is shown, so it isn't forgotten.
+    if (openOnStart && (await read($, items)).some(i => i.status !== 'done')) void $.ui.open({ id: PANE, title: PANE_TITLE })
     return next(e)
   })
 
