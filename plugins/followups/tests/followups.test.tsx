@@ -20,7 +20,7 @@ const PANE = {
 } as const
 
 // The engine beneath: a clock, a store, a folder with a README, and the side calls.
-function engine(on: On, files: Record<string, string>, saved: Record<string, unknown> = {}) {
+function engine(on: On, files: Record<string, string>, saved: Record<string, unknown> = {}, opened: string[] = []) {
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 22, 12) })
   // mock.store keeps its entries private, so the two store calls the mod makes run over `saved`, which the test can read.
   on('store.get', (_, e) => ({ value: saved[e.key] }) as never)
@@ -32,7 +32,10 @@ function engine(on: On, files: Record<string, string>, saved: Record<string, unk
   on('session.root', () => ({ value: '/repo' }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__followups__${e.name}` } }) as never)
   on('command.register', (_, e) => ({ value: { command: e.name } }) as never)
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
   on('ui.toast', () => ({ value: undefined }) as never)
   // Files by their path under the project root.
   // The engine resolves paths for the host OS (on Windows `/repo/x` arrives as `C:\repo\x`), so normalise both.
@@ -264,6 +267,36 @@ describe('flag → ask → to-do → export', () => {
     // This session's own "Not needed" joins the saved list.
     await $.tool.call({ tool: TOOL, title: 'Rename the helper' } as never)
     expect(saved['skipped:/repo']).toEqual(['bump lodash', 'rename the helper'])
+  })
+
+  const saved = (status: string) => ({ 'items:/repo': [{ id: 'x', title: 'Left from yesterday', detail: '', where: '', at: 0, kind: 'task', status }] })
+
+  test('a new session opens the pane when the folder has open items', async ($, on) => {
+    const opened: string[] = []
+    engine(on, {}, saved('open'), opened)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    expect(opened).toEqual(['followups'])
+  })
+
+  test('items in progress count as open too', async ($, on) => {
+    const opened: string[] = []
+    engine(on, {}, saved('in_progress'), opened)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    expect(opened).toEqual(['followups'])
+  })
+
+  test('a folder with only done items starts with the pane closed', async ($, on) => {
+    const opened: string[] = []
+    engine(on, {}, saved('done'), opened)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    expect(opened).toEqual([])
+  })
+
+  test('an empty folder starts with the pane closed', async ($, on) => {
+    const opened: string[] = []
+    engine(on, {}, {}, opened)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    expect(opened).toEqual([])
   })
 
   test('a new session loads the list saved in $.store for the folder', async ($, on) => {

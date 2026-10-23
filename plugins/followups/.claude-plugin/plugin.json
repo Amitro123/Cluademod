@@ -13,6 +13,13 @@
       "description": "After each of Claude's answers, a small model reads it for problems mentioned but left open and offers them above the prompt. off relies on Claude calling the flag tool itself",
       "default": "on",
       "options": ["on", "off"]
+    },
+    "openOnStart": {
+      "type": "string",
+      "title": "Open the To-do pane when a session starts",
+      "description": "on opens it when this project has open or in-progress items left from an earlier session",
+      "default": "on",
+      "options": ["on", "off"]
     }
   }
 }
