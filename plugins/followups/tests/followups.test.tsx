@@ -1,7 +1,8 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { migrate, parseFindings, section, startPrompt, sweepPrompt, upsert } from '../hooks/register'
+import { leftOpen, migrate, parseFindings, prose, section, startPrompt, STOP_MESSAGE, STOP_PHRASES, sweepPrompt, upsert } from '../hooks/register'
 
 const TOOL = 'mcp__followups__flag'
 const DONE = 'mcp__followups__done'
@@ -590,5 +591,139 @@ describe('reading the finder\'s answer', () => {
     expect(p).toContain('- one')
     expect(p).toContain('THE END')
     expect(p.length).toBeLessThan(13_000)
+  })
+})
+
+describe('end of turn: unflagged follow-ups', () => {
+  const REPLY = 'The limiter is in and its tests pass. The Windows path handling is not verified, and the retry branch is untested.'
+  const stop = (reply: string, extra: Record<string, unknown> = {}) => ({ stop_hook_active: false, last_assistant_message: reply, ...extra }) as never
+  const turn = (text = 'do the thing') => ({ text, turnId: 't1' }) as never
+
+  async function begin($: Engine, on: On, isInteractive = true) {
+    engine(on, {})
+    // The engine beneath: its own turn start, and a Stop with no settings hook to decide.
+    on('turn.start', () => ({ turnId: 't1' }))
+    on('classic.Stop', () => ({}))
+    on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+      const q = e.questions[0]!.question
+      return { result: { questions: e.questions, answers: { [q]: 'Not needed' } } } as never
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive } as never)
+    await $.turn.start(turn())
+  }
+
+  test('a turn the check already sent back is not read again by the after-answer look', async ($, on) => {
+    const clock = engine(on, {})
+    let reads = 0
+    on('model.complete', () => {
+      reads += 1
+      return { value: { isAnswered: true, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, text: '[]' } } as never
+    })
+    on('turn.start', () => ({ turnId: 't1' }))
+    on('turn.complete', () => ({ text: '' }))
+    on('classic.Stop', () => ({}))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.turn.start(turn())
+    expect((await $.classic.Stop(stop(REPLY.repeat(3)))).block).toBe(STOP_MESSAGE)
+    // Claude went back over its reply; the turn then ends.
+    await $.turn.complete({ answer: REPLY.repeat(3), durationMs: 10, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    await clock.settle()
+    expect(reads).toBe(0)
+
+    // A turn the check let through is still read.
+    await $.turn.start(turn('next thing'))
+    await $.turn.complete({ answer: 'All done, nothing left open here. '.repeat(8), durationMs: 10, isAborted: false, turnId: 't2', reason: 'answer' } as never)
+    await clock.settle()
+    expect(reads).toBe(1)
+  })
+
+  test('blocks once with the nudge, then lets the next stop of the turn through', async ($, on) => {
+    await begin($, on)
+    const first = await $.classic.Stop(stop(REPLY))
+    expect(first.block).toBe(STOP_MESSAGE)
+    // The model answered again without calling flag: the same turn's stop passes, with or without the engine's own flag.
+    expect((await $.classic.Stop(stop(REPLY))).block).toBeUndefined()
+    expect((await $.classic.Stop(stop(REPLY, { stop_hook_active: true }))).block).toBeUndefined()
+    // A new prompt from the person is a new turn: checked again.
+    await $.turn.start(turn('next'))
+    expect((await $.classic.Stop(stop(REPLY))).block).toBe(STOP_MESSAGE)
+  })
+
+  test('a continuation turn after the block does not reopen the check', async ($, on) => {
+    await begin($, on)
+    expect((await $.classic.Stop(stop(REPLY))).block).toBe(STOP_MESSAGE)
+    await $.turn.start(turn(''))
+    expect((await $.classic.Stop(stop(REPLY))).block).toBeUndefined()
+  })
+
+  test('no block when flag was called this turn, even when the person turned it down', async ($, on) => {
+    await begin($, on)
+    await $.tool.call({ tool: TOOL, title: 'Check the Windows path handling' } as never)
+    expect((await $.classic.Stop(stop(REPLY))).block).toBeUndefined()
+    // The next turn starts clean.
+    await $.turn.start(turn('next'))
+    expect((await $.classic.Stop(stop(REPLY))).block).toBe(STOP_MESSAGE)
+  })
+
+  test('no block without a person at the prompt (-p, SDK)', async ($, on) => {
+    await begin($, on, false)
+    expect((await $.classic.Stop(stop(REPLY))).block).toBeUndefined()
+  })
+
+  test('no block with the stopCheck option off', { options: { stopCheck: 'off' } }, async ($, on) => {
+    await begin($, on)
+    expect((await $.classic.Stop(stop(REPLY))).block).toBeUndefined()
+  })
+
+  test('a reply with nothing left open, or none at all, is not stopped', async ($, on) => {
+    await begin($, on)
+    expect((await $.classic.Stop(stop('All done, tests pass.'))).block).toBeUndefined()
+    expect((await $.classic.Stop({ stop_hook_active: false } as never)).block).toBeUndefined()
+  })
+
+  test('a failure in the check lets the stop through', async ($, on) => {
+    await begin($, on)
+    // A reply that is not text makes the check throw.
+    const r = await $.classic.Stop({ stop_hook_active: false, last_assistant_message: { oops: 1 } } as never)
+    expect(r.block).toBeUndefined()
+  })
+
+  test('the model is told subagent reports count', async ($, on) => {
+    on('prompt.compose', () => ({ sections: [] }))
+    const r = await $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: [], tools: [], outputStyle: null, traits: [] } as never)
+    expect(r.sections[r.sections.length - 1]!.text).toMatch(/subagent's or worker's report/)
+  })
+
+  describe('which replies match', () => {
+    test('English and Hebrew phrases, any case, whole phrase only', () => {
+      expect(leftOpen('Coverage is thin: NOT TESTED on Windows.')).toEqual(['not tested'])
+      expect(leftOpen('Unverified: the migration.')).toEqual(['unverified'])
+      expect(leftOpen('Worth a follow-up, and a follow  up later; the issue is still open, and left  open.')).toEqual(['left open', 'still open'])
+      expect(leftOpen('הנתיב לא נבדק ב-Windows, וגם יש פער בכיסוי.')).toEqual(['לא נבדק', 'פער'])
+      expect(leftOpen('הקוד לא אומת. זה פריט המשך.')).toEqual(['לא אומת', 'פריט המשך'])
+      // "בהמשך" is deliberately not in the list: it also means "following that".
+      expect(STOP_PHRASES).not.toContain('בהמשך')
+      expect(leftOpen('בהמשך לבקשתך, עדכנתי את הקובץ.')).toEqual([])
+    })
+
+    test('a phrase inside a longer word does not match', () => {
+      expect(leftOpen('The untestedness of it; unverifiedly; a gap in the fence.')).toEqual([])
+      expect(leftOpen('We follow upstream. The frontend is not testedX.')).toEqual([])
+    })
+
+    test('fenced and inline code are ignored, prose around them is not', () => {
+      const text = ['Fixed it. Output:', '```text', 'not verified', '```', 'and `untested` stays in code, ``still open`` too.'].join('\n')
+      expect(leftOpen(text)).toEqual([])
+      expect(leftOpen(`${text}\nThe cache is not verified.`)).toEqual(['not verified'])
+      // A fence that is never closed runs to the end; a tilde fence works like a backtick one.
+      expect(leftOpen('Done.\n```\nnot tested')).toEqual([])
+      expect(leftOpen('~~~\nnot tested\n~~~\nnot tested')).toEqual(['not tested'])
+      expect(prose('a\n```\nb\n```\nc')).toBe('a\nc')
+    })
+
+    test('a subagent report relayed in the reply counts the same', () => {
+      const relayed = ['The worker reported:', '> Findings: rate limiter added.', '> Unsure-about: retry path is untested; known gap in the Windows CI.', 'Summary above.'].join('\n')
+      expect(leftOpen(relayed)).toEqual(['untested', 'known gap'])
+    })
   })
 })
