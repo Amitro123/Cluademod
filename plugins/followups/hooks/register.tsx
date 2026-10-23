@@ -88,11 +88,13 @@ export function section(target: Target, list: Item[]): string {
   return [START, t.heading, '', ...(t.note ? [`_${t.note}_`, ''] : []), ...lines, END].join('\n')
 }
 
-// Puts the section in the file: in place of an earlier export, else at the end.
+// Puts the section in the file: in place of an earlier export, else at the end. Only a START…END
+// pair counts (END after START); a stray END before it is ignored, so a re-export stays one block.
 export function upsert(text: string, block: string): string {
-  const a = text.indexOf(START)
-  const b = text.indexOf(END)
-  if (a !== -1 && b > a) return text.slice(0, a) + block + text.slice(b + END.length)
+  const first = text.indexOf(START)
+  const b = first === -1 ? -1 : text.indexOf(END, first + START.length)
+  const a = b === -1 ? -1 : text.lastIndexOf(START, b)
+  if (a !== -1 && b !== -1) return text.slice(0, a) + block + text.slice(b + END.length)
   return text.trim() ? `${text.replace(/\s*$/, '')}\n\n${block}\n` : `${block}\n`
 }
 
@@ -101,7 +103,7 @@ async function exportTo($: EngineInterface, target: Target) {
   const t = TARGETS[target]
   if (!list.length) return update($, exported, () => 'Nothing to export yet.')
   try {
-    const path = `${(await $.session.root()).replace(/\/$/, '')}/${t.path}`
+    const path = `${(await $.session.root()).replace(/[\\/]$/, '')}/${t.path}`
     const before = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
     await $.fs.write(path, upsert(typeof before === 'string' ? before : '', section(target, list)))
     await update($, exported, () => `Exported ${list.length} to ${t.path}`)
@@ -170,6 +172,14 @@ export const register: Register = on => {
   on('command.run', { command: 'followup' }, async ($, e) => {
     const title = clip(e.args.trim(), 120)
     if (!title) return { text: 'Usage: /followup <what to do>' }
+    const tracked = (await read($, items)).find(i => norm(i.title) === norm(title))
+    if (tracked) return { text: `Already in your follow-ups: "${tracked.title}".` }
+    // A flag still waiting in the band is what the person means: keep it, detail and all.
+    const waiting = (await read($, pending)).find(f => norm(f.title) === norm(title))
+    if (waiting) {
+      await keep($, [waiting])
+      return { text: `Added to follow-ups: ${waiting.title}` }
+    }
     const at = await $.clock.now()
     await keep($, [{ id: newId(at), title, detail: '', where: '', at }])
     return { text: `Added to follow-ups: ${title}` }
@@ -232,10 +242,7 @@ export const register: Register = on => {
             {list.map(i => (
               <Box key={`row-${i.id}`} flexDirection="column">
                 <Box flexDirection="row" justifyContent="space-between" gap={1}>
-                  <Button key={`t-${i.id}`} label={i.title} plain onPress={toggle(i.id)}>
-                    <Text color={i.isDone ? '#1f9d6b' : '#e08a1e'}>{i.isDone ? '✓ ' : '○ '}</Text>
-                    <Text strikethrough={i.isDone} dimColor={i.isDone} bold={!i.isDone}>{i.title}</Text>
-                  </Button>
+                  <Button key={`t-${i.id}`} label={`${i.isDone ? '✓' : '○'} ${i.title}`} plain onPress={toggle(i.id)} />
                   <Button key={`x-${i.id}`} label="✕" plain onPress={remove(i.id)} />
                 </Box>
                 {!i.isDone && (i.detail || i.where) ? (
