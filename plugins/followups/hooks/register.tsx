@@ -23,9 +23,17 @@ const MARK = { open: '○', in_progress: '◐', done: '✓' } as const
 // The model reads this in every request: when to flag, and when not to.
 const GUIDANCE = `# Follow-ups
 While you work you may notice things outside the task at hand that need attention later: a bug or broken behavior in nearby code, a failing or flaky test you didn't cause, a missing or stale doc, a TODO/FIXME, a security or performance concern, a config that looks wrong, or a step you skipped. The person tends to lose these if they aren't written down.
-Before you end a turn, look back over it: anything you noticed, worked around, left unverified or put off for later that the person would want to come back to gets flagged now, even when you also mention it in your reply.
+Before you end a turn, look back over it: anything you noticed, worked around, left unverified or put off for later that the person would want to come back to gets flagged now, even when you also mention it in your reply. Findings in a subagent's or worker's report count too: flag them before your final reply.
 When you notice one, call ${TOOL} once for it, with a short imperative title ("Fix the flaky upload test") and a one-line detail; add \`where\` (file:line, command, URL) when there is one. Set kind to "bug" when the thing is broken behavior (a bug, a failing test, a crash, wrong output); leave kind out for ordinary tasks. The tool stops and asks the person in a dialog whether to keep it and returns their answer, so don't ask them yourself. Don't fix it unless they asked, and keep going with the task. Don't flag the task you were asked to do, its normal next steps, or something you are about to fix anyway.
 When a message says it started a to-do item and gives its id, do that work, and when it is finished call ${DONE_TOOL} with that id (and a short note of what you did). Call ${DONE_TOOL} only for items started that way; never for unrelated work, and not before the work is actually done.`
+
+// Words that mark a reply as leaving something open. Narrow on purpose (a false stop costs a turn),
+// so extend it one phrase at a time. "בהמשך" ("later", but also "following that") is left out: too common.
+export const STOP_PHRASES = [
+  'not verified', 'unverified', 'not tested', 'untested', 'no coverage', 'follow-up', 'follow up', 'left open', 'still open', 'known gap',
+  'לא אומת', 'לא נבדק', 'לא נבדקו', 'פער', 'פריט המשך',
+]
+export const STOP_MESSAGE = 'You mentioned items that need follow-up. Call mcp__followups__flag for each, or say there are none.'
 
 // What the after-answer check asks a small model: what in this answer was left open.
 const SWEEP_RULES = `You read the final reply an AI coding assistant just gave and list the follow-ups in it: problems or loose ends the reply mentions but leaves open, which the person could lose track of.
@@ -59,6 +67,29 @@ export function migrate(saved: unknown): Item[] {
     const { isDone, ...rest } = raw
     const status: Status = isStatus(raw.status) ? raw.status : isDone === true ? 'done' : 'open'
     return { ...rest, status, kind: raw.kind === 'bug' ? 'bug' : 'task' } as Item
+  })
+}
+
+// The reply without fenced code blocks (an unclosed fence runs to the end) and inline code.
+export function prose(text: string): string {
+  const out: string[] = []
+  let fence = ''
+  for (const line of text.split('\n')) {
+    const m = /^\s*(`{3,}|~{3,})/.exec(line)
+    if (fence) {
+      if (m && m[1]!.startsWith(fence[0]!) && m[1]!.length >= fence.length) fence = ''
+    } else if (m) fence = m[1]!
+    else out.push(line)
+  }
+  return out.join('\n').replace(/``[^\n]*?``/g, ' ').replace(/`[^`\n]*`/g, ' ')
+}
+
+// Phrases as whole words in the prose of a reply, any case. Subagent reports relayed in it count too.
+export function leftOpen(text: string, phrases: string[] = STOP_PHRASES): string[] {
+  const body = prose(text)
+  return phrases.filter(p => {
+    const src = p.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')
+    return !!src && new RegExp(`(?<![\\p{L}\\p{N}_])${src}(?![\\p{L}\\p{N}_])`, 'iu').test(body)
   })
 }
 
@@ -241,8 +272,14 @@ async function exportTo($: EngineInterface, target: Target) {
 export const register: Register = (on, options) => {
   const autoDetect = String(options.autoDetect ?? 'on') !== 'off'
   const openOnStart = String(options.openOnStart ?? 'on') !== 'off'
+  const stopCheck = String(options.stopCheck ?? 'on') !== 'off'
+  // The module's own, per turn: a person is at the prompt, flag was called, the check already stopped once.
+  let isInteractive = false
+  let isFlagged = false
+  let isBlocked = false
 
   on('session.start', async ($, e, next) => {
+    isInteractive = e.isInteractive
     await $.tool.register({
       name: 'flag',
       description: 'Flag something you noticed that needs attention later, outside the current task: a bug or broken behavior, a failing or flaky test, a missing or stale doc, a TODO/FIXME, a security or performance concern, a step you skipped, or something you left unverified or put off. Call it as soon as you notice one (once per item), and before ending a turn for any you mention in your reply; the person tends to lose these otherwise. Not for the task itself or its normal next steps. The person is asked in a dialog whether to add it to their follow-up to-do list; the result is their answer.',
@@ -297,7 +334,17 @@ export const register: Register = (on, options) => {
     return { sections: [...r.sections, { id: 'followups:guidance', text: GUIDANCE, scope: 'session' as const }] }
   })
 
+  // A new turn from the person (a continuation after a stop has no text) starts the check afresh.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined && e.text !== '') {
+      isFlagged = false
+      isBlocked = false
+    }
+    return next(e)
+  })
+
   on('tool.call', { tool: TOOL }, async ($, e) => {
+    isFlagged = true // any call counts, even one the person turns down
     const input = e as unknown as { title?: unknown; detail?: unknown; where?: unknown; kind?: unknown }
     const title = clip(String(input.title ?? '').trim(), 120)
     if (!title) return { deny: 'A follow-up needs a title.' }
@@ -343,6 +390,17 @@ export const register: Register = (on, options) => {
     }
     return r
   })
+
+  // The end of the main loop's turn: when the reply names something left open and flag wasn't called,
+  // stop it once with a nudge. classic.Stop is the one event that can send Claude back to work
+  // (`block`); turn.complete only reads. Without a person at the prompt, nobody could answer, so no check.
+  on('classic.Stop', async ($, e, next) => {
+    const r = await next(e)
+    if (!stopCheck || !isInteractive || isFlagged || isBlocked || e.stop_hook_active || r.block) return r
+    if (!leftOpen(e.last_assistant_message ?? '').length) return r
+    isBlocked = true
+    return { ...r, block: STOP_MESSAGE }
+  }).catch(($, e, next) => (next.called ? next(e) : {}))
 
   on('command.run', { command: 'followups' }, async $ => {
     await $.ui.open({ id: PANE, title: PANE_TITLE })

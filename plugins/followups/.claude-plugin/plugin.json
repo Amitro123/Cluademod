@@ -14,6 +14,13 @@
       "default": "on",
       "options": ["on", "off"]
     },
+    "stopCheck": {
+      "type": "string",
+      "title": "Check for unflagged follow-ups when a turn ends",
+      "description": "When Claude's final reply says something is unverified, untested or left open and it never called the flag tool, ask it once to flag those items before the turn ends. Interactive sessions only",
+      "default": "on",
+      "options": ["on", "off"]
+    },
     "openOnStart": {
       "type": "string",
       "title": "Open the To-do pane when a session starts",
