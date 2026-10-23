@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { leftOpen, migrate, parseFindings, prose, section, startPrompt, STOP_MESSAGE, STOP_PHRASES, sweepPrompt, upsert } from '../hooks/register'
+import { leftOpen, migrate, parseFindings, prose, section, startPrompt, STOP_MESSAGE, STOP_PHRASES, SWEEP_RULES, sweepPrompt, upsert } from '../hooks/register'
 
 const TOOL = 'mcp__followups__flag'
 const DONE = 'mcp__followups__done'
@@ -21,7 +21,11 @@ const PANE = {
 } as const
 
 // The engine beneath: a clock, a store, a folder with a README, and the side calls.
+// What the mod wrote to the transcript with $.ui.log, for the test that made the engine.
+let logged: string[] = []
+
 function engine(on: On, files: Record<string, string>, saved: Record<string, unknown> = {}, opened: string[] = []) {
+  logged = []
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 22, 12) })
   // mock.store keeps its entries private, so the two store calls the mod makes run over `saved`, which the test can read.
   on('store.get', (_, e) => ({ value: saved[e.key] }) as never)
@@ -38,6 +42,10 @@ function engine(on: On, files: Record<string, string>, saved: Record<string, unk
     return { value: { isPlaced: true } }
   })
   on('ui.toast', () => ({ value: undefined }) as never)
+  on('ui.log', (_, e) => {
+    logged.push(e.text)
+    return { value: undefined } as never
+  })
   // Files by their path under the project root.
   // The engine resolves paths for the host OS (on Windows `/repo/x` arrives as `C:\repo\x`), so normalise both.
   const rel = (p: string) => p.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '').replace(/^\/repo\//, '')
@@ -497,6 +505,51 @@ describe('export text', () => {
 })
 
 describe('after each answer, a look for loose ends', () => {
+  const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+
+  test("this turn's sub-agent reports are read with the answer, and only once", async ($, on) => {
+    const clock = engine(on, {})
+    const prompts: string[] = []
+    on('model.complete', (_, e) => {
+      prompts.push(String(e.prompt))
+      return { value: { isAnswered: true, usage: USAGE, text: '[]' } } as never
+    })
+    on('turn.complete', () => ({ text: '' }))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    // The worker did the job and reported what it left; the main answer only sums it up.
+    const report = 'Moved the parser to the new API. The retry path is not tested, and should the old flag stay or go? Nobody decided. '.repeat(2)
+    await $.turn.complete({ answer: report, durationMs: 10, isAborted: false, turnId: 'w1', agentId: 'worker-1', reason: 'answer' } as never)
+    await $.turn.complete({ answer: 'Done: the parser is moved.', durationMs: 10, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    await clock.settle()
+    expect(prompts.length).toBe(1)
+    expect(prompts[0]).toContain('The retry path is not tested')
+    expect(prompts[0]).toContain('Done: the parser is moved.')
+
+    // The next short answer has no report of its own: nothing to read.
+    await $.turn.complete({ answer: 'Ok.', durationMs: 10, isAborted: false, turnId: 't2', reason: 'answer' } as never)
+    await clock.settle()
+    expect(prompts.length).toBe(1)
+  })
+
+  test("a look that can't run says so once, instead of failing quietly", async ($, on) => {
+    const clock = engine(on, {})
+    on('model.complete', () => ({ value: { isAnswered: false, reason: 'api-error', status: 403, error: 'permission_error', usage: USAGE } }) as never)
+    on('turn.complete', () => ({ text: '' }))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    for (const turnId of ['t1', 't2']) {
+      await $.turn.complete({ answer: 'Long enough answer with something left open. '.repeat(6), durationMs: 10, isAborted: false, turnId, reason: 'answer' } as never)
+      await clock.settle()
+    }
+    expect(logged.length).toBe(1)
+    expect(logged[0]).toMatch(/couldn't run/)
+    expect(logged[0]).toMatch(/api-error 403/)
+  })
+
+  test('open questions left unsettled count as loose ends', () => {
+    expect(SWEEP_RULES).toMatch(/open question or decision/)
+    expect(SWEEP_RULES).toMatch(/sub-agent/)
+  })
+
   const LONG = 'Added the limiter to POST /upload and its tests pass. '.repeat(3) +
     'While in there I saw the upload test is flaky (about 1 in 5 runs), and I did not check the Windows path handling.'
   const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
