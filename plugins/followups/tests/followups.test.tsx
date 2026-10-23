@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { leftOpen, migrate, parseFindings, prose, section, startPrompt, STOP_MESSAGE, STOP_PHRASES, SWEEP_RULES, sweepPrompt, upsert } from '../hooks/register'
+import { leftOpen, migrate, openItems, parseFindings, prose, section, startPrompt, STOP_MESSAGE, STOP_PHRASES, SWEEP_RULES, sweepPrompt, upsert } from '../hooks/register'
 
 const TOOL = 'mcp__followups__flag'
 const DONE = 'mcp__followups__done'
@@ -776,7 +776,65 @@ describe('end of turn: unflagged follow-ups', () => {
 
     test('a subagent report relayed in the reply counts the same', () => {
       const relayed = ['The worker reported:', '> Findings: rate limiter added.', '> Unsure-about: retry path is untested; known gap in the Windows CI.', 'Summary above.'].join('\n')
-      expect(leftOpen(relayed)).toEqual(['untested', 'known gap'])
+      expect(leftOpen(relayed)).toEqual(['untested', 'known gap', 'unsure-about'])
     })
+  })
+})
+
+describe("a sub-agent report's open questions", () => {
+  // The model router's routed-worker reports in sections: Findings, Files, Changes, Unsure-about.
+  const REPORT = [
+    '**Findings:** The 401 comes from the expired client secret. Checked `auth/client.ts:42`.',
+    '**Files:** auth/client.ts:42',
+    '**Changes:** none',
+    '**Unsure-about:**',
+    '- Whether staging uses the same secret (unverified)',
+    '- Should the retry stay at 3? Nobody decided.',
+  ].join('\n')
+
+  test('reads the section in the forms a report writes it', () => {
+    expect(openItems(REPORT)).toEqual(['Whether staging uses the same secret (unverified)', 'Should the retry stay at 3? Nobody decided.'])
+    expect(openItems('## Findings\nok\n\n## Open questions\n1. Is the cache key per tenant?\n2. `ttl` default?\n\n## Notes\nx')).toEqual(['Is the cache key per tenant?', '`ttl` default?'])
+    expect(openItems('3. Open questions: whether the old flag can go')).toEqual(['whether the old flag can go'])
+    expect(openItems('Unsure about: the Windows path handling')).toEqual(['the Windows path handling'])
+  })
+
+  test('"none" and reports without the section give nothing', () => {
+    expect(openItems('Findings: done.\nUnsure-about: none')).toEqual([])
+    expect(openItems('**Open questions:** None.')).toEqual([])
+    expect(openItems('## Unsure-about\n- n/a')).toEqual([])
+    expect(openItems('Findings: all good. Changes: none.')).toEqual([])
+  })
+
+  test("a worker's open questions wait in the band at once, without the model, and only once", async ($, on) => {
+    engine(on, {})
+    on('turn.start', () => ({ turnId: 't1' }))
+    on('turn.complete', () => ({ text: '' }))
+    on('classic.Stop', () => ({}))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.turn.start({ text: 'debug the 401', turnId: 't1' } as never)
+    await $.turn.complete({ answer: REPORT, durationMs: 10, isAborted: false, turnId: 'w1', agentId: 'worker-1', reason: 'answer' } as never)
+    await $.turn.complete({ answer: REPORT, durationMs: 10, isAborted: false, turnId: 'w2', agentId: 'worker-2', reason: 'answer' } as never)
+
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    const text = await texts(band)
+    expect(text).toMatch(/Whether staging uses the same secret/)
+    expect(text).toMatch(/From a sub-agent's open questions/)
+    expect(text).toMatch(/\+1 more/)
+    await band.unmount()
+
+    // The main reply restates them; they are already offered, so the turn isn't stopped for them.
+    const stop = await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'Fixed the secret. Still open, unverified: whether staging uses the same secret.' } as never)
+    expect(stop.block).toBeUndefined()
+  })
+})
+
+describe('the stop phrases and open questions', () => {
+  test('"open questions" counts unless it says none', () => {
+    expect(leftOpen('Open questions: should the flag go?')).toEqual(['open questions'])
+    expect(leftOpen('Open questions: none.')).toEqual([])
+    expect(leftOpen('**Unsure-about:** None')).toEqual([])
+    expect(leftOpen('שאלות פתוחות: האם להשאיר את הדגל?')).toEqual(['שאלות פתוחות'])
+    expect(leftOpen('שאלות פתוחות: אין')).toEqual([])
   })
 })
