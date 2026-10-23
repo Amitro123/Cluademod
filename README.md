@@ -151,6 +151,17 @@ It also lives in its own repo, [Amitro123/RTL-claude-mod](https://github.com/Ami
 
 Tests: `claude plugin test plugins/rtl-toggle`.
 
+## Developing
+
+Each mod's `tsconfig.json` extends `.claude-plugin/types/tsconfig.json`. Claude Code writes that folder (the API types for your build) the first time it loads the mod, so a fresh clone doesn't have it, and it's git-ignored. To type-check a mod:
+
+```bash
+claude --plugin-dir plugins/<mod>   # an interactive session; once the mod loads, .claude-plugin/types/ is there
+tsc -p plugins/<mod>
+```
+
+Run each mod's tests with `claude plugin test plugins/<mod>`; they don't need the types folder.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
