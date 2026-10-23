@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { migrate, section, startPrompt, upsert } from '../hooks/register'
+import { migrate, parseFindings, section, startPrompt, sweepPrompt, upsert } from '../hooks/register'
 
 const TOOL = 'mcp__followups__flag'
 const DONE = 'mcp__followups__done'
@@ -21,7 +21,7 @@ const PANE = {
 
 // The engine beneath: a clock, a store, a folder with a README, and the side calls.
 function engine(on: On, files: Record<string, string>, saved: Record<string, unknown> = {}) {
-  mock.clock(on, { now: Date.UTC(2026, 9, 22, 12) })
+  const clock = mock.clock(on, { now: Date.UTC(2026, 9, 22, 12) })
   // mock.store keeps its entries private, so the two store calls the mod makes run over `saved`, which the test can read.
   on('store.get', (_, e) => ({ value: saved[e.key] }) as never)
   on('store.set', (_, e) => {
@@ -47,6 +47,7 @@ function engine(on: On, files: Record<string, string>, saved: Record<string, unk
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
+  return clock
 }
 
 const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<unknown[]> }) =>
@@ -306,6 +307,21 @@ describe('statuses, bugs, start and done', () => {
     await pane.unmount()
   })
 
+  test('done also finds an item by its title, ignoring case and spacing', async ($, on) => {
+    engine(on, {})
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'followup', args: 'Rotate the key' } as never)
+    await $.command.run({ command: 'followup', args: 'Bump lodash' } as never)
+
+    const ok = await $.tool.call({ tool: DONE, id: '  rotate THE   key ' } as never)
+    expect(String(ok.result)).toMatch(/Marked "Rotate the key" done/)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/1 open · 0 in progress · 1 done/)
+    await pane.unmount()
+    const empty = await $.tool.call({ tool: DONE, id: '' } as never)
+    expect(String(empty.deny ?? empty.result)).toMatch(/No to-do item/)
+  })
+
   test('Start sets in progress, submits a prompt naming the item and id, and done completes it', async ($, on) => {
     const files: Record<string, string> = {}
     engine(on, files)
@@ -426,5 +442,103 @@ describe('export text', () => {
   test('END before START with a later END replaces only the well-formed pair', () => {
     const text = `${END}\nmid\n${block('A')}\nafter\n`
     expect(upsert(text, block('B'))).toBe(`${END}\nmid\n${block('B')}\nafter\n`)
+  })
+})
+
+describe('after each answer, a look for loose ends', () => {
+  const LONG = 'Added the limiter to POST /upload and its tests pass. '.repeat(3) +
+    'While in there I saw the upload test is flaky (about 1 in 5 runs), and I did not check the Windows path handling.'
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+
+  test('a finding the answer left open is offered in the band; tracked and turned-down ones are not', async ($, on) => {
+    const clock = engine(on, {})
+    on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+      const q = e.questions[0]!.question
+      return { result: { questions: e.questions, answers: { [q]: q.includes('lodash') ? 'Not needed' : 'Add to to-do' } } } as never
+    })
+    const asked: { model: string; prompt: string }[] = []
+    on('model.complete', (_, e) => {
+      asked.push({ model: e.model, prompt: String(e.prompt) })
+      return { value: { isAnswered: true, usage, text: 'Here you go:\n' + JSON.stringify([
+        { title: 'Fix the flaky upload test', detail: 'Fails about 1 in 5 runs', where: 'tests/upload.test.ts', kind: 'bug' },
+        { title: 'Check the Windows path handling', detail: 'Not verified', where: '', kind: 'task' },
+        { title: 'Bump lodash', detail: '', where: '', kind: 'task' },
+      ]) } } as never
+    })
+    on('turn.complete', () => ({ text: '' }))
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    // Claude flagged one itself, and the person turned one down earlier.
+    await $.tool.call({ tool: TOOL, title: 'Fix the flaky upload test' } as never)
+    await $.tool.call({ tool: TOOL, title: 'Bump lodash' } as never)
+
+    await $.turn.complete({ answer: LONG, durationMs: 10, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    await clock.settle()
+
+    expect(asked.length).toBe(1)
+    expect(asked[0]!.model).toBe('haiku')
+    expect(asked[0]!.prompt).toContain('fix the flaky upload test')
+    expect(asked[0]!.prompt).toContain('bump lodash')
+    expect(asked[0]!.prompt).toContain('did not check the Windows path handling')
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    const text = await texts(band)
+    expect(text).toMatch(/Track it\?/)
+    expect(text).toMatch(/Check the Windows path handling/)
+    expect(text).not.toMatch(/\+1 more/)
+    await band.unmount()
+  })
+
+  test('short answers, sub-agents and turns that did not answer are not read', async ($, on) => {
+    const clock = engine(on, {})
+    let calls = 0
+    on('model.complete', () => {
+      calls += 1
+      return { value: { isAnswered: true, usage, text: '[]' } } as never
+    })
+    on('turn.complete', () => ({ text: '' }))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.turn.complete({ answer: 'Done.', durationMs: 10, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    await $.turn.complete({ answer: LONG, durationMs: 10, isAborted: false, turnId: 't2', agentId: 'a1', reason: 'answer' } as never)
+    await $.turn.complete({ answer: LONG, durationMs: 10, isAborted: true, turnId: 't3', reason: 'aborted' } as never)
+    await clock.settle()
+    expect(calls).toBe(0)
+    await $.turn.complete({ answer: LONG, durationMs: 10, isAborted: false, turnId: 't4', reason: 'answer' } as never)
+    await clock.settle()
+    expect(calls).toBe(1)
+  })
+
+  test('a model that fails or answers nonsense adds nothing', async ($, on) => {
+    const clock = engine(on, {})
+    const replies = [
+      { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded_error', usage },
+      { isAnswered: true, usage, text: 'I could not find anything [but here is a bracket' },
+    ]
+    on('model.complete', () => ({ value: replies.shift() }) as never)
+    on('turn.complete', () => ({ text: '' }))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    for (const turnId of ['t1', 't2']) {
+      await $.turn.complete({ answer: LONG, durationMs: 10, isAborted: false, turnId, reason: 'answer' } as never)
+      await clock.settle()
+    }
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(band)).not.toMatch(/Track it/)
+    await band.unmount()
+  })
+})
+
+describe('reading the finder\'s answer', () => {
+  test('takes the JSON array out of surrounding text, keeps at most 3 well-formed entries', () => {
+    const out = parseFindings('Sure!\n[{"title":"A","kind":"bug"},{"detail":"no title"},{"title":"  "},{"title":"B"},{"title":"C"},{"title":"D"}]\nThanks')
+    expect(out.map(f => f.title)).toEqual(['A', 'B', 'C'])
+    expect(out[0]!.kind).toBe('bug')
+    expect(out[1]!.kind).toBe('task')
+    expect(parseFindings('nothing here')).toEqual([])
+    expect(parseFindings('{"title":"not an array"}')).toEqual([])
+  })
+
+  test('the prompt lists what is tracked and keeps the end of a long reply', () => {
+    const p = sweepPrompt('x'.repeat(20_000) + 'THE END', ['one'])
+    expect(p).toContain('- one')
+    expect(p).toContain('THE END')
+    expect(p.length).toBeLessThan(13_000)
   })
 })
