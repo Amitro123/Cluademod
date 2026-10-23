@@ -12,6 +12,8 @@ declare module 'claude-code' {
       items: Item[]
       // The last export's outcome, shown under the buttons.
       exported: string
+      // Titles (normalised) the person said aren't needed, so they aren't suggested again.
+      skipped: string[]
     }
   }
 }

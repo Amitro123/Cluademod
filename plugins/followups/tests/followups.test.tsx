@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { migrate, section, startPrompt, upsert } from '../hooks/register'
+import { migrate, parseFindings, section, startPrompt, sweepPrompt, upsert } from '../hooks/register'
 
 const TOOL = 'mcp__followups__flag'
 const DONE = 'mcp__followups__done'
@@ -20,8 +20,8 @@ const PANE = {
 } as const
 
 // The engine beneath: a clock, a store, a folder with a README, and the side calls.
-function engine(on: On, files: Record<string, string>, saved: Record<string, unknown> = {}) {
-  mock.clock(on, { now: Date.UTC(2026, 9, 22, 12) })
+function engine(on: On, files: Record<string, string>, saved: Record<string, unknown> = {}, opened: string[] = []) {
+  const clock = mock.clock(on, { now: Date.UTC(2026, 9, 22, 12) })
   // mock.store keeps its entries private, so the two store calls the mod makes run over `saved`, which the test can read.
   on('store.get', (_, e) => ({ value: saved[e.key] }) as never)
   on('store.set', (_, e) => {
@@ -32,7 +32,10 @@ function engine(on: On, files: Record<string, string>, saved: Record<string, unk
   on('session.root', () => ({ value: '/repo' }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__followups__${e.name}` } }) as never)
   on('command.register', (_, e) => ({ value: { command: e.name } }) as never)
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
   on('ui.toast', () => ({ value: undefined }) as never)
   // Files by their path under the project root.
   // The engine resolves paths for the host OS (on Windows `/repo/x` arrives as `C:\repo\x`), so normalise both.
@@ -47,6 +50,7 @@ function engine(on: On, files: Record<string, string>, saved: Record<string, unk
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
+  return clock
 }
 
 const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<unknown[]> }) =>
@@ -248,6 +252,53 @@ describe('flag → ask → to-do → export', () => {
     await pane.unmount()
   })
 
+  test('"Not needed" is saved per folder and still holds in the next session', async ($, on) => {
+    // An earlier session turned down "Bump lodash" in this folder.
+    const saved: Record<string, unknown> = { 'skipped:/repo': ['bump lodash'] }
+    engine(on, {}, saved)
+    on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+      const q = e.questions[0]!.question
+      return { result: { questions: e.questions, answers: { [q]: 'Not needed' } } } as never
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const again = await $.tool.call({ tool: TOOL, title: 'Bump  Lodash' } as never)
+    expect(String(again.result)).toMatch(/already said "Bump  Lodash" isn't needed/)
+
+    // This session's own "Not needed" joins the saved list.
+    await $.tool.call({ tool: TOOL, title: 'Rename the helper' } as never)
+    expect(saved['skipped:/repo']).toEqual(['bump lodash', 'rename the helper'])
+  })
+
+  const saved = (status: string) => ({ 'items:/repo': [{ id: 'x', title: 'Left from yesterday', detail: '', where: '', at: 0, kind: 'task', status }] })
+
+  test('a new session opens the pane when the folder has open items', async ($, on) => {
+    const opened: string[] = []
+    engine(on, {}, saved('open'), opened)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    expect(opened).toEqual(['followups'])
+  })
+
+  test('items in progress count as open too', async ($, on) => {
+    const opened: string[] = []
+    engine(on, {}, saved('in_progress'), opened)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    expect(opened).toEqual(['followups'])
+  })
+
+  test('a folder with only done items starts with the pane closed', async ($, on) => {
+    const opened: string[] = []
+    engine(on, {}, saved('done'), opened)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    expect(opened).toEqual([])
+  })
+
+  test('an empty folder starts with the pane closed', async ($, on) => {
+    const opened: string[] = []
+    engine(on, {}, {}, opened)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    expect(opened).toEqual([])
+  })
+
   test('a new session loads the list saved in $.store for the folder', async ($, on) => {
     // The folder's earlier list is already in the store when the session starts.
     engine(on, {}, { 'items:/repo': [{ id: 'old', title: 'Carried over', detail: '', where: '', at: 0, isDone: false }] })
@@ -304,6 +355,21 @@ describe('statuses, bugs, start and done', () => {
     expect(bugs[0]!.props?.color).toBe('#e5484d')
     expect(await texts(pane)).toMatch(/2 open · 0 in progress · 0 done/)
     await pane.unmount()
+  })
+
+  test('done also finds an item by its title, ignoring case and spacing', async ($, on) => {
+    engine(on, {})
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'followup', args: 'Rotate the key' } as never)
+    await $.command.run({ command: 'followup', args: 'Bump lodash' } as never)
+
+    const ok = await $.tool.call({ tool: DONE, id: '  rotate THE   key ' } as never)
+    expect(String(ok.result)).toMatch(/Marked "Rotate the key" done/)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/1 open · 0 in progress · 1 done/)
+    await pane.unmount()
+    const empty = await $.tool.call({ tool: DONE, id: '' } as never)
+    expect(String(empty.deny ?? empty.result)).toMatch(/No to-do item/)
   })
 
   test('Start sets in progress, submits a prompt naming the item and id, and done completes it', async ($, on) => {
@@ -426,5 +492,103 @@ describe('export text', () => {
   test('END before START with a later END replaces only the well-formed pair', () => {
     const text = `${END}\nmid\n${block('A')}\nafter\n`
     expect(upsert(text, block('B'))).toBe(`${END}\nmid\n${block('B')}\nafter\n`)
+  })
+})
+
+describe('after each answer, a look for loose ends', () => {
+  const LONG = 'Added the limiter to POST /upload and its tests pass. '.repeat(3) +
+    'While in there I saw the upload test is flaky (about 1 in 5 runs), and I did not check the Windows path handling.'
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+
+  test('a finding the answer left open is offered in the band; tracked and turned-down ones are not', async ($, on) => {
+    const clock = engine(on, {})
+    on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+      const q = e.questions[0]!.question
+      return { result: { questions: e.questions, answers: { [q]: q.includes('lodash') ? 'Not needed' : 'Add to to-do' } } } as never
+    })
+    const asked: { model: string; prompt: string }[] = []
+    on('model.complete', (_, e) => {
+      asked.push({ model: e.model, prompt: String(e.prompt) })
+      return { value: { isAnswered: true, usage, text: 'Here you go:\n' + JSON.stringify([
+        { title: 'Fix the flaky upload test', detail: 'Fails about 1 in 5 runs', where: 'tests/upload.test.ts', kind: 'bug' },
+        { title: 'Check the Windows path handling', detail: 'Not verified', where: '', kind: 'task' },
+        { title: 'Bump lodash', detail: '', where: '', kind: 'task' },
+      ]) } } as never
+    })
+    on('turn.complete', () => ({ text: '' }))
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    // Claude flagged one itself, and the person turned one down earlier.
+    await $.tool.call({ tool: TOOL, title: 'Fix the flaky upload test' } as never)
+    await $.tool.call({ tool: TOOL, title: 'Bump lodash' } as never)
+
+    await $.turn.complete({ answer: LONG, durationMs: 10, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    await clock.settle()
+
+    expect(asked.length).toBe(1)
+    expect(asked[0]!.model).toBe('haiku')
+    expect(asked[0]!.prompt).toContain('fix the flaky upload test')
+    expect(asked[0]!.prompt).toContain('bump lodash')
+    expect(asked[0]!.prompt).toContain('did not check the Windows path handling')
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    const text = await texts(band)
+    expect(text).toMatch(/Track it\?/)
+    expect(text).toMatch(/Check the Windows path handling/)
+    expect(text).not.toMatch(/\+1 more/)
+    await band.unmount()
+  })
+
+  test('short answers, sub-agents and turns that did not answer are not read', async ($, on) => {
+    const clock = engine(on, {})
+    let calls = 0
+    on('model.complete', () => {
+      calls += 1
+      return { value: { isAnswered: true, usage, text: '[]' } } as never
+    })
+    on('turn.complete', () => ({ text: '' }))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.turn.complete({ answer: 'Done.', durationMs: 10, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    await $.turn.complete({ answer: LONG, durationMs: 10, isAborted: false, turnId: 't2', agentId: 'a1', reason: 'answer' } as never)
+    await $.turn.complete({ answer: LONG, durationMs: 10, isAborted: true, turnId: 't3', reason: 'aborted' } as never)
+    await clock.settle()
+    expect(calls).toBe(0)
+    await $.turn.complete({ answer: LONG, durationMs: 10, isAborted: false, turnId: 't4', reason: 'answer' } as never)
+    await clock.settle()
+    expect(calls).toBe(1)
+  })
+
+  test('a model that fails or answers nonsense adds nothing', async ($, on) => {
+    const clock = engine(on, {})
+    const replies = [
+      { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded_error', usage },
+      { isAnswered: true, usage, text: 'I could not find anything [but here is a bracket' },
+    ]
+    on('model.complete', () => ({ value: replies.shift() }) as never)
+    on('turn.complete', () => ({ text: '' }))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    for (const turnId of ['t1', 't2']) {
+      await $.turn.complete({ answer: LONG, durationMs: 10, isAborted: false, turnId, reason: 'answer' } as never)
+      await clock.settle()
+    }
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(band)).not.toMatch(/Track it/)
+    await band.unmount()
+  })
+})
+
+describe('reading the finder\'s answer', () => {
+  test('takes the JSON array out of surrounding text, keeps at most 3 well-formed entries', () => {
+    const out = parseFindings('Sure!\n[{"title":"A","kind":"bug"},{"detail":"no title"},{"title":"  "},{"title":"B"},{"title":"C"},{"title":"D"}]\nThanks')
+    expect(out.map(f => f.title)).toEqual(['A', 'B', 'C'])
+    expect(out[0]!.kind).toBe('bug')
+    expect(out[1]!.kind).toBe('task')
+    expect(parseFindings('nothing here')).toEqual([])
+    expect(parseFindings('{"title":"not an array"}')).toEqual([])
+  })
+
+  test('the prompt lists what is tracked and keeps the end of a long reply', () => {
+    const p = sweepPrompt('x'.repeat(20_000) + 'THE END', ['one'])
+    expect(p).toContain('- one')
+    expect(p).toContain('THE END')
+    expect(p.length).toBeLessThan(13_000)
   })
 })

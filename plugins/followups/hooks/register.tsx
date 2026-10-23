@@ -8,6 +8,7 @@ import type { Flag, Item, Status } from '../types'
 const pending = atom({ plugin: 'followups', key: 'pending' } as const, [] as Flag[])
 const items = atom({ plugin: 'followups', key: 'items' } as const, [] as Item[])
 const exported = atom({ plugin: 'followups', key: 'exported' } as const, '')
+const skipped = atom({ plugin: 'followups', key: 'skipped' } as const, [] as string[])
 
 const PANE = 'followups'
 const PANE_TITLE = 'To-do'
@@ -22,8 +23,17 @@ const MARK = { open: '○', in_progress: '◐', done: '✓' } as const
 // The model reads this in every request: when to flag, and when not to.
 const GUIDANCE = `# Follow-ups
 While you work you may notice things outside the task at hand that need attention later: a bug or broken behavior in nearby code, a failing or flaky test you didn't cause, a missing or stale doc, a TODO/FIXME, a security or performance concern, a config that looks wrong, or a step you skipped. The person tends to lose these if they aren't written down.
+Before you end a turn, look back over it: anything you noticed, worked around, left unverified or put off for later that the person would want to come back to gets flagged now, even when you also mention it in your reply.
 When you notice one, call ${TOOL} once for it, with a short imperative title ("Fix the flaky upload test") and a one-line detail; add \`where\` (file:line, command, URL) when there is one. Set kind to "bug" when the thing is broken behavior (a bug, a failing test, a crash, wrong output); leave kind out for ordinary tasks. The tool stops and asks the person in a dialog whether to keep it and returns their answer, so don't ask them yourself. Don't fix it unless they asked, and keep going with the task. Don't flag the task you were asked to do, its normal next steps, or something you are about to fix anyway.
 When a message says it started a to-do item and gives its id, do that work, and when it is finished call ${DONE_TOOL} with that id (and a short note of what you did). Call ${DONE_TOOL} only for items started that way; never for unrelated work, and not before the work is actually done.`
+
+// What the after-answer check asks a small model: what in this answer was left open.
+const SWEEP_RULES = `You read the final reply an AI coding assistant just gave and list the follow-ups in it: problems or loose ends the reply mentions but leaves open, which the person could lose track of.
+Count: a bug or broken behavior, a failing or flaky test, a missing or stale doc, a TODO or FIXME, a security or performance concern, a config that looks wrong, a step that was skipped, something left unverified or untested, or something put off for later.
+Don't count: the work the reply says was done, a question the reply asks the person, an offer to do the next step now, or anything in the already-tracked list.
+Answer with a JSON array only, at most 3 entries, each {"title": "short imperative, under 80 characters", "detail": "one line, under 160 characters", "where": "file:line, command or URL, or empty", "kind": "bug" or "task"}. Answer [] when there is nothing.`
+// Answers shorter than this rarely leave anything open; skipping them saves a call per short turn.
+const SWEEP_MIN_CHARS = 200
 
 // Where each export goes, and the heading its section gets there.
 const TARGETS = {
@@ -52,6 +62,66 @@ export function migrate(saved: unknown): Item[] {
   })
 }
 
+export function sweepPrompt(answer: string, known: string[]): string {
+  return [
+    'Already tracked (skip these):',
+    ...(known.length ? known.map(t => `- ${t}`) : ['- (none)']),
+    '',
+    'The reply:',
+    '<reply>',
+    answer.slice(-12_000),
+    '</reply>',
+  ].join('\n')
+}
+
+// The small model's answer, read leniently: the first JSON array in it, only well-formed entries.
+export function parseFindings(text: string): Omit<Flag, 'id' | 'at'>[] {
+  const a = text.indexOf('[')
+  const b = text.lastIndexOf(']')
+  if (a === -1 || b < a) return []
+  let raw: unknown
+  try {
+    raw = JSON.parse(text.slice(a, b + 1))
+  } catch {
+    return []
+  }
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((f): f is Record<string, unknown> => !!f && typeof f === 'object' && typeof (f as { title?: unknown }).title === 'string')
+    .map(f => ({
+      title: clip(String(f.title).trim(), 120),
+      detail: clip(String(f.detail ?? '').trim(), 300),
+      where: clip(String(f.where ?? '').trim(), 160),
+      kind: f.kind === 'bug' ? ('bug' as const) : ('task' as const),
+    }))
+    .filter(f => f.title)
+    .slice(0, 3)
+}
+
+// Everything already flagged, kept or turned down, normalised for comparing titles.
+async function knownTitles($: EngineInterface): Promise<Set<string>> {
+  const all = [...(await read($, pending)), ...(await read($, items))].map(f => norm(f.title))
+  return new Set([...all, ...(await read($, skipped))])
+}
+
+// Reads a finished answer for loose ends Claude mentioned but didn't flag, and offers them in the band.
+async function sweep($: EngineInterface, answer: string) {
+  const known = await knownTitles($)
+  let r
+  try {
+    r = await $.model.complete({ model: 'haiku', system: SWEEP_RULES, prompt: sweepPrompt(answer, [...known]), maxTokens: 600, effort: 'low', timeoutMs: 20_000 })
+  } catch {
+    return
+  }
+  if (!r.isAnswered) return
+  const fresh = await knownTitles($)
+  const found = parseFindings(r.text).filter(f => !fresh.has(norm(f.title)))
+  if (!found.length) return
+  const at = await $.clock.now()
+  await update($, pending, l => [...l, ...found.map(f => ({ ...f, id: newId(at), at }))])
+  $.ui.toast(found.length === 1 ? 'Claude noticed a possible follow-up: see above the prompt' : `Claude noticed ${found.length} possible follow-ups: see above the prompt`)
+}
+
 const newId = (at: number) => `${at.toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 
 // Exports and the saved list belong to the project, so both key on its root.
@@ -59,6 +129,15 @@ const storeKey = async ($: EngineInterface) => `items:${await $.session.root()}`
 
 async function save($: EngineInterface) {
   await $.store.set(await storeKey($), await read($, items))
+}
+
+// What the person turned down, kept per project like the list, so it isn't offered again later.
+const skippedKey = async ($: EngineInterface) => `skipped:${await $.session.root()}`
+
+async function turnDown($: EngineInterface, title: string) {
+  const t = norm(title)
+  await update($, skipped, l => (l.includes(t) ? l : [...l, t]))
+  await $.store.set(await skippedKey($), await read($, skipped))
 }
 
 const ADD = 'Add to to-do'
@@ -82,7 +161,10 @@ async function ask($: EngineInterface, flag: Flag): Promise<string> {
     await update($, pending, list => [...list, flag])
     return `The person didn't answer; "${flag.title}" waits above the prompt for them. Carry on with the task.`
   }
-  if (answer === SKIP) return `The person skipped "${flag.title}". Don't flag or raise it again. Carry on with the task.`
+  if (answer === SKIP) {
+    await turnDown($, flag.title)
+    return `The person skipped "${flag.title}". Don't flag or raise it again. Carry on with the task.`
+  }
   const kept = answer === ADD ? flag : { ...flag, title: clip(answer.trim(), 120) }
   await keep($, [kept])
   return `The person added "${kept.title}" to their follow-ups. Don't fix it now unless they ask. Carry on with the task.`
@@ -156,11 +238,14 @@ async function exportTo($: EngineInterface, target: Target) {
   }
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const autoDetect = String(options.autoDetect ?? 'on') !== 'off'
+  const openOnStart = String(options.openOnStart ?? 'on') !== 'off'
+
   on('session.start', async ($, e, next) => {
     await $.tool.register({
       name: 'flag',
-      description: 'Flag something you noticed that needs attention later (outside the current task). The person is asked in a dialog whether to add it to their follow-up to-do list; the result is their answer.',
+      description: 'Flag something you noticed that needs attention later, outside the current task: a bug or broken behavior, a failing or flaky test, a missing or stale doc, a TODO/FIXME, a security or performance concern, a step you skipped, or something you left unverified or put off. Call it as soon as you notice one (once per item), and before ending a turn for any you mention in your reply; the person tends to lose these otherwise. Not for the task itself or its normal next steps. The person is asked in a dialog whether to add it to their follow-up to-do list; the result is their answer.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -196,6 +281,13 @@ export const register: Register = on => {
       const saved = await $.store.get(await storeKey($))
       if (Array.isArray(saved) && saved.length) await update($, items, () => migrate(saved))
     }
+    const turnedDown = await $.store.get(await skippedKey($))
+    if (Array.isArray(turnedDown)) {
+      const fromStore = turnedDown.filter((t): t is string => typeof t === 'string')
+      await update($, skipped, l => [...new Set([...fromStore, ...l])])
+    }
+    // Open work left from an earlier session is shown, so it isn't forgotten.
+    if (openOnStart && (await read($, items)).some(i => i.status !== 'done')) void $.ui.open({ id: PANE, title: PANE_TITLE })
     return next(e)
   })
 
@@ -209,6 +301,9 @@ export const register: Register = on => {
     const input = e as unknown as { title?: unknown; detail?: unknown; where?: unknown; kind?: unknown }
     const title = clip(String(input.title ?? '').trim(), 120)
     if (!title) return { deny: 'A follow-up needs a title.' }
+    if ((await read($, skipped)).includes(norm(title))) {
+      return { result: `The person already said "${title}" isn't needed. Don't raise it again.` }
+    }
     const known = [...(await read($, pending)), ...(await read($, items))]
     if (known.some(f => norm(f.title) === norm(title))) {
       return { result: `Already flagged: "${title}". No need to flag it again.` }
@@ -236,6 +331,17 @@ export const register: Register = on => {
     const note = clip(String(input.note ?? '').trim(), 200)
     $.ui.toast(`Done: ${item.title}`)
     return { result: `Marked "${item.title}" done${note ? ` (${note})` : ''}.` }
+  })
+
+  // After a main-loop answer, look it over for loose ends Claude didn't flag. Run from a timer so
+  // the end of the turn never waits on the extra model call.
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    if (autoDetect && e.agentId === undefined && e.reason === 'answer' && e.answer.trim().length >= SWEEP_MIN_CHARS) {
+      const answer = e.answer
+      $.clock.after(0, () => sweep($, answer))
+    }
+    return r
   })
 
   on('command.run', { command: 'followups' }, async $ => {
@@ -280,7 +386,10 @@ export const register: Register = on => {
           {flag.where ? <Text dimColor wrap="truncate-end">{`  ${flag.where}`}</Text> : null}
           <Box flexDirection="row" gap={1}>
             <Button key="add" label="Add to to-do" hotkey="a" variant="primary" onPress={() => keep($, [flag])} />
-            <Button key="skip" label="Skip" hotkey="s" onPress={() => update($, pending, l => l.filter(f => f.id !== flag.id))} />
+            <Button key="skip" label="Skip" hotkey="s" onPress={async () => {
+              await update($, pending, l => l.filter(f => f.id !== flag.id))
+              await turnDown($, flag.title)
+            }} />
             {more ? <Button key="add-all" label={`Add all ${list.length}`} onPress={async () => keep($, await read($, pending))} /> : null}
           </Box>
         </Box>
