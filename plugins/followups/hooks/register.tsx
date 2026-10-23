@@ -37,9 +37,9 @@ export const STOP_PHRASES = [
 export const STOP_MESSAGE = 'You mentioned items that need follow-up. Call mcp__followups__flag for each, or say there are none.'
 
 // What the after-answer check asks a small model: what in this answer was left open.
-const SWEEP_RULES = `You read the final reply an AI coding assistant just gave and list the follow-ups in it: problems or loose ends the reply mentions but leaves open, which the person could lose track of.
-Count: a bug or broken behavior, a failing or flaky test, a missing or stale doc, a TODO or FIXME, a security or performance concern, a config that looks wrong, a step that was skipped, something left unverified or untested, or something put off for later.
-Don't count: the work the reply says was done, a question the reply asks the person, an offer to do the next step now, or anything in the already-tracked list.
+export const SWEEP_RULES = `You read the final reply an AI coding assistant just gave, with any reports its sub-agents handed it this turn, and list the follow-ups in them: problems or loose ends mentioned but left open, which the person could lose track of.
+Count: a bug or broken behavior, a failing or flaky test, a missing or stale doc, a TODO or FIXME, a security or performance concern, a config that looks wrong, a step that was skipped, something left unverified or untested, something put off for later, or an open question or decision that came up and wasn't settled.
+Don't count: the work that was done, a yes/no question about going ahead with the very next step, an offer to do the next step now, or anything in the already-tracked list.
 Answer with a JSON array only, at most 3 entries, each {"title": "short imperative, under 80 characters", "detail": "one line, under 160 characters", "where": "file:line, command or URL, or empty", "kind": "bug" or "task"}. Answer [] when there is nothing.`
 // Answers shorter than this rarely leave anything open; skipping them saves a call per short turn.
 const SWEEP_MIN_CHARS = 200
@@ -94,11 +94,12 @@ export function leftOpen(text: string, phrases: string[] = STOP_PHRASES): string
   })
 }
 
-export function sweepPrompt(answer: string, known: string[]): string {
+export function sweepPrompt(answer: string, known: string[], reports: string[] = []): string {
   return [
     'Already tracked (skip these):',
     ...(known.length ? known.map(t => `- ${t}`) : ['- (none)']),
     '',
+    ...reports.flatMap(r => ['A sub-agent\'s report:', '<report>', r.slice(-6_000), '</report>', '']),
     'The reply:',
     '<reply>',
     answer.slice(-12_000),
@@ -137,15 +138,27 @@ async function knownTitles($: EngineInterface): Promise<Set<string>> {
 }
 
 // Reads a finished answer for loose ends Claude mentioned but didn't flag, and offers them in the band.
-async function sweep($: EngineInterface, answer: string) {
+// The look runs quietly; when it can't run at all, the person is told once per session.
+let isWarned = false
+function warn($: EngineInterface, why: string) {
+  if (isWarned) return
+  isWarned = true
+  $.ui.log(`followups: the look for loose ends after each answer couldn't run (${why}), so they aren't offered above the prompt. Claude's own flags and the end-of-turn check still work.`)
+}
+
+async function sweep($: EngineInterface, answer: string, reports: string[]) {
   const known = await knownTitles($)
   let r
   try {
-    r = await $.model.complete({ model: 'haiku', system: SWEEP_RULES, prompt: sweepPrompt(answer, [...known]), maxTokens: 600, effort: 'low', timeoutMs: 20_000 })
-  } catch {
+    r = await $.model.complete({ model: 'haiku', system: SWEEP_RULES, prompt: sweepPrompt(answer, [...known], reports), maxTokens: 600, effort: 'low', timeoutMs: 20_000 })
+  } catch (err) {
+    return warn($, err instanceof Error ? err.message : String(err))
+  }
+  if (!r.isAnswered) {
+    // An interrupted look (the person moved on) isn't a fault worth a line.
+    if (r.reason !== 'aborted') warn($, r.reason === 'api-error' ? `api-error ${r.status ?? ''}`.trim() : r.reason)
     return
   }
-  if (!r.isAnswered) return
   const fresh = await knownTitles($)
   const found = parseFindings(r.text).filter(f => !fresh.has(norm(f.title)))
   if (!found.length) return
@@ -278,6 +291,8 @@ export const register: Register = (on, options) => {
   let isInteractive = false
   let isFlagged = false
   let isBlocked = false
+  // Sub-agents' final reports since the main loop's last answer: the work, and its loose ends, is often there.
+  let reports: string[] = []
 
   on('session.start', async ($, e, next) => {
     isInteractive = e.isInteractive
@@ -385,11 +400,18 @@ export const register: Register = (on, options) => {
   // the end of the turn never waits on the extra model call.
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    if (e.agentId !== undefined) {
+      if (e.reason === 'answer' && e.answer.trim()) reports = [...reports, e.answer.trim()].slice(-4)
+      return r
+    }
+    const taken = reports
+    reports = []
     // A turn the Stop check sent back has had Claude go over its own reply: a second reading would
     // only offer the same loose ends again under other titles.
-    if (autoDetect && !isBlocked && e.agentId === undefined && e.reason === 'answer' && e.answer.trim().length >= SWEEP_MIN_CHARS) {
+    const read = [e.answer, ...taken].join('\n').trim().length
+    if (autoDetect && !isBlocked && e.reason === 'answer' && read >= SWEEP_MIN_CHARS) {
       const answer = e.answer
-      $.clock.after(0, () => sweep($, answer))
+      $.clock.after(0, () => sweep($, answer, taken))
     }
     return r
   })
