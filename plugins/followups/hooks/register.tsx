@@ -172,6 +172,8 @@ export const register: Register = on => {
   on('command.run', { command: 'followup' }, async ($, e) => {
     const title = clip(e.args.trim(), 120)
     if (!title) return { text: 'Usage: /followup <what to do>' }
+    const known = [...(await read($, pending)), ...(await read($, items))]
+    if (known.some(f => norm(f.title) === norm(title))) return { text: `Already flagged: "${title}". No need to add it again.` }
     const at = await $.clock.now()
     await keep($, [{ id: newId(at), title, detail: '', where: '', at }])
     return { text: `Added to follow-ups: ${title}` }

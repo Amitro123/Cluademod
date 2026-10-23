@@ -21,7 +21,17 @@ const PANE = {
 // The engine beneath: a clock, a store, a folder with a README, and the side calls.
 function engine(on: On, files: Record<string, string>, saved: Record<string, unknown> = {}) {
   mock.clock(on, { now: Date.UTC(2026, 9, 22, 12) })
-  mock.store(on, saved)
+  // mock.store keeps its entries private, so this is the same four calls over `saved`, which the test can read.
+  on('store.get', (_, e) => ({ value: saved[e.key] }) as never)
+  on('store.set', (_, e) => {
+    saved[e.key] = e.value
+    return { value: undefined } as never
+  })
+  on('store.delete', (_, e) => {
+    delete saved[e.key]
+    return { value: undefined } as never
+  })
+  on('store.keys', () => ({ value: Object.keys(saved) }) as never)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: '/repo' }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__followups__${e.name}` } }) as never)
@@ -179,20 +189,24 @@ describe('flag → ask → to-do → export', () => {
     await pane.unmount()
   })
 
-  test('/followup with no args shows usage and adds nothing; a repeated title is added twice', async ($, on) => {
-    engine(on, {})
+  test('/followup with no args shows usage and adds nothing; a repeated title is not added twice', async ($, on) => {
+    const writes: Record<string, unknown> = {}
+    engine(on, {}, writes)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     const empty = await $.command.run({ command: 'followup', args: '   ' } as never)
     expect(String(empty.text)).toBe('Usage: /followup <what to do>')
 
-    // The by-hand command does not de-duplicate (only the flag tool does); this records today's behavior.
-    await $.command.run({ command: 'followup', args: 'Same title' } as never)
-    await $.command.run({ command: 'followup', args: 'Same title' } as never)
+    // The by-hand command de-duplicates like the flag tool: same title (normalised) is not added again.
+    const first = await $.command.run({ command: 'followup', args: 'Same title' } as never)
+    expect(String(first.text)).toMatch(/Added to follow-ups/)
+    const dup = await $.command.run({ command: 'followup', args: '  same   TITLE ' } as never)
+    expect(String(dup.text)).toMatch(/Already flagged: "same   TITLE"/)
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
-    expect(await texts(pane)).toMatch(/2 open · 0 done/)
+    expect(await texts(pane)).toMatch(/1 open · 0 done/)
     await pane.unmount()
+    expect((writes['items:/repo'] as unknown[]).length).toBe(1)
 
-    // ...but the tool call sees them as already known.
+    // The tool call sees it as already known too.
     const again = await $.tool.call({ tool: TOOL, title: 'same TITLE' } as never)
     expect(String(again.result)).toMatch(/Already flagged/)
   })
@@ -203,6 +217,27 @@ describe('flag → ask → to-do → export', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
     expect(await texts(pane)).toMatch(/1 open · 0 done/)
+    const labels = (await pane.findAll({ type: 'Button' } as never)).map(b => String((b as { text?: string }).text ?? ''))
+    expect(labels).toContain('○ Carried over')
+    await pane.unmount()
+  })
+
+  test('changes made in the pane are saved to $.store', async ($, on) => {
+    const writes: Record<string, unknown> = { 'items:/repo': [{ id: 'old', title: 'Carried over', detail: '', where: '', at: 0, isDone: false }] }
+    engine(on, {}, writes)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'followup', args: 'Added by hand' } as never)
+    const stored = async () => writes['items:/repo'] as { title: string; isDone: boolean }[]
+    expect((await stored()).map(i => i.title)).toEqual(['Carried over', 'Added by hand'])
+
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const keys = async () => (await pane.findAll({ type: 'Button' } as never)).map(b => String((b as { key?: string }).key))
+    await pane.press({ key: 't-old' })
+    expect((await stored()).find(i => i.title === 'Carried over')?.isDone).toBe(true)
+    await pane.press({ key: 'clear-done' })
+    expect((await stored()).map(i => i.title)).toEqual(['Added by hand'])
+    await pane.press({ key: (await keys()).find(k => k.startsWith('x-'))! })
+    expect(await stored()).toEqual([])
     await pane.unmount()
   })
 
