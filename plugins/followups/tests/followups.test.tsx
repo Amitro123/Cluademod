@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { leftOpen, migrate, parseFindings, prose, section, startPrompt, STOP_MESSAGE, STOP_PHRASES, sweepPrompt, upsert } from '../hooks/register'
@@ -598,7 +599,7 @@ describe('end of turn: unflagged follow-ups', () => {
   const stop = (reply: string, extra: Record<string, unknown> = {}) => ({ stop_hook_active: false, last_assistant_message: reply, ...extra }) as never
   const turn = (text = 'do the thing') => ({ text, turnId: 't1' }) as never
 
-  async function begin($: Parameters<Parameters<typeof test>[1]>[0], on: On, isInteractive = true) {
+  async function begin($: Engine, on: On, isInteractive = true) {
     engine(on, {})
     // The engine beneath: its own turn start, and a Stop with no settings hook to decide.
     on('turn.start', () => ({ turnId: 't1' }))
@@ -610,6 +611,31 @@ describe('end of turn: unflagged follow-ups', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive } as never)
     await $.turn.start(turn())
   }
+
+  test('a turn the check already sent back is not read again by the after-answer look', async ($, on) => {
+    const clock = engine(on, {})
+    let reads = 0
+    on('model.complete', () => {
+      reads += 1
+      return { value: { isAnswered: true, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, text: '[]' } } as never
+    })
+    on('turn.start', () => ({ turnId: 't1' }))
+    on('turn.complete', () => ({ text: '' }))
+    on('classic.Stop', () => ({}))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.turn.start(turn())
+    expect((await $.classic.Stop(stop(REPLY.repeat(3)))).block).toBe(STOP_MESSAGE)
+    // Claude went back over its reply; the turn then ends.
+    await $.turn.complete({ answer: REPLY.repeat(3), durationMs: 10, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    await clock.settle()
+    expect(reads).toBe(0)
+
+    // A turn the check let through is still read.
+    await $.turn.start(turn('next thing'))
+    await $.turn.complete({ answer: 'All done, nothing left open here. '.repeat(8), durationMs: 10, isAborted: false, turnId: 't2', reason: 'answer' } as never)
+    await clock.settle()
+    expect(reads).toBe(1)
+  })
 
   test('blocks once with the nudge, then lets the next stop of the turn through', async ($, on) => {
     await begin($, on)

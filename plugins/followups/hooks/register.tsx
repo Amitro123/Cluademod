@@ -384,7 +384,9 @@ export const register: Register = (on, options) => {
   // the end of the turn never waits on the extra model call.
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (autoDetect && e.agentId === undefined && e.reason === 'answer' && e.answer.trim().length >= SWEEP_MIN_CHARS) {
+    // A turn the Stop check sent back has had Claude go over its own reply: a second reading would
+    // only offer the same loose ends again under other titles.
+    if (autoDetect && !isBlocked && e.agentId === undefined && e.reason === 'answer' && e.answer.trim().length >= SWEEP_MIN_CHARS) {
       const answer = e.answer
       $.clock.after(0, () => sweep($, answer))
     }
