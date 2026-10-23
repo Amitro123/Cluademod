@@ -698,7 +698,7 @@ describe('end of turn: unflagged follow-ups', () => {
     test('English and Hebrew phrases, any case, whole phrase only', () => {
       expect(leftOpen('Coverage is thin: NOT TESTED on Windows.')).toEqual(['not tested'])
       expect(leftOpen('Unverified: the migration.')).toEqual(['unverified'])
-      expect(leftOpen('Worth a follow-up, and a follow  up later; the issue is still open.')).toEqual(['follow-up', 'follow up', 'still open'])
+      expect(leftOpen('Worth a follow-up, and a follow  up later; the issue is still open, and left  open.')).toEqual(['left open', 'still open'])
       expect(leftOpen('הנתיב לא נבדק ב-Windows, וגם יש פער בכיסוי.')).toEqual(['לא נבדק', 'פער'])
       expect(leftOpen('הקוד לא אומת. זה פריט המשך.')).toEqual(['לא אומת', 'פריט המשך'])
       // "בהמשך" is deliberately not in the list: it also means "following that".

@@ -28,9 +28,10 @@ When you notice one, call ${TOOL} once for it, with a short imperative title ("F
 When a message says it started a to-do item and gives its id, do that work, and when it is finished call ${DONE_TOOL} with that id (and a short note of what you did). Call ${DONE_TOOL} only for items started that way; never for unrelated work, and not before the work is actually done.`
 
 // Words that mark a reply as leaving something open. Narrow on purpose (a false stop costs a turn),
-// so extend it one phrase at a time. "בהמשך" ("later", but also "following that") is left out: too common.
+// so extend it one phrase at a time. Left out as too common: "בהמשך" ("later", but also "following
+// that") and "follow-up" / "follow up" (this mod's own word, in nearly every reply about it).
 export const STOP_PHRASES = [
-  'not verified', 'unverified', 'not tested', 'untested', 'no coverage', 'follow-up', 'follow up', 'left open', 'still open', 'known gap',
+  'not verified', 'unverified', 'not tested', 'untested', 'no coverage', 'left open', 'still open', 'known gap',
   'לא אומת', 'לא נבדק', 'לא נבדקו', 'פער', 'פריט המשך',
 ]
 export const STOP_MESSAGE = 'You mentioned items that need follow-up. Call mcp__followups__flag for each, or say there are none.'
