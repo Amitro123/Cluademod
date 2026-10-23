@@ -200,7 +200,7 @@ describe('flag → ask → to-do → export', () => {
     const first = await $.command.run({ command: 'followup', args: 'Same title' } as never)
     expect(String(first.text)).toMatch(/Added to follow-ups/)
     const dup = await $.command.run({ command: 'followup', args: '  same   TITLE ' } as never)
-    expect(String(dup.text)).toMatch(/Already flagged: "same   TITLE"/)
+    expect(String(dup.text)).toBe('Already in your follow-ups: "Same title".')
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
     expect(await texts(pane)).toMatch(/1 open · 0 done/)
     await pane.unmount()
@@ -209,6 +209,26 @@ describe('flag → ask → to-do → export', () => {
     // The tool call sees it as already known too.
     const again = await $.tool.call({ tool: TOOL, title: 'same TITLE' } as never)
     expect(String(again.result)).toMatch(/Already flagged/)
+  })
+
+  test('/followup on a flag waiting in the band keeps that flag', async ($, on) => {
+    engine(on, {})
+    on('tool.call', { tool: 'AskUserQuestion' }, () => {
+      throw new Error('dismissed')
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.tool.call({ tool: TOOL, title: 'Fix the flaky upload test', detail: 'Fails 1 in 5 runs' } as never)
+
+    const r = await $.command.run({ command: 'followup', args: 'fix the flaky upload test' } as never)
+    expect(String(r.text)).toBe('Added to follow-ups: Fix the flaky upload test')
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(band)).not.toMatch(/Track it/)
+    await band.unmount()
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const text = await texts(pane)
+    expect(text).toMatch(/1 open · 0 done/)
+    expect(text).toMatch(/Fails 1 in 5 runs/)
+    await pane.unmount()
   })
 
   test('a new session loads the list saved in $.store for the folder', async ($, on) => {

@@ -172,8 +172,14 @@ export const register: Register = on => {
   on('command.run', { command: 'followup' }, async ($, e) => {
     const title = clip(e.args.trim(), 120)
     if (!title) return { text: 'Usage: /followup <what to do>' }
-    const known = [...(await read($, pending)), ...(await read($, items))]
-    if (known.some(f => norm(f.title) === norm(title))) return { text: `Already flagged: "${title}". No need to add it again.` }
+    const tracked = (await read($, items)).find(i => norm(i.title) === norm(title))
+    if (tracked) return { text: `Already in your follow-ups: "${tracked.title}".` }
+    // A flag still waiting in the band is what the person means: keep it, detail and all.
+    const waiting = (await read($, pending)).find(f => norm(f.title) === norm(title))
+    if (waiting) {
+      await keep($, [waiting])
+      return { text: `Added to follow-ups: ${waiting.title}` }
+    }
     const at = await $.clock.now()
     await keep($, [{ id: newId(at), title, detail: '', where: '', at }])
     return { text: `Added to follow-ups: ${title}` }
