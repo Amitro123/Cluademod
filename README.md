@@ -105,9 +105,9 @@ Tests: `claude plugin test plugins/task-hud`.
 
 ## followups: don't lose what Claude notices
 
-![followups: a flag waiting above the prompt and the To-do pane with Export to](assets/followups.png)
+![followups: Claude asks about a bug it noticed in the question dialog; the To-do pane shows open, in-progress and done items with Start, Done and Export to](assets/followups.png)
 
-<sub>A mock-up of the layout. While Claude is working, it asks in the question dialog; the band shown here holds a flag whose dialog was closed without an answer.</sub>
+<sub>A mock-up of version 0.5.0, not a screenshot. The dialog is Claude Code's own question dialog, so it looks like the one in your app rather than exactly like this. The pane follows the mod's drawing: orange open, blue in progress, green done, 🐞 for a bug, and an item offered from a sub-agent's open questions. A dialog closed without an answer leaves the item in a band above the prompt (Add to to-do / Skip / Add all), which isn't shown here.</sub>
 
 While Claude works, it often notices things outside the task: a flaky test, a stale doc, a bug in nearby code. Those get lost unless somebody writes them down. This mod writes them down.
 
