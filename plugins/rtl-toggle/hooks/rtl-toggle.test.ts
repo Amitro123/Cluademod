@@ -37,7 +37,7 @@ test('wrapLineIfNeeded: English-dominant line with one Hebrew word is untouched'
 })
 
 test('wrapLineIfNeeded: word counting, ties go to RTL', () => {
-  for (const [prefix, line] of [['> ', TIE_QUOTE], ['- [ ] ', TASK_ITEM], ['', GITHUB_ACTIONS], ['', TIE_URL_ONE_EACH]]) {
+  for (const [prefix, line] of [['> ', TIE_QUOTE], ['- [ ] ', TASK_ITEM], ['', GITHUB_ACTIONS], ['', TIE_URL_ONE_EACH]] as [string, string][]) {
     const body = line.slice(prefix.length)
     expect(wrapLineIfNeeded(line)).toBe(`${prefix}${RLM}${body}`)
   }
@@ -124,7 +124,7 @@ test('wrapLineIfNeeded: the mark is the first strong char of the content (RTL) f
     const content = out.slice(prefix.length)
     expect(out.startsWith(prefix)).toBe(true)
     expect(content.startsWith(RLM)).toBe(true)
-    expect(isRtlStrong(content[0])).toBe(true)
+    expect(isRtlStrong(content.charAt(0))).toBe(true)
     expect(firstStrong(content)).toBe(RLM)
     expect(content.endsWith(String.fromCodePoint(0x2069))).toBe(false)
   }
@@ -154,7 +154,7 @@ test('live: numbered list items are marked after "N. "', () => {
 })
 
 test('live: nested bullets keep indent and are marked after their prefix', () => {
-  const [a, b, c] = L_NEST.split('\n')
+  const [a, b, c] = L_NEST.split('\n') as [string, string, string]
   expect(toRtl(L_NEST)).toBe([mark('- ', a.slice(2)), mark('  - ', b.slice(4)), mark('  - ', c.slice(4))].join('\n'))
 })
 
@@ -173,12 +173,12 @@ test('live: Hebrew-leading lines are untouched (digit first, bold Hebrew in quot
 })
 
 test('live: blockquote with Hebrew first line and Latin-leading second line', () => {
-  const [a, b] = L_QUOTE_2.split('\n')
+  const [a, b] = L_QUOTE_2.split('\n') as [string, string]
   expect(toRtl(L_QUOTE_2)).toBe([a, mark('> ', b.slice(2))].join('\n'))
 })
 
 test('live: English paragraph line stays, following mixed line is marked', () => {
-  const [a, b] = L_PARA.split('\n')
+  const [a, b] = L_PARA.split('\n') as [string, string]
   expect(toRtl(L_PARA)).toBe([a, mark('', b)].join('\n'))
 })
 
@@ -368,7 +368,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
   // Press the band's toggle button once.
   async function enable($: any) {
-    const band = await $.ui.mount({ plugin: 'rtl-toggle', surface, component: 'AbovePrompt', props: {} })
+    const band = await $.ui.mount({ plugin: 'rtl-toggle', surface, component: 'AbovePrompt', props: {} } as never)
     await band.press({ key: 'rtl-toggle' })
     await band.unmount()
   }
@@ -422,7 +422,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`Word-count cases are marked or left alone through the engine (${surface})`, async ($, on) => {
     setup(on)
     await enable($)
-    for (const [prefix, line] of [['> ', TIE_QUOTE], ['- [ ] ', TASK_ITEM], ['', LINK_LINE], ['', URL_LINE]]) {
+    for (const [prefix, line] of [['> ', TIE_QUOTE], ['- [ ] ', TASK_ITEM], ['', LINK_LINE], ['', URL_LINE]] as [string, string][]) {
       expect(await render($, 'AssistantMessage', line)).toBe(`${prefix}${RLM}${line.slice(prefix.length)}`)
     }
     for (const s of [ENGLISH_DOMINANT_1, ENGLISH_DOMINANT_2, MIXED_ONE_VS_TWO]) {
@@ -466,7 +466,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
   test(`AbovePrompt composes with the band beneath and its label reflects state (${surface})`, async ($, on) => {
     setup(on)
-    const band = await $.ui.mount({ plugin: 'rtl-toggle', surface, component: 'AbovePrompt', props: {} })
+    const band = await $.ui.mount({ plugin: 'rtl-toggle', surface, component: 'AbovePrompt', props: {} } as never)
     expect((await band.find({ type: 'Text' }))?.text).toBe('engine band')
     expect((await band.find({ key: 'rtl-toggle' }))?.text).toBe(LABEL_OFF)
     await band.press({ key: 'rtl-toggle' })
@@ -505,7 +505,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`Live-verified list, quote, code-span and table cases through the engine (${surface})`, async ($, on) => {
     setup(on)
     await enable($)
-    const [a, b] = L_QUOTE_2.split('\n')
+    const [a, b] = L_QUOTE_2.split('\n') as [string, string]
     expect(await render($, 'AssistantMessage', [L_NUM1, L_NUM2].join('\n'))).toBe([mark('1. ', L_NUM1.slice(3)), mark('2. ', L_NUM2.slice(3))].join('\n'))
     expect(await render($, 'AssistantMessage', L_QUOTE_2)).toBe([a, mark('> ', b.slice(2))].join('\n'))
     expect(await render($, 'AssistantMessage', L_CODE)).toBe(mark('', L_CODE))

@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { leftOpen, migrate, openItems, parseFindings, prose, section, startPrompt, STOP_MESSAGE, STOP_PHRASES, SWEEP_RULES, sweepPrompt, upsert } from '../hooks/register'
+import { leftOpen, mergeLists, migrate, openItems, parseFindings, prose, section, startPrompt, STOP_MESSAGE, STOP_PHRASES, SWEEP_RULES, sweepPrompt, upsert } from '../hooks/register'
 
 const TOOL = 'mcp__followups__flag'
 const DONE = 'mcp__followups__done'
@@ -175,6 +175,21 @@ describe('flag → ask → to-do → export', () => {
     await pane.unmount()
   })
 
+  test('two presses of Add before the band redraws keep the item once', async ($, on) => {
+    engine(on, {})
+    on('tool.call', { tool: 'AskUserQuestion' }, () => {
+      throw new Error('dismissed')
+    })
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await $.tool.call({ tool: TOOL, title: 'Fix the flaky upload test' } as never)
+    const band = await $.ui.mount({ ...BAND, surface: 'desktop' } as never)
+    await Promise.all([band.press({ key: 'add' }), band.press({ key: 'add' })])
+    await band.unmount()
+    const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+    expect(await texts(pane)).toMatch(/1 open · 0 in progress · 0 done/)
+    await pane.unmount()
+  })
+
   test('Clear done and ✕ remove items', async ($, on) => {
     engine(on, {})
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
@@ -278,6 +293,19 @@ describe('flag → ask → to-do → export', () => {
     expect(saved['skipped:/repo']).toEqual(['bump lodash', 'rename the helper'])
   })
 
+  test('"Not needed" in another session of the folder is kept when this one saves', async ($, on) => {
+    const saved: Record<string, unknown> = {}
+    engine(on, {}, saved)
+    on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+      const q = e.questions[0]!.question
+      return { result: { questions: e.questions, answers: { [q]: 'Not needed' } } } as never
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    saved['skipped:/repo'] = ['bump lodash']
+    await $.tool.call({ tool: TOOL, title: 'Rename the helper' } as never)
+    expect(saved['skipped:/repo']).toEqual(['bump lodash', 'rename the helper'])
+  })
+
   const saved = (status: string) => ({ 'items:/repo': [{ id: 'x', title: 'Left from yesterday', detail: '', where: '', at: 0, kind: 'task', status }] })
 
   test('a new session opens the pane when the folder has open items', async ($, on) => {
@@ -337,6 +365,26 @@ describe('flag → ask → to-do → export', () => {
     await pane.unmount()
   })
 
+  test("another session's saves in the same folder are kept, its deletions too", async ($, on) => {
+    const OLD = { id: 'old', title: 'Carried over', detail: '', where: '', at: 0, kind: 'task', status: 'open' }
+    const GONE = { ...OLD, id: 'gone', title: 'Deleted there' }
+    const writes: Record<string, unknown> = { 'items:/repo': [OLD, GONE] }
+    engine(on, {}, writes)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    // Meanwhile another session adds an item, deletes one, and marks one done.
+    writes['items:/repo'] = [{ ...OLD, status: 'done' }, { ...OLD, id: 'other', title: 'From the other session' }]
+    await $.command.run({ command: 'followup', args: 'Added here' } as never)
+    const stored = writes['items:/repo'] as { title: string; status: string }[]
+    expect(stored.map(i => i.title).sort()).toEqual(['Added here', 'Carried over', 'From the other session'])
+    expect(stored.find(i => i.title === 'Carried over')?.status).toBe('done')
+
+    // And this session's pane shows what the other one saved.
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/From the other session/)
+    expect(await texts(pane)).not.toMatch(/Deleted there/)
+    await pane.unmount()
+  })
+
   test('the model is told when to flag', async ($, on) => {
     on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'hi', scope: 'shared' as const }] }))
     const r = await $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: [], tools: [], outputStyle: null, traits: [] } as never)
@@ -379,6 +427,21 @@ describe('statuses, bugs, start and done', () => {
     await pane.unmount()
     const empty = await $.tool.call({ tool: DONE, id: '' } as never)
     expect(String(empty.deny ?? empty.result)).toMatch(/No to-do item/)
+  })
+
+  test("a Start whose prompt can't be sent puts the item back to open, so it can be started again", async ($, on) => {
+    engine(on, {})
+    on('prompt.submit', () => {
+      throw new Error('no session to send it to')
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'followup', args: 'Rotate the key' } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const sKey = (await find(pane, 'Button')).map(b => String(b.key)).find(k => k.startsWith('s-'))!
+    await pane.press({ key: sKey })
+    expect(await texts(pane)).toMatch(/1 open · 0 in progress · 0 done/)
+    expect((await find(pane, 'Button')).map(b => String(b.key))).toContain(sKey)
+    await pane.unmount()
   })
 
   test('Start sets in progress, submits a prompt naming the item and id, and done completes it', async ($, on) => {
@@ -836,5 +899,15 @@ describe('the stop phrases and open questions', () => {
     expect(leftOpen('**Unsure-about:** None')).toEqual([])
     expect(leftOpen('שאלות פתוחות: האם להשאיר את הדגל?')).toEqual(['שאלות פתוחות'])
     expect(leftOpen('שאלות פתוחות: אין')).toEqual([])
+  })
+})
+
+describe('merging with another session', () => {
+  const it_ = (id: string, v = 'a') => ({ id, v })
+  test('changes made here win; changes made only there are taken', () => {
+    expect(mergeLists([it_('1'), it_('2')], [it_('1', 'here'), it_('2')], [it_('1', 'there'), it_('2', 'there')])).toEqual([it_('1', 'here'), it_('2', 'there')])
+  })
+  test('an item deleted on either side stays deleted; one added on either side is kept', () => {
+    expect(mergeLists([it_('1'), it_('2')], [it_('2'), it_('3')], [it_('1'), it_('4')])).toEqual([it_('3'), it_('4')])
   })
 })

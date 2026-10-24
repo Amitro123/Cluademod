@@ -18,6 +18,11 @@ function usage(on: On, rateLimits: { kind: string; percentUsed: number }[], usd 
   on('session.start', () => ({ cwd: '.' }) as never)
   on('ui.status', () => ({ value: undefined }) as never)
   on('ui.toast', () => ({ value: undefined }) as never)
+  // What sits beneath clawd-hud: another mod's band, or the engine's own mode labels.
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.component === 'AbovePrompt' ? 'another mod band' : 'engine modes'}</Text>
+  })
 }
 
 async function band($: Engine, surface: 'terminal' | 'desktop' = 'terminal') {
@@ -93,5 +98,71 @@ describe('cache timer', () => {
     usage(on, PERSONAL)
     on('session.measure', ($, e) => ({ changed: e.changed }) as never)
     expect(await cacheLabel($, PERSONAL)).toMatch(/cache 60:00/)
+  })
+})
+
+describe('sharing its sites', () => {
+  test('the band keeps what the mods beneath it draw, on both surfaces', async ($, on) => {
+    usage(on, PERSONAL)
+    expect(await band($, 'terminal')).toMatch(/another mod band/)
+  })
+
+  test('the desktop band keeps it too', async ($, on) => {
+    usage(on, PERSONAL)
+    expect(await band($, 'desktop')).toMatch(/another mod band/)
+  })
+
+  test("beside the model picker, the engine's own drawing stays", async ($, on) => {
+    usage(on, PERSONAL)
+    on('session.measure', ($, e) => ({ changed: e.changed }) as never)
+    const text = await cacheLabel($, PERSONAL)
+    expect(text).toMatch(/cache 60:00/)
+    expect(text).toMatch(/engine modes/)
+  })
+})
+
+describe('redraws', () => {
+  // Counts the spark's frame writes beneath the plugin: each one redraws the band.
+  function frames(on: On) {
+    const count = { n: 0 }
+    on('state.set', (_, e, next) => {
+      if ((e as { key?: string }).key === 'frame') count.n++
+      return next(e)
+    })
+    return count
+  }
+
+  test('idle, the spark redraws about once a second, not eight times', async ($, on) => {
+    const count = frames(on)
+    const clock = mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: PERSONAL } }) as never)
+    on('session.start', () => ({ cwd: '.' }) as never)
+    on('ui.status', () => ({ value: undefined }) as never)
+    on('ui.toast', () => ({ value: undefined }) as never)
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    await $.session.start({ cwd: '.' } as never)
+    count.n = 0
+    await clock.advance(4_000)
+    expect(count.n).toBeLessThanOrEqual(5)
+
+    // A turn starts: the spark animates at full speed again.
+    await $.turn.start({ text: 'go', turnId: 't1' } as never)
+    count.n = 0
+    await clock.advance(1_000)
+    expect(count.n).toBeGreaterThanOrEqual(7)
+  })
+
+  test('no toast on every start', async ($, on) => {
+    const toasts: string[] = []
+    mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: PERSONAL } }) as never)
+    on('session.start', () => ({ cwd: '.' }) as never)
+    on('ui.status', () => ({ value: undefined }) as never)
+    on('ui.toast', (_, e) => {
+      toasts.push(String(e.text))
+      return { value: undefined } as never
+    })
+    await $.session.start({ cwd: '.' } as never)
+    expect(toasts).toEqual([])
   })
 })

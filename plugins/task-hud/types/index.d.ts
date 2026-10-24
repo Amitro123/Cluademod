@@ -27,6 +27,7 @@ declare module 'claude-code' {
     'task-hud': {
       todos: Todo[]
       title: string
+      lastPrompt: string
       agents: Agent[]
       tick: number
     }

@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { runnerX, trackText } from '../hooks/art'
-import { addSide, insertTask, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan } from '../hooks/register'
+import { addSide, insertTask, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan, stepTokens } from '../hooks/register'
 import type { Goal } from '../types'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -203,6 +203,19 @@ describe('a new session', () => {
     await band.unmount()
   })
 
+  test('a newer goal set in another session of the project is not overwritten', async ($, on) => {
+    const w = engine(on, { saved: { 'goal:/repo': unfinished } })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const theirs: Goal = { ...unfinished, text: 'Their goal', setAt: Date.UTC(2026, 9, 24, 8) }
+    w.saved['goal:/repo'] = theirs
+    // This session clears the older goal it holds: the other session's newer goal stays saved.
+    await $.command.run({ command: 'session-goal', args: 'clear' } as never)
+    expect((w.saved['goal:/repo'] as Goal).text).toBe('Their goal')
+    // A goal this session sets afterwards is the newer one, and is saved.
+    await $.command.run({ command: 'session-goal', args: 'My goal' } as never)
+    expect((w.saved['goal:/repo'] as Goal).text).toBe('My goal')
+  })
+
   test('/goal clear forgets the goal', async ($, on) => {
     const w = engine(on, { saved: { 'goal:/repo': unfinished } })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
@@ -389,12 +402,30 @@ describe('the order of the plan', () => {
     ])
   })
 
+  test("a step's tokens are the new ones: cache reads, the context already counted, are left out", () => {
+    expect(stepTokens({ input_tokens: 1_000, output_tokens: 500, cache_read_input_tokens: 90_000, cache_creation_input_tokens: 2_000 })).toBe(3_500)
+  })
+
   test('↑ and ↓ move a task among the pending ones, never past one in progress or done', () => {
     const tasks = orderPlan([P('a', 'high'), P('b', 'high'), P('c', 'high'), P('d', 'high')])
     const g: Goal = { text: 'x', status: 'active', activeId: 't1', other: 0, tasks: tasks.map((t, i) => (i === 0 ? { ...t, status: 'in_progress' } : t)) }
     expect(movePending(g, 't4', -1).tasks.map(t => t.title)).toEqual(['a', 'b', 'd', 'c'])
     expect(movePending(g, 't2', -1).tasks.map(t => t.title)).toEqual(['a', 'b', 'c', 'd'])
     expect(movePending(g, 't4', 1).tasks.map(t => t.title)).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  test('↑ carries the tasks a task needs along with it, ↓ the tasks that need it', () => {
+    const t = (id: string, title: string, needs?: string[]) => ({ id, title, status: 'pending' as const, tokens: 0, ...(needs ? { needs } : {}) })
+    const g: Goal = { text: 'x', status: 'active', activeId: null, other: 0, tasks: [t('t1', 'a'), t('t2', 'b'), t('t3', 'c', ['t2']), t('t4', 'd')] }
+    const titles = (x: Goal) => x.tasks.map(k => k.title)
+    expect(titles(movePending(g, 't3', -1))).toEqual(['b', 'c', 'a', 'd'])
+    expect(titles(movePending(g, 't2', 1))).toEqual(['a', 'd', 'b', 'c'])
+    // Through another task, too.
+    const chain: Goal = { ...g, tasks: [...g.tasks.slice(0, 3), t('t4', 'd', ['t3'])] }
+    expect(titles(movePending(chain, 't4', -1))).toEqual(['b', 'c', 'd', 'a'])
+    // Nothing left to pass: the order stays.
+    const top: Goal = { ...g, tasks: [t('t1', 'a'), t('t2', 'b', ['t1']), t('t3', 'c')] }
+    expect(titles(movePending(top, 't2', -1))).toEqual(['a', 'b', 'c'])
   })
 
   test('the dialog shows the order with priorities and dependencies, and the pane lets the person reorder', async ($, on) => {

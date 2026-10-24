@@ -23,6 +23,7 @@ const cost = atom({ plugin: 'clawd-hud', key: 'cost' } as const, null as number 
 const MIN = 60_000
 // The mascot is redrawn as still frames at this interval (8 a second).
 const FRAME_MS = 125
+const IDLE_FRAME_MS = 1_000
 // After the fireworks the spark rests this long before idling.
 const RELAX_MS = 4 * MIN
 // The same tool with the same input this many times in one turn means Claude is going in circles.
@@ -199,8 +200,13 @@ export const register: Register = (on, options) => {
       await update($, minute, () => t)
       await refreshStatus($, cfg)
     }))
+    // Every motion is a function of elapsed time, so an idle or resting spark can redraw
+    // once a second; working, loop, done and error scenes get every frame.
     timers.push($.clock.every(FRAME_MS, async () => {
       const t = await $.clock.now()
+      const scene = sceneFor(await read($, mood), (t - (await read($, moodAt))) / 1000).mood
+      const still = scene === 'idle' || scene === 'relax'
+      if (still && t - (await read($, frame)) < IDLE_FRAME_MS) return
       await update($, frame, () => t)
     }))
     // Tick the cache countdown while it is warm, and once more after expiry: a late tick
@@ -218,7 +224,6 @@ export const register: Register = (on, options) => {
     }))
 
     await refreshStatus($, cfg)
-    $.ui.toast('clawd-hud loaded')
     return next(e)
   })
 
@@ -267,6 +272,8 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text } = $.ui.resolve(e)
+    // What the mods beneath draw stays, under the spark's row: this band is shared.
+    const below = await next(e)
     const { rl, enterprise, wins } = await planOf($, cfg)
     const spent = enterprise ? await read($, cost) : null
     const t = await read($, minute)
@@ -291,7 +298,7 @@ export const register: Register = (on, options) => {
     })
 
     if (e.surface !== 'desktop' && e.surface !== 'vscode') {
-      return (
+      const row = (
         <Box flexDirection="row" flexWrap="wrap" gap={3}>
           <Text bold color="#ffb547">{faceFor(shown, sceneT, idea)}</Text>
           {meters.map(w => (
@@ -305,10 +312,16 @@ export const register: Register = (on, options) => {
           {spent !== null ? <Text bold>{`${usd(spent)} this session`}</Text> : null}
         </Box>
       )
+      return (
+        <Box flexDirection="column">
+          {row}
+          {below}
+        </Box>
+      )
     }
     const { Svg } = $.ui.resolve(e as typeof e & { surface: 'desktop' })
 
-    return (
+    const row = (
       <Box flexDirection="row" alignItems="center" gap={2} paddingX={1}>
         <Svg
           source={sceneSvg(shown, sceneT, idea)}
@@ -333,6 +346,12 @@ export const register: Register = (on, options) => {
         </Box>
       </Box>
     )
+    return (
+      <Box flexDirection="column">
+        {row}
+        {below}
+      </Box>
+    )
   })
 
   // Beside the model picker: the cache bolt and the context capsule.
@@ -343,15 +362,17 @@ export const register: Register = (on, options) => {
     const c = await read($, ctx)
     const pct = c?.percent
     const ctxLabel = pct === undefined ? 'ctx –' : `ctx ${pct}%${c?.tokens ? ` · ${tok(c.tokens)}/${tok(c.window)}` : ''}`
-    const modes = e.props.modes.join(' & ')
+    // The engine's own drawing here (the mode labels, or another mod's take on them) stays beside ours.
+    const below = await next(e)
 
-    if (e.surface !== 'desktop' && e.surface !== 'vscode') {
+    // SessionMode is raised on the terminal and desktop alone.
+    if (e.surface !== 'desktop') {
       return (
         <Box flexDirection="row" gap={1}>
           <Text color={cache.warm ? cache.color : undefined} dimColor={!cache.warm}>{`ϟ ${cache.label}`}</Text>
           <Text dimColor>·</Text>
           <Text dimColor>{ctxLabel}</Text>
-          {modes ? <Text dimColor>{`· ${modes}`}</Text> : null}
+          {below}
         </Box>
       )
     }
@@ -364,7 +385,7 @@ export const register: Register = (on, options) => {
         <Text dimColor>·</Text>
         <Svg source={pillSvg(pct ?? 0)} alt="context used" width={PILL.width} height={PILL.height} />
         <Text dimColor>{ctxLabel}</Text>
-        {modes ? <Text dimColor>{`· ${modes}`}</Text> : null}
+        {below}
       </Box>
     )
   })

@@ -20,9 +20,11 @@ const PANE = {
 // The engine beneath the plugin: a clock, the side calls, and every tool answering.
 function engine(on: On, { broken = false, spawn = true } = {}) {
   ticks = 0
+  prompts = []
   on('state.set', (_, e, next) => {
     if (broken) throw new Error('boom')
     if ((e as { key?: string }).key === 'tick') ticks++
+    if ((e as { key?: string }).key === 'lastPrompt') prompts.push((e as { value?: unknown }).value)
     return next(e)
   })
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 22, 12) })
@@ -49,6 +51,8 @@ const SPAWN = {
 } as never
 // How many times the redraw timer has written, counted beneath the plugin.
 let ticks = 0
+// The band-title prompts written to state.
+let prompts: unknown[] = []
 const tickOf = (_: Engine) => ticks
 
 const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<unknown[]> }) =>
@@ -365,6 +369,19 @@ describe('sub-agent cards', () => {
     await ui.unmount()
   })
 
+  test('resuming an agent whose card was dropped gives it a fresh card', async ($, on) => {
+    on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'old1' }))
+    engine(on, { spawn: false })
+    await $.agent.spawn({ ...SPAWN_ARGS, description: 'Old pass', resume: { agentId: 'old1' } } as never)
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const text = await texts(ui)
+    expect(text).toMatch(/1 sub-agent\b/)
+    expect(text).toMatch(/Old pass/)
+    expect(text).toMatch(/Running · 1/)
+    await ui.unmount()
+  })
+
   test("the card's tokens are the agent's context on its latest request", async ($, on) => {
     engine(on)
     on('turn.step', async function* (_, e) {
@@ -399,5 +416,13 @@ describe('text', () => {
     expect(activityOf('Skill', { skill: 'pdf' }).now).toBe('Reading the pdf skill')
     expect(activityOf('mcp__github__get_file_contents', {}).now).toBe('Using get_file_contents')
     expect(activityOf('Bash', { command: 'git status\ngit log' }).now).toBe('Running git status')
+  })
+})
+
+describe('reload', () => {
+  test("the band's title prompt is kept in state, so a reload keeps it", async ($, on) => {
+    engine(on)
+    await $.turn.start({ turnId: 'u1', text: 'Plan the launch video' } as never)
+    expect(prompts).toContain('Plan the launch video')
   })
 })

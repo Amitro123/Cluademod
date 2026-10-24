@@ -10,6 +10,8 @@ import {
 
 const todos = atom({ plugin: 'task-hud', key: 'todos' } as const, [] as Todo[])
 const title = atom({ plugin: 'task-hud', key: 'title' } as const, '')
+// The prompt that started the work, named on the band once a to-do list shows up.
+const lastPrompt = atom({ plugin: 'task-hud', key: 'lastPrompt' } as const, '')
 const agents = atom({ plugin: 'task-hud', key: 'agents' } as const, [] as Agent[])
 const tick = atom({ plugin: 'task-hud', key: 'tick' } as const, 0)
 
@@ -25,8 +27,6 @@ const KEEP_AGENTS = 24
 const STALE_MS = 10 * 60_000
 
 const timers: { cancel: () => void }[] = []
-// The prompt that started the work, named on the band once a to-do list shows up.
-let lastPrompt = ''
 
 // ---------- text ----------
 
@@ -117,7 +117,9 @@ async function ensureTicking($: EngineInterface) {
 async function setTodos($: EngineInterface, next: Todo[] | ((list: Todo[]) => Todo[])) {
   const before = await read($, todos)
   const after = await update($, todos, list => (typeof next === 'function' ? next(list) : next))
-  if (!before.length && after.length) await update($, title, () => clip(firstLine(lastPrompt), 48))
+  if (before.length || !after.length) return
+  const prompt = await read($, lastPrompt)
+  await update($, title, () => clip(firstLine(prompt), 48))
 }
 
 const isStatus = (s: unknown): s is TodoStatus => s === 'pending' || s === 'in_progress' || s === 'completed'
@@ -144,7 +146,7 @@ export const register: Register = on => {
   // A new request from the person: remember it as the band's title, and drop a finished list.
   on('turn.start', async ($, e, next) => {
     if (e.agentId !== undefined || !e.text) return next(e)
-    lastPrompt = e.text
+    await update($, lastPrompt, () => e.text)
     const list = await read($, todos)
     if (list.length && list.every(t => t.status === 'completed')) await update($, todos, () => [])
     return next(e)
@@ -190,15 +192,15 @@ export const register: Register = on => {
 
   on('agent.spawn', async ($, e, next) => {
     const ran = await next(e)
-    if (!ran.agentId || e.resume) {
-      if (ran.agentId) {
-        await patchAgent($, ran.agentId, a => ({ ...a, state: 'running', endedAt: null }))
-        await ensureTicking($)
-      }
+    if (!ran.agentId) return ran
+    const list = await read($, agents)
+    // A resumed agent picks up its card; one whose card was already dropped gets a fresh one.
+    if (e.resume && list.some(a => a.id === ran.agentId)) {
+      await patchAgent($, ran.agentId, a => ({ ...a, state: 'running', endedAt: null }))
+      await ensureTicking($)
       return ran
     }
     const t = await $.clock.now()
-    const list = await read($, agents)
     const agent: Agent = {
       id: ran.agentId,
       description: e.description || e.subagentType,
@@ -264,7 +266,7 @@ export const register: Register = on => {
     const now = done === list.length ? 'All done' : cur ? `Now: ${cur.activeForm}` : `Next: ${list.find(t => t.status === 'pending')?.subject ?? ''}`
     const below = await next(e)
 
-    if (e.surface !== 'desktop') {
+    if (e.surface === 'terminal') {
       const cells = Math.max(10, Math.min(40, e.props.bodyColumns - name.length - 24))
       return (
         <Box flexDirection="column">

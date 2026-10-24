@@ -9,6 +9,8 @@ const pending = atom({ plugin: 'followups', key: 'pending' } as const, [] as Fla
 const items = atom({ plugin: 'followups', key: 'items' } as const, [] as Item[])
 const exported = atom({ plugin: 'followups', key: 'exported' } as const, '')
 const skipped = atom({ plugin: 'followups', key: 'skipped' } as const, [] as string[])
+// The list as this session last loaded or saved it, to merge with another session's saves.
+const base = atom({ plugin: 'followups', key: 'base' } as const, [] as Item[])
 
 const PANE = 'followups'
 const PANE_TITLE = 'To-do'
@@ -231,8 +233,29 @@ const newId = (at: number) => `${at.toString(36)}-${Math.random().toString(36).s
 // Exports and the saved list belong to the project, so both key on its root.
 const storeKey = async ($: EngineInterface) => `items:${await $.session.root()}`
 
+// A three-way merge with what another session in the same project saved meanwhile. `base` is the
+// list as this session last loaded or saved it: what changed here since wins, what changed only
+// there is taken, and an item either side deleted stays deleted.
+export function mergeLists<T extends { id: string }>(base: T[], mine: T[], stored: T[]): T[] {
+  const was = new Map(base.map(i => [i.id, JSON.stringify(i)]))
+  const there = new Map(stored.map(i => [i.id, i]))
+  const held = new Set(mine.map(i => i.id))
+  const kept = mine.flatMap(i => {
+    if (was.get(i.id) !== JSON.stringify(i)) return [i]
+    const other = there.get(i.id)
+    return other ? [other] : []
+  })
+  return [...kept, ...stored.filter(i => !held.has(i.id) && !was.has(i.id))]
+}
+
 async function save($: EngineInterface) {
-  await $.store.set(await storeKey($), await read($, items))
+  const key = await storeKey($)
+  const saved = await $.store.get(key)
+  const from = await read($, base)
+  const stored = Array.isArray(saved) ? migrate(saved) : from
+  const merged = await update($, items, mine => mergeLists(from, mine, stored))
+  await $.store.set(key, merged)
+  await update($, base, () => merged)
 }
 
 // What the person turned down, kept per project like the list, so it isn't offered again later.
@@ -240,8 +263,12 @@ const skippedKey = async ($: EngineInterface) => `skipped:${await $.session.root
 
 async function turnDown($: EngineInterface, title: string) {
   const t = norm(title)
-  await update($, skipped, l => (l.includes(t) ? l : [...l, t]))
-  await $.store.set(await skippedKey($), await read($, skipped))
+  // Another session in the folder may have turned things down meanwhile: the list only grows, so join them.
+  const key = await skippedKey($)
+  const saved = await $.store.get(key)
+  const there = Array.isArray(saved) ? saved.filter((s): s is string => typeof s === 'string') : []
+  const list = await update($, skipped, l => [...new Set([...there, ...l, t])])
+  await $.store.set(key, list)
 }
 
 const ADD = 'Add to to-do'
@@ -278,7 +305,11 @@ async function keep($: EngineInterface, flags: Flag[]) {
   if (!flags.length) return
   const ids = new Set(flags.map(f => f.id))
   await update($, pending, list => list.filter(f => !ids.has(f.id)))
-  await update($, items, list => [...list, ...flags.map(f => ({ ...f, kind: f.kind ?? 'task', status: 'open' as const }))])
+  // By id, inside the update: two presses before a redraw both carry the same flag.
+  await update($, items, list => {
+    const have = new Set(list.map(i => i.id))
+    return [...list, ...flags.filter(f => !have.has(f.id)).map(f => ({ ...f, kind: f.kind ?? 'task', status: 'open' as const }))]
+  })
   await save($)
   void $.ui.open({ id: PANE, title: PANE_TITLE })
 }
@@ -302,8 +333,9 @@ async function setStatus($: EngineInterface, ids: Set<string>, status: Status) {
 async function start($: EngineInterface, which: Item[]) {
   if (!which.length) return
   await setStatus($, new Set(which.map(i => i.id)), 'in_progress')
-  // A turn of its own once the session is idle; it may not resolve until then, so not awaited.
-  $.prompt.submit({ text: startPrompt(which) }).catch(() => {})
+  // A turn of its own once the session is idle; it may not resolve until then, so not awaited. If
+  // it can't be sent, the items go back to open, where their Start button is.
+  $.prompt.submit({ text: startPrompt(which) }).catch(() => setStatus($, new Set(which.map(i => i.id)), 'open'))
 }
 
 // The markdown an export writes: the items as a checklist between two markers.
@@ -391,7 +423,11 @@ export const register: Register = (on, options) => {
     // Items kept in this folder before carry over to a new session.
     if (!held.length) {
       const saved = await $.store.get(await storeKey($))
-      if (Array.isArray(saved) && saved.length) await update($, items, () => migrate(saved))
+      if (Array.isArray(saved) && saved.length) {
+        const list = migrate(saved)
+        await update($, items, () => list)
+        await update($, base, () => list)
+      }
     }
     const turnedDown = await $.store.get(await skippedKey($))
     if (Array.isArray(turnedDown)) {
@@ -471,10 +507,10 @@ export const register: Register = (on, options) => {
     reports = []
     // A turn the Stop check sent back has had Claude go over its own reply: a second reading would
     // only offer the same loose ends again under other titles.
-    const read = [e.answer, ...taken].join('\n').trim().length
-    if (autoDetect && !isBlocked && e.reason === 'answer' && read >= SWEEP_MIN_CHARS) {
+    const chars = [e.answer, ...taken].join('\n').trim().length
+    if (autoDetect && !isBlocked && e.reason === 'answer' && chars >= SWEEP_MIN_CHARS) {
       const answer = e.answer
-      $.clock.after(0, () => sweep($, answer, taken))
+      $.clock.after(0, () => sweep($, answer, taken).catch(err => warn($, err instanceof Error ? err.message : String(err))))
     }
     return r
   })
