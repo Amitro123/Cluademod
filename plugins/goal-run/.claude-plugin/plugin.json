@@ -1,6 +1,6 @@
 {
   "name": "goal-run",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Set a goal at the start of a session: Claude plans the tasks, you approve, and a pixel Claude in running shoes runs a 0-100% track as the tasks get done, with each task's token cost",
   "author": { "name": "Amit Rosen", "url": "https://github.com/Amitro123" },
   "repository": "https://github.com/Amitro123/claudemod",

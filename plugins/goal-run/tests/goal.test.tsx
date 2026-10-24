@@ -165,6 +165,27 @@ describe('from the question to the finish line', () => {
   })
 })
 
+describe('the track fits the pane', () => {
+  test('a narrow pane draws the track narrower, keeping its shape', async ($, on) => {
+    engine(on, { answers: ['Approve'] })
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
+    const sizeAt = async (bodyColumns: number) => {
+      const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns } } as never)
+      const svg = (await ui.findAll({ type: 'Svg' } as never))[0] as { props?: { width?: number; height?: number } }
+      await ui.unmount()
+      return svg.props!
+    }
+    const wide = await sizeAt(80)
+    const narrow = await sizeAt(30)
+    expect(wide.width).toBe(360)
+    expect(narrow.width).toBeLessThan(360)
+    expect(narrow.width).toBeLessThanOrEqual(30 * 7)
+    expect(Math.abs(narrow.height! / narrow.width! - wide.height! / wide.width!)).toBeLessThan(0.02)
+  })
+})
+
 describe('a new session', () => {
   const unfinished: Goal = { text: 'Ship it', status: 'active', tasks: [{ id: 't1', title: 'One', status: 'done', tokens: 10 }, { id: 't2', title: 'Two', status: 'pending', tokens: 0 }], activeId: null, other: 0 }
 
