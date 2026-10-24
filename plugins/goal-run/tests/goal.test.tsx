@@ -203,6 +203,19 @@ describe('a new session', () => {
     await band.unmount()
   })
 
+  test('a newer goal set in another session of the project is not overwritten', async ($, on) => {
+    const w = engine(on, { saved: { 'goal:/repo': unfinished } })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const theirs: Goal = { ...unfinished, text: 'Their goal', setAt: Date.UTC(2026, 9, 24, 8) }
+    w.saved['goal:/repo'] = theirs
+    // This session clears the older goal it holds: the other session's newer goal stays saved.
+    await $.command.run({ command: 'session-goal', args: 'clear' } as never)
+    expect((w.saved['goal:/repo'] as Goal).text).toBe('Their goal')
+    // A goal this session sets afterwards is the newer one, and is saved.
+    await $.command.run({ command: 'session-goal', args: 'My goal' } as never)
+    expect((w.saved['goal:/repo'] as Goal).text).toBe('My goal')
+  })
+
   test('/goal clear forgets the goal', async ($, on) => {
     const w = engine(on, { saved: { 'goal:/repo': unfinished } })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)

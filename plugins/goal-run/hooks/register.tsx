@@ -8,6 +8,8 @@ import type { Pose } from './art'
 // ---------- state ----------
 
 const goal = atom({ plugin: 'goal-run', key: 'goal' } as const, null as Goal | null)
+// When the goal this session last loaded or saved was set: a newer one saved by another session wins.
+const heldAt = atom({ plugin: 'goal-run', key: 'heldAt' } as const, 0)
 const asking = atom({ plugin: 'goal-run', key: 'asking' } as const, null as Asking)
 const tick = atom({ plugin: 'goal-run', key: 'tick' } as const, 0)
 const side = atom({ plugin: 'goal-run', key: 'side' } as const, null as Side | null)
@@ -170,6 +172,7 @@ export function replan(before: Goal | null, text: string, tasks: Task[]): Goal {
     other: (before?.other ?? 0) + dropped,
     ...(before?.outside ? { outside: before.outside } : {}),
     ...(before?.pace ? { pace: before.pace } : {}),
+    ...(before?.setAt ? { setAt: before.setAt } : {}),
   }
 }
 
@@ -202,7 +205,13 @@ export function reminder(g: Goal): string {
 const storeKey = async ($: EngineInterface) => `goal:${await $.session.root()}`
 
 async function save($: EngineInterface) {
-  await $.store.set(await storeKey($), await read($, goal))
+  const key = await storeKey($)
+  const g = await read($, goal)
+  const saved = (await $.store.get(key)) as Goal | null | undefined
+  // Another session in this project set a newer goal: it stays saved, and this session's copy stays its own.
+  if (saved && typeof saved === 'object' && (saved.setAt ?? 0) > (g ? g.setAt ?? 0 : await read($, heldAt))) return
+  await $.store.set(key, g)
+  await update($, heldAt, () => g?.setAt ?? 0)
 }
 
 async function setGoal($: EngineInterface, fn: (g: Goal | null) => Goal | null) {
@@ -225,7 +234,7 @@ async function syncTicking($: EngineInterface) {
 
 // A goal typed by the person: Claude is asked for a plan, which waits for approval before any work.
 async function startGoal($: EngineInterface, text: string) {
-  const g: Goal = { text: clip(text.trim(), 200), status: 'planning', tasks: [], activeId: null, other: 0 }
+  const g: Goal = { text: clip(text.trim(), 200), status: 'planning', tasks: [], activeId: null, other: 0, setAt: await $.clock.now() }
   await update($, asking, () => null)
   await setGoal($, () => g)
   void $.ui.open({ id: PANE, title: PANE_TITLE })
@@ -367,7 +376,10 @@ export const register: Register = (on, options) => {
     // A goal kept for this project from an earlier session: offered to continue, or a new one asked for.
     if (!(await read($, goal))) {
       const saved = await $.store.get(await storeKey($))
-      if (saved && typeof saved === 'object') await update($, goal, () => saved as Goal)
+      if (saved && typeof saved === 'object') {
+        await update($, goal, () => saved as Goal)
+        await update($, heldAt, () => (saved as Goal).setAt ?? 0)
+      }
     }
     const g = await read($, goal)
     if (g && g.status !== 'done') {
@@ -407,7 +419,8 @@ export const register: Register = (on, options) => {
     if (!items.length) return { deny: 'A plan needs at least one task.' }
     const before = await read($, goal)
     const text = clip(String(input.goal ?? '').trim() || before?.text || 'Session goal', 200)
-    const proposed = replan(before, text, orderPlan(items))
+    // A plan with no goal set before it is a new goal, set now.
+    const proposed = { setAt: await $.clock.now(), ...replan(before, text, orderPlan(items)) }
     await update($, asking, () => null)
     await setGoal($, () => proposed)
     void $.ui.open({ id: PANE, title: PANE_TITLE })

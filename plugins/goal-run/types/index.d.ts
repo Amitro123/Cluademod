@@ -29,6 +29,8 @@ export type Goal = {
   outside?: number
   // Chosen at approval; absent on a goal saved before it: read as run.
   pace?: Pace
+  // When the person set it; absent on a goal saved before it. A newer goal from another session wins.
+  setAt?: number
 }
 
 // Work started from the followups to-do list (its Start button) while a goal is open: counted apart,
@@ -53,6 +55,7 @@ declare module 'claude-code' {
   interface PluginState {
     'goal-run': {
       goal: Goal | null
+      heldAt: number
       asking: Asking
       side: Side | null
       tick: number
