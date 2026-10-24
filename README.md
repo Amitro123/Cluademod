@@ -1,6 +1,6 @@
 # claudemod: mods for Claude Code
 
-Five mods, each installed on its own:
+Five mods, each installed on its own. They also work side by side: each draws its part of the band above the prompt, and the others' parts stay.
 
 | Mod | What it does |
 |---|---|
@@ -57,6 +57,8 @@ A Claude Code plugin that puts a little animated spark above the prompt, with a 
 
 In a terminal (which can't draw SVG) the same readings show up as a text spark `✦(•_•)` and `▰▰▰▱▱` batteries. A one-line summary also goes to the status bar.
 
+The spark shares both places with the other mods: what they draw in the band shows under its row, and whatever sits beside the model picker stays next to the bolt and capsule.
+
 ### Install
 
 ```text
@@ -74,12 +76,14 @@ Set with `claude plugin configure clawd-hud@claudemod`, or in the plugin setting
 
 ### How it works
 
-- `hooks/register.tsx` hooks `session.start`, `session.measure`, `turn.start`, `tool.call`, `turn.complete` and `ui.render`, keeps its state in atoms, and redraws the spark 8 times a second.
+- `hooks/register.tsx` hooks `session.start`, `session.measure`, `turn.start`, `tool.call`, `turn.complete` and `ui.render`, keeps its state in atoms, and redraws the spark 8 times a second while it moves (working, the loop, fireworks, the storm) and once a second while it idles or rests.
 - `hooks/scene.ts` paints one frame of a mood on an 88×20 pixel stage. Every motion is a plain function of the time since the mood began, so a redraw lands on the same frame and never restarts an animation.
 - `hooks/gauges.ts` draws the batteries, the bolt and the capsule as plain SVG, so the demo renderer uses the exact same art.
 - `tests/plan.test.tsx` checks the personal and enterprise views, the spend-cap overflow and both cache timers. Run it with `claude plugin test plugins/clawd-hud`.
 
 ### Changelog
+
+**0.6.1**: plays well with the other mods: their bands, and other changes beside the model picker, are no longer hidden. Idle redraws drop from 8 a second to 1. No "clawd-hud loaded" toast on every start.
 
 **0.6.0**: a new look. The spark mascot, its scenes, the stage and the batteries, bolt and capsule are all new, drawn by a new animation engine. Everything else carries over: plans, timers, loop detection, the hard-task and eureka moments.
 
@@ -99,8 +103,8 @@ Set with `claude plugin configure clawd-hud@claudemod`, or in the plugin setting
 /plugin install task-hud@claudemod
 ```
 
-- **A progress bar above the prompt** once Claude writes a to-do list (`TodoWrite`, or `TaskCreate`/`TaskUpdate`): it's titled with the prompt that started the work, fills as each to-do gets ticked off (`Tasks 4/5 · 80%`), and shows the one in progress (`Now: Write the script`). When it shares the band with `clawd-hud`, it draws above the spark. A finished list clears on your next prompt.
-- **A Sub-agents pane** that opens the first time Claude sends out a sub-agent, and reopens with `/task-hud`. Each agent gets a pixel creature in its own color that walks while it works. Its card shows the task's description, the agent type and model (`general-purpose · Opus 5.5`), its tokens and run time, the current step (`Step 3 · Reading pre-outline.md`), the steps before it and a progress line. Cards are grouped into **Running** and **Finished**. A finished agent closes its eyes and lists what it did (`Wrote script.md`). A failed one turns gray. **Clear** drops the finished cards.
+- **A progress bar above the prompt** once Claude writes a to-do list (`TodoWrite`, or `TaskCreate`/`TaskUpdate`): it's titled with the prompt that started the work, fills as each to-do gets ticked off (`Tasks 4/5 · 80%`), and shows the one in progress (`Now: Write the script`). The title survives a reload of the mod. When it shares the band with `clawd-hud`, it draws above the spark. A finished list clears on your next prompt.
+- **A Sub-agents pane** that opens the first time Claude sends out a sub-agent, and reopens with `/task-hud`. Each agent gets a pixel creature in its own color that walks while it works. Its card shows the task's description, the agent type and model (`general-purpose · Opus 5.5`), its tokens and run time, the current step (`Step 3 · Reading pre-outline.md`), the steps before it and a progress line. Cards are grouped into **Running** and **Finished**. A finished agent closes its eyes and lists what it did (`Wrote script.md`). A failed one turns gray. An agent sent back to work gets its card back, or a new one if its old card was already dropped. **Clear** drops the finished cards.
 
 Nobody knows ahead of time how many steps a sub-agent will take, so a running agent's line creeps toward 90% as it works and fills only when it finishes. The token count is the size of the agent's context on its latest request.
 
@@ -124,7 +128,7 @@ While Claude works, it often notices things outside the task: a flaky test, a st
 - **A check when the turn ends.** If Claude's final reply says something is unverified, untested or left open (a short English and Hebrew phrase list: `not verified`, `untested`, `known gap`, `open questions`, `לא נבדק`, `פער`, `שאלות פתוחות`, ...; `Open questions: none` doesn't count; not `follow-up`, this mod's own word) and it never called `flag` that turn, the turn is stopped once with a nudge to flag each item or say there are none. It reads the reply whatever its source, so findings relayed from a subagent's report count; phrases in code blocks and inline code don't. It stops at most once per turn, never when `flag` was called (even if you turned the item down), and only in interactive sessions (not `-p` or the SDK). Limits: it is a phrase match, so a reply that leaves something open in other words is missed (the second look above still reads it), and a phrase used in passing can stop a turn needlessly. Add phrases to `STOP_PHRASES` in `hooks/register.tsx`; turn it off with the `stopCheck` option.
 - **Claude stops and asks you about each one** in the question dialog: *Claude noticed: "Fix the flaky upload test" (Fails 1 in 5 runs · tests/upload.test.ts:42). Add it to your follow-ups?* You answer **Add to to-do** or **Not needed**, or type your own wording, which is kept as the title. Claude gets your answer back and carries on. If you close the dialog without answering, the item waits in a band above the prompt with **Add to to-do** (`a`), **Skip** (`s`) and **Add all**, so it isn't lost.
 - **A To-do pane** lists what you kept, colored by status: orange `○` open, blue `◐` in progress, green struck-through `✓` done. A red 🐞 marks bugs (Claude passes `kind: "bug"` to `flag` for broken behavior; `/followup` adds a plain task). **✓ Done** / **↺ Reopen** toggles an item, ✕ removes it, and `/followup <text>` adds one by hand. The header counts open, in progress and done. The list is saved per project and comes back in the next session (lists saved by older versions are migrated). Two sessions open in the same project don't overwrite each other: each save merges with what the other saved, so items added, changed or removed in either one are kept that way. When the project has open or in-progress items, the pane opens by itself as the session starts; the `openOnStart` option turns that off. The list is saved on the machine running Claude Code, so it carries over between local sessions but not between cloud sessions, whose container is gone when they end: use **Export to → Memory** for that.
-- **▶ Start** (per open item, or **Start all open**) marks it in progress and submits a message to Claude with the item's id, title, detail and location, asking it to do the work. When it finishes, Claude calls the `done` tool with that id and the item turns green. `done` is idempotent, rejects unknown ids, and the prompt tells Claude not to use it for unrelated work.
+- **▶ Start** (per open item, or **Start all open**) marks it in progress and submits a message to Claude with the item's id, title, detail and location, asking it to do the work. When it finishes, Claude calls the `done` tool with that id and the item turns green. `done` is idempotent, rejects unknown ids, and the prompt tells Claude not to use it for unrelated work. If the message can't be sent, the items go back to open, so you can start them again. Pressing **Add to to-do** twice keeps the item once.
 - **Export to:**
 
 | Button | Writes to | Why |
