@@ -160,28 +160,41 @@ Tests: `claude plugin test plugins/rtl-toggle`.
 
 ## goal-run: a goal for the session
 
-![goal-run: the question a session opens with, and the Goal pane with the runner at 40% and each task's tokens](assets/goal-run.png)
+![goal-run: the question a session opens with, and the Goal pane at 40%, with each task's priority and tokens](assets/goal-run.png)
 
-<sub>A mock-up, not a screenshot. The track and the runner are drawn by the mod's own `art.ts`; the band and the pane around them follow its layout.</sub>
-
-**The whole run, step by step:** the question when a session starts, the plan put to you for approval, the run with a to-do item started on the side, and the goal reached.
-
-![goal-run in four steps: the start-of-session question; the plan in the question dialog with the pane waiting at 0%; the runner at 40% with each task's tokens and the band asking whether a to-do item joins the goal; the runner cheering at the flag at 100%](assets/goal-run-flow.png)
-
-<sub>Also a mock-up: the runner and track are the mod's own drawing at each step; the dialog is Claude Code's, so yours will look like your app's.</sub>
+<sub>Mock-ups, not screenshots: the track and the runner are drawn by the mod's own `art.ts`, and the band, the pane and the dialogs follow its layout. The dialogs are Claude Code's own, so yours will look like your app's.</sub>
 
 ```text
 /plugin install goal-run@claudemod
 ```
 
-- **The question.** When a session starts, a band above the prompt asks *Is there a goal you want to work on this session?*, with a field to type it. **No goal this time** dismisses it. If an earlier session in this project left a goal unfinished, the band offers **Continue**, **New goal** or **Not now** instead. `/session-goal <text>` sets a goal at any time, `/session-goal` shows it, and `/session-goal clear` drops it (Claude Code has its own `/goal`, so the mod's is named apart).
-- **The plan.** Your goal goes to Claude, which breaks it into 3 to 8 tasks with the `plan` tool, each with a priority (high, medium or low) and the tasks it depends on. The plan is ordered by priority, highest first, except that a task comes after what it depends on (tests after the code they test) and says so (*needs 2*). The dialog shows each task's priority, and **↑ ↓** in the pane move pending tasks; Claude works the list in its current order, yours included. You approve it in the question dialog, or say what to change (Claude revises and asks again). Nothing starts before you approve. A plan whose dialog you closed waits in the pane with **Approve plan**.
-- **Run through, or be asked.** The approval dialog offers **Approve, run through**: Claude goes from task to task on its own, and if it tries to stop with tasks left, it's sent on once, unless it says it's blocked or needs you. Or **Approve, ask between tasks**: after each task a dialog asks *"Add tests" is done (40%). Go on to "Document the endpoint"?* with **Continue** or **Stop here**. A button in the pane switches between the two while you work.
-- **Adding a task mid-goal.** Ask Claude for more work during the goal, and it uses the `add` tool with a priority and what the task needs. The task goes in among the pending tasks by priority, after anything it needs, and a dialog shows where (*It goes in as #3, before "C". Progress 25% → 20%*) for you to **Add it** or say **Not now**. Done and in-progress tasks stay as they are. A full re-plan also keeps the done tasks and their tokens. A to-do item marked as a bug joins the goal as high priority.
-- **The run.** The Goal pane shows the goal, a track from 0 to 100%, and a pixel Claude in blue sneakers that stands still between tasks and runs while one is in progress. Claude marks each task in progress and done with the `update` tool, and the runner moves along the track as tasks are done. At 100% it cheers at the flag. Each of your prompts while the goal is open carries the plan's state, so Claude keeps track of where it is.
-- **What each task cost.** Every model request, sub-agents' included, is counted against the task in progress, and the pane shows each task's tokens. Planning and work between tasks have a line of their own. The count is everything a request carries (input, output, cache reads and writes), not a price.
-- **With followups' to-do list.** Pressing **▶ Start** on a to-do item while a goal is open is a side job. Claude gets no goal reminder with it, so the two don't compete, and its tokens show on a line of their own, *Outside the goal*. The band above the prompt asks whether to **Add to goal**, and shows what that does to the plan (*grows to 6 tasks: 40% → 33%*), or **Keep it separate**. Added, the item becomes a task in progress that carries the tokens it used so far, and it turns done when followups marks the item done. The goal's text stays the same, but the plan grows, so the percentage drops to match the work added. The side job ends when you send a prompt of your own.
-- The goal is saved per project on the machine running Claude Code, like followups' list. Turn the question off with the `askOnStart` option.
+### How a goal runs
+
+![goal-run in four steps: the start-of-session question; the plan by priority in the approval dialog, with the pane waiting at 0%; the runner at 40% with each task's tokens and a to-do item offered to the goal; the runner cheering at 100%](assets/goal-run-flow.png)
+
+1. **The question.** When a session starts, a band above the prompt asks *Is there a goal you want to work on this session?*, with a field to type it. **No goal this time** dismisses it. If an earlier session in this project left a goal unfinished, the band offers **Continue**, **New goal** or **Not now** instead.
+2. **The plan, by priority.** Your goal goes to Claude, which breaks it into 3 to 8 tasks with the `plan` tool. Each task has a priority (high, medium or low) and the tasks it depends on. The plan is ordered highest priority first, except that a task comes after what it needs: tests come after the code they test, and say so (*needs 1*).
+3. **Your approval, and the pace.** The plan is put to you in a dialog, each task with its priority. Pick **Approve, run through**, **Approve, ask between tasks**, or **Change it** (Claude revises and asks again). Nothing starts before you approve. If you close the dialog, the plan waits in the pane with both approve buttons.
+   - **Run through:** Claude goes from task to task on its own. If it tries to stop with tasks left, it's sent on once; it can still stop when it's blocked or needs your decision.
+   - **Ask between tasks:** after each task, a dialog asks *"Add tests" is done (40%). Go on to "Document the endpoint"?*, with **Continue** or **Stop here**.
+   - A button in the pane switches between the two while you work.
+4. **The run.** The Goal pane shows the goal, a track from 0 to 100%, and a pixel Claude in blue sneakers. It stands still between tasks, runs while one is in progress, and cheers at the flag at 100%. Claude marks each task in progress and done with the `update` tool, and takes the first pending task in the list's current order. Each of your prompts while the goal is open carries the plan's state, so Claude keeps track of where it is.
+5. **What each task cost.** Every model request, sub-agents' included, is counted against the task in progress, and the pane shows each task's tokens. Planning and work between tasks have a line of their own. The count is everything a request carries (input, output, cache reads and writes), not a price.
+
+### Steering it while it runs
+
+![goal-run while it runs: the plan by priority with the pace choice; a task added mid-goal, placed by priority; the question between tasks; running through, sent on to the next task](assets/goal-run-steering.png)
+
+- **Reorder.** **↑ ↓** in the pane move tasks that haven't started. Claude works the list as you leave it.
+- **Add a task.** Ask Claude for more work during the goal, and it uses the `add` tool with a priority and what the task needs. The task goes in among the tasks that haven't started, by priority and after anything it needs. A dialog shows where it lands and what that does to the percentage (*It goes in as #4, before "Document the endpoint". Progress 50% → 40%*), and you choose **Add it** or **Not now**. Done and in-progress tasks stay where they are. The goal's text doesn't change, but the plan grows, so the percentage drops to match the work added.
+- **Re-plan.** A new plan in the middle of a goal keeps the done tasks and their tokens.
+- **Work from followups' to-do list.** Pressing **▶ Start** on a to-do item while a goal is open is a side job. Claude gets no goal reminder with it, so the two don't compete, and its tokens show on a line of their own, *Outside the goal*. The band above the prompt asks whether to **Add to goal**, showing what that does to the plan (*grows to 6 tasks: 40% → 33%*), or **Keep it separate**. Added, the item becomes a task in progress, carrying the tokens it used so far, and a bug comes in as high priority. It turns done when followups marks the item done. The side job ends when you send a prompt of your own.
+
+### Commands and options
+
+- `/session-goal <text>` sets a goal at any time, `/session-goal` shows it, and `/session-goal clear` drops it. Claude Code has its own `/goal`, so the mod's command has a different name.
+- The goal is saved per project on the machine running Claude Code, like followups' list, so it carries over between local sessions in the same folder.
+- `askOnStart` (`on` / `off`) turns the start-of-session question off.
 
 Tests: `claude plugin test plugins/goal-run`.
 
