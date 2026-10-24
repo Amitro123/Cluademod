@@ -278,7 +278,11 @@ async function keep($: EngineInterface, flags: Flag[]) {
   if (!flags.length) return
   const ids = new Set(flags.map(f => f.id))
   await update($, pending, list => list.filter(f => !ids.has(f.id)))
-  await update($, items, list => [...list, ...flags.map(f => ({ ...f, kind: f.kind ?? 'task', status: 'open' as const }))])
+  // By id, inside the update: two presses before a redraw both carry the same flag.
+  await update($, items, list => {
+    const have = new Set(list.map(i => i.id))
+    return [...list, ...flags.filter(f => !have.has(f.id)).map(f => ({ ...f, kind: f.kind ?? 'task', status: 'open' as const }))]
+  })
   await save($)
   void $.ui.open({ id: PANE, title: PANE_TITLE })
 }

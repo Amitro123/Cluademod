@@ -175,6 +175,21 @@ describe('flag → ask → to-do → export', () => {
     await pane.unmount()
   })
 
+  test('two presses of Add before the band redraws keep the item once', async ($, on) => {
+    engine(on, {})
+    on('tool.call', { tool: 'AskUserQuestion' }, () => {
+      throw new Error('dismissed')
+    })
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await $.tool.call({ tool: TOOL, title: 'Fix the flaky upload test' } as never)
+    const band = await $.ui.mount({ ...BAND, surface: 'desktop' } as never)
+    await Promise.all([band.press({ key: 'add' }), band.press({ key: 'add' })])
+    await band.unmount()
+    const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+    expect(await texts(pane)).toMatch(/1 open · 0 in progress · 0 done/)
+    await pane.unmount()
+  })
+
   test('Clear done and ✕ remove items', async ($, on) => {
     engine(on, {})
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
