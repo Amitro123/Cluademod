@@ -18,6 +18,11 @@ function usage(on: On, rateLimits: { kind: string; percentUsed: number }[], usd 
   on('session.start', () => ({ cwd: '.' }) as never)
   on('ui.status', () => ({ value: undefined }) as never)
   on('ui.toast', () => ({ value: undefined }) as never)
+  // What sits beneath clawd-hud: another mod's band, or the engine's own mode labels.
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.component === 'AbovePrompt' ? 'another mod band' : 'engine modes'}</Text>
+  })
 }
 
 async function band($: Engine, surface: 'terminal' | 'desktop' = 'terminal') {
@@ -93,5 +98,25 @@ describe('cache timer', () => {
     usage(on, PERSONAL)
     on('session.measure', ($, e) => ({ changed: e.changed }) as never)
     expect(await cacheLabel($, PERSONAL)).toMatch(/cache 60:00/)
+  })
+})
+
+describe('sharing its sites', () => {
+  test('the band keeps what the mods beneath it draw, on both surfaces', async ($, on) => {
+    usage(on, PERSONAL)
+    expect(await band($, 'terminal')).toMatch(/another mod band/)
+  })
+
+  test('the desktop band keeps it too', async ($, on) => {
+    usage(on, PERSONAL)
+    expect(await band($, 'desktop')).toMatch(/another mod band/)
+  })
+
+  test("beside the model picker, the engine's own drawing stays", async ($, on) => {
+    usage(on, PERSONAL)
+    on('session.measure', ($, e) => ({ changed: e.changed }) as never)
+    const text = await cacheLabel($, PERSONAL)
+    expect(text).toMatch(/cache 60:00/)
+    expect(text).toMatch(/engine modes/)
   })
 })

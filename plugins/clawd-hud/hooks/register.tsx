@@ -267,6 +267,8 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text } = $.ui.resolve(e)
+    // What the mods beneath draw stays, under the spark's row: this band is shared.
+    const below = await next(e)
     const { rl, enterprise, wins } = await planOf($, cfg)
     const spent = enterprise ? await read($, cost) : null
     const t = await read($, minute)
@@ -291,7 +293,7 @@ export const register: Register = (on, options) => {
     })
 
     if (e.surface !== 'desktop' && e.surface !== 'vscode') {
-      return (
+      const row = (
         <Box flexDirection="row" flexWrap="wrap" gap={3}>
           <Text bold color="#ffb547">{faceFor(shown, sceneT, idea)}</Text>
           {meters.map(w => (
@@ -305,10 +307,16 @@ export const register: Register = (on, options) => {
           {spent !== null ? <Text bold>{`${usd(spent)} this session`}</Text> : null}
         </Box>
       )
+      return (
+        <Box flexDirection="column">
+          {row}
+          {below}
+        </Box>
+      )
     }
     const { Svg } = $.ui.resolve(e as typeof e & { surface: 'desktop' })
 
-    return (
+    const row = (
       <Box flexDirection="row" alignItems="center" gap={2} paddingX={1}>
         <Svg
           source={sceneSvg(shown, sceneT, idea)}
@@ -333,6 +341,12 @@ export const register: Register = (on, options) => {
         </Box>
       </Box>
     )
+    return (
+      <Box flexDirection="column">
+        {row}
+        {below}
+      </Box>
+    )
   })
 
   // Beside the model picker: the cache bolt and the context capsule.
@@ -343,15 +357,17 @@ export const register: Register = (on, options) => {
     const c = await read($, ctx)
     const pct = c?.percent
     const ctxLabel = pct === undefined ? 'ctx –' : `ctx ${pct}%${c?.tokens ? ` · ${tok(c.tokens)}/${tok(c.window)}` : ''}`
-    const modes = e.props.modes.join(' & ')
+    // The engine's own drawing here (the mode labels, or another mod's take on them) stays beside ours.
+    const below = await next(e)
 
-    if (e.surface !== 'desktop' && e.surface !== 'vscode') {
+    // SessionMode is raised on the terminal and desktop alone.
+    if (e.surface !== 'desktop') {
       return (
         <Box flexDirection="row" gap={1}>
           <Text color={cache.warm ? cache.color : undefined} dimColor={!cache.warm}>{`ϟ ${cache.label}`}</Text>
           <Text dimColor>·</Text>
           <Text dimColor>{ctxLabel}</Text>
-          {modes ? <Text dimColor>{`· ${modes}`}</Text> : null}
+          {below}
         </Box>
       )
     }
@@ -364,7 +380,7 @@ export const register: Register = (on, options) => {
         <Text dimColor>·</Text>
         <Svg source={pillSvg(pct ?? 0)} alt="context used" width={PILL.width} height={PILL.height} />
         <Text dimColor>{ctxLabel}</Text>
-        {modes ? <Text dimColor>{`· ${modes}`}</Text> : null}
+        {below}
       </Box>
     )
   })
