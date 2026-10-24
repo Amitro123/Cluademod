@@ -1,6 +1,6 @@
 {
   "name": "clawd-hud",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "A pixel spark above the prompt with usage batteries (personal or enterprise), a prompt-cache timer and a context meter by the model picker",
   "author": { "name": "Amit Rosen", "url": "https://github.com/Amitro123" },
   "repository": "https://github.com/Amitro123/claudemod",

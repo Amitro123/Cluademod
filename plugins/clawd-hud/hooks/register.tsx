@@ -10,6 +10,9 @@ import { DONE_SECONDS, ERROR_SECONDS, HARD_SECONDS, SCENE_HEIGHT, SCENE_WIDTH, s
 const mood = atom({ plugin: 'clawd-hud', key: 'mood' } as const, 'idle' as Mood)
 const moodAt = atom({ plugin: 'clawd-hud', key: 'moodAt' } as const, 0)
 const frame = atom({ plugin: 'clawd-hud', key: 'frame' } as const, 0)
+// Whether the band last drew SVG scenes (desktop) rather than the terminal's text face. A render
+// can't write state, and after a reload the next render sets it again.
+let svgBand = false
 const cacheAt = atom({ plugin: 'clawd-hud', key: 'cacheAt' } as const, null as number | null)
 const now = atom({ plugin: 'clawd-hud', key: 'now' } as const, 0)
 const minute = atom({ plugin: 'clawd-hud', key: 'minute' } as const, 0)
@@ -23,7 +26,9 @@ const cost = atom({ plugin: 'clawd-hud', key: 'cost' } as const, null as number 
 const MIN = 60_000
 // The mascot is redrawn as still frames at this interval (8 a second).
 const FRAME_MS = 125
+// Idle and resting: the terminal's face needs a frame a second; the SVG scenes look smooth at 4.
 const IDLE_FRAME_MS = 1_000
+const SVG_IDLE_FRAME_MS = 250
 // After the fireworks the spark rests this long before idling.
 const RELAX_MS = 4 * MIN
 // The same tool with the same input this many times in one turn means Claude is going in circles.
@@ -134,14 +139,15 @@ const ALT: Record<Mood, string> = {
 // The terminal's spark, as text.
 const SPIN = ['◐', '◓', '◑', '◒']
 
-function faceFor(m: Mood, t: number, idea: boolean): string {
+export function faceFor(m: Mood, t: number, idea: boolean): string {
   const f = Math.floor((t * 1000) / FRAME_MS)
   if (m === 'working') return `✦(•_•) ${SPIN[f % SPIN.length]}`
   if (m === 'loop') return '✦(@_@) ↻'
   if (m === 'done') return `✦\\(^o^)/${idea ? ' (!)' : ''}`
   if (m === 'relax') return '✦(˘_˘) ♪'
   if (m === 'error') return '✦(;_;) ϟ'
-  return f % 30 === 0 ? '✦(-_-)' : '✦(•_•)'
+  // On whole seconds, so the once-a-second idle redraw always lands on it.
+  return Math.floor(t) % 4 === 0 ? '✦(-_-)' : '✦(•_•)'
 }
 
 // ---------- loop detector ----------
@@ -201,12 +207,13 @@ export const register: Register = (on, options) => {
       await refreshStatus($, cfg)
     }))
     // Every motion is a function of elapsed time, so an idle or resting spark can redraw
-    // once a second; working, loop, done and error scenes get every frame.
+    // less often; working, loop, done and error scenes get every frame.
     timers.push($.clock.every(FRAME_MS, async () => {
       const t = await $.clock.now()
       const scene = sceneFor(await read($, mood), (t - (await read($, moodAt))) / 1000).mood
       const still = scene === 'idle' || scene === 'relax'
-      if (still && t - (await read($, frame)) < IDLE_FRAME_MS) return
+      const every = svgBand ? SVG_IDLE_FRAME_MS : IDLE_FRAME_MS
+      if (still && t - (await read($, frame)) < every) return
       await update($, frame, () => t)
     }))
     // Tick the cache countdown while it is warm, and once more after expiry: a late tick
@@ -271,6 +278,7 @@ export const register: Register = (on, options) => {
   // The band above the prompt: the spark on the left, a battery per usage window beside it.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
+    svgBand = e.surface !== 'terminal'
     const { Box, Text } = $.ui.resolve(e)
     // What the mods beneath draw stays, under the spark's row: this band is shared.
     const below = await next(e)

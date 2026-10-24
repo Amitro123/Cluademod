@@ -76,12 +76,14 @@ Set with `claude plugin configure clawd-hud@claudemod`, or in the plugin setting
 
 ### How it works
 
-- `hooks/register.tsx` hooks `session.start`, `session.measure`, `turn.start`, `tool.call`, `turn.complete` and `ui.render`, keeps its state in atoms, and redraws the spark 8 times a second while it moves (working, the loop, fireworks, the storm) and once a second while it idles or rests.
+- `hooks/register.tsx` hooks `session.start`, `session.measure`, `turn.start`, `tool.call`, `turn.complete` and `ui.render`, keeps its state in atoms, and redraws the spark 8 times a second while it moves (working, the loop, fireworks, the storm) and less often while it idles or rests: 4 times a second for the SVG scenes, once a second for the terminal's text face.
 - `hooks/scene.ts` paints one frame of a mood on an 88×20 pixel stage. Every motion is a plain function of the time since the mood began, so a redraw lands on the same frame and never restarts an animation.
 - `hooks/gauges.ts` draws the batteries, the bolt and the capsule as plain SVG, so the demo renderer uses the exact same art.
 - `tests/plan.test.tsx` checks the personal and enterprise views, the spend-cap overflow and both cache timers. Run it with `claude plugin test plugins/clawd-hud`.
 
 ### Changelog
+
+**0.6.2**: the idle and resting SVG scenes redraw 4 times a second instead of once, so they move smoothly; the terminal stays at once a second. The terminal face's idle blink shows again (every 4 seconds).
 
 **0.6.1**: plays well with the other mods: their bands, and other changes beside the model picker, are no longer hidden. Idle redraws drop from 8 a second to 1. No "clawd-hud loaded" toast on every start.
 
@@ -197,7 +199,7 @@ Tests: `claude plugin test plugins/rtl-toggle`.
 ### Commands and options
 
 - `/session-goal <text>` sets a goal at any time, `/session-goal` shows it, and `/session-goal clear` drops it. Claude Code has its own `/goal`, so the mod's command has a different name.
-- The goal is saved per project on the machine running Claude Code, like followups' list, so it carries over between local sessions in the same folder. If two sessions in the folder each set a goal, the one set later is the one saved.
+- The goal is saved per project on the machine running Claude Code, like followups' list, so it carries over between local sessions in the same folder. If two sessions in the folder each set a goal, the one set later is the one saved. The other session is told once, with a toast, that its progress isn't saved.
 - `askOnStart` (`on` / `off`) turns the start-of-session question off.
 
 Tests: `claude plugin test plugins/goal-run`.

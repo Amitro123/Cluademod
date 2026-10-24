@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { faceFor } from '../hooks/register'
 
 const PERSONAL = [
   { kind: 'five_hour', percentUsed: 34 },
@@ -152,6 +153,24 @@ describe('redraws', () => {
     expect(count.n).toBeGreaterThanOrEqual(7)
   })
 
+  test('idle where the band draws SVG, the scenes redraw 4 times a second', async ($, on) => {
+    const count = frames(on)
+    const clock = mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: PERSONAL } }) as never)
+    on('session.start', () => ({ cwd: '.' }) as never)
+    on('ui.status', () => ({ value: undefined }) as never)
+    on('ui.toast', () => ({ value: undefined }) as never)
+    on('ui.render', ($, e) => {
+      const { Text } = $.ui.resolve(e)
+      return <Text>another mod band</Text>
+    })
+    await band($, 'desktop')
+    count.n = 0
+    await clock.advance(4_000)
+    expect(count.n).toBeGreaterThanOrEqual(12)
+    expect(count.n).toBeLessThanOrEqual(20)
+  })
+
   test('no toast on every start', async ($, on) => {
     const toasts: string[] = []
     mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
@@ -164,5 +183,15 @@ describe('redraws', () => {
     })
     await $.session.start({ cwd: '.' } as never)
     expect(toasts).toEqual([])
+  })
+})
+
+describe('the terminal face', () => {
+  test('idle, it blinks at least once in any 4 one-second redraws, whatever their phase', () => {
+    for (const phase of [0, 0.125, 0.37, 0.5, 0.875]) {
+      const faces = [0, 1, 2, 3].map(k => faceFor('idle', 10 + phase + k, false))
+      expect(faces).toContain('✦(-_-)')
+      expect(faces).toContain('✦(•_•)')
+    }
   })
 })
