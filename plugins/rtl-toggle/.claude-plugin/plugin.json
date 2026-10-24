@@ -1,6 +1,6 @@
 {
   "name": "rtl-toggle",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Toggle proper RTL layout for mixed Hebrew/English chat text",
   "author": {
     "name": "Amit Rosen",
