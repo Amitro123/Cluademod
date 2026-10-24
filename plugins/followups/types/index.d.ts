@@ -14,6 +14,8 @@ declare module 'claude-code' {
       exported: string
       // Titles (normalised) the person said aren't needed, so they aren't suggested again.
       skipped: string[]
+      // The list as this session last loaded or saved it, to merge with another session's saves.
+      base: Item[]
     }
   }
 }
