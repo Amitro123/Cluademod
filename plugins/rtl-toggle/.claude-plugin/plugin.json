@@ -2,8 +2,11 @@
   "name": "rtl-toggle",
   "version": "0.2.0",
   "description": "Toggle proper RTL layout for mixed Hebrew/English chat text",
-  "author": { "name": "Amit Rosen", "url": "https://github.com/Amitro123" },
-  "repository": "https://github.com/Amitro123/RTL-claude-mod",
+  "author": {
+    "name": "Amit Rosen",
+    "url": "https://github.com/Amitro123"
+  },
+  "repository": "https://github.com/Amitro123/claudemod",
   "license": "MIT",
   "types": "./types/index.d.ts"
 }

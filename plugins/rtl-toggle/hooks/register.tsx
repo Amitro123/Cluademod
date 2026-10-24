@@ -59,11 +59,18 @@ export const register: Register = on => {
     )
   })
 
-  for (const component of ['UserMessage', 'AssistantMessage'] as const) {
-    on('ui.render', { component }, async ($, e, next) => {
-      if (!(await read($, rtlEnabled))) return next(e)
+  // One hook per message site, each with a literal matcher so `e` narrows to that site's props.
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    if (!(await read($, rtlEnabled))) return next(e)
+    return next({ ...e, props: { ...e.props, text: rtlText(e.props.text, e.surface) } })
+  })
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    if (!(await read($, rtlEnabled))) return next(e)
+    return next({ ...e, props: { ...e.props, text: rtlText(e.props.text, e.surface) } })
+  })
+}
 
-      return next({ ...e, props: { ...e.props, text: toRtl(e.props.text, { tableCells: e.surface !== 'terminal' }) } })
-    })
-  }
+// Table rows are fixed cell by cell except on the terminal, which has no bidi layout to fix.
+function rtlText(text: string, surface: string): string {
+  return toRtl(text, { tableCells: surface !== 'terminal' })
 }
