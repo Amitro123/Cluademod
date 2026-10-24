@@ -1,0 +1,9 @@
+{
+  "name": "brain-hud",
+  "version": "0.1.0",
+  "description": "Shows the memory mistake-brain builds for a project: a pixel Claude with a brain reacts to each entry in MISTAKES.md, and a pane draws the PARA memory as a tree. Offers finished follow-ups and reached goals to memory.",
+  "author": { "name": "Amit Rosen", "url": "https://github.com/Amitro123" },
+  "repository": "https://github.com/Amitro123/claudemod",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
