@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Asking, Goal, Side, Task, TaskStatus } from '../types'
+import type { Asking, Goal, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
 
@@ -46,8 +46,71 @@ export function poseOf(g: Goal | null): Pose {
 }
 
 // The plan as the person reads it in the approval dialog.
+// ---------- priorities ----------
+
+const RANK: Record<Priority, number> = { high: 0, medium: 1, low: 2 }
+const PRIORITY_MARK: Record<Priority, string> = { high: '▲ high', medium: '■ med', low: '▼ low' }
+const PRIORITY_COLOR: Record<Priority, string> = { high: '#e5484d', medium: '#c9a227', low: '#8b8fa3' }
+export const priorityOf = (t: Task): Priority => t.priority ?? 'medium'
+const isPriority = (p: unknown): p is Priority => p === 'high' || p === 'medium' || p === 'low'
+
+export type PlanItem = { title: string; priority: Priority; dependsOn: number[] }
+
+// The plan as the tool was given it: titles alone (medium), or { title, priority, dependsOn } with
+// dependsOn the 1-based places of other tasks in the same list.
+export function planItems(raw: unknown): PlanItem[] {
+  if (!Array.isArray(raw)) return []
+  return raw.slice(0, MAX_TASKS).map(r => {
+    const o = (r && typeof r === 'object' ? r : { title: r }) as { title?: unknown; priority?: unknown; dependsOn?: unknown }
+    return {
+      title: clip(String(o.title ?? '').trim(), 120),
+      priority: isPriority(o.priority) ? o.priority : 'medium',
+      dependsOn: Array.isArray(o.dependsOn) ? o.dependsOn.map(Number).filter(n => Number.isInteger(n)) : [],
+    }
+  }).filter(it => it.title)
+}
+
+// The order the work runs in: the highest priority whose dependencies are done goes next, ties in
+// the order given. Dependencies a cycle makes impossible are dropped, and those tasks keep their place.
+export function orderPlan(items: PlanItem[]): Task[] {
+  const deps = items.map((it, i) => new Set(it.dependsOn.map(n => n - 1).filter(j => j >= 0 && j < items.length && j !== i)))
+  const placed: number[] = []
+  const left = new Set(items.map((_, i) => i))
+  while (left.size) {
+    const ready = [...left].filter(i => [...deps[i]!].every(j => !left.has(j)))
+    const pool = ready.length ? ready : [Math.min(...left)]
+    const next = pool.sort((a, b) => RANK[items[a]!.priority] - RANK[items[b]!.priority] || a - b)[0]!
+    placed.push(next)
+    left.delete(next)
+  }
+  const idOf = new Map(placed.map((orig, k) => [orig, `t${k + 1}`]))
+  return placed.map((orig, k) => {
+    const it = items[orig]!
+    const needs = [...deps[orig]!].filter(j => placed.indexOf(j) < k).map(j => idOf.get(j)!)
+    return { id: `t${k + 1}`, title: it.title, status: 'pending', tokens: 0, priority: it.priority, ...(needs.length ? { needs } : {}) }
+  })
+}
+
+// Moves a pending task one place up or down among the pending tasks; the person's order then stands.
+export function movePending(g: Goal, id: string, by: -1 | 1): Goal {
+  const pending = g.tasks.map((t, i) => (t.status === 'pending' ? i : -1)).filter(i => i >= 0)
+  const at = pending.indexOf(g.tasks.findIndex(t => t.id === id))
+  const to = pending[at + by]
+  if (at < 0 || to === undefined) return g
+  const tasks = [...g.tasks]
+  ;[tasks[pending[at]!], tasks[to]] = [tasks[to]!, tasks[pending[at]!]!]
+  return { ...g, tasks }
+}
+
+const needsText = (t: Task, g: Goal) => (t.needs?.length ? ` (needs ${t.needs.map(id => g.tasks.findIndex(x => x.id === id) + 1).join(', ')})` : '')
+
+// The plan as the person reads it in the approval dialog: in order, each with its priority and what it waits on.
 export function planText(g: Goal): string {
-  return [`Goal: ${g.text}`, ...g.tasks.map((t, i) => `${i + 1}. ${t.title}`)].join('\n')
+  return [
+    `Goal: ${g.text}`,
+    ...g.tasks.map((t, i) => `${i + 1}. [${priorityOf(t)}] ${t.title}${needsText(t, g)}`),
+    'Ordered by priority, dependencies first.',
+  ].join('\n')
 }
 
 // What the model reads beside each prompt while a goal is being worked: where it stands, and how to move it.
@@ -55,8 +118,8 @@ export function reminder(g: Goal): string {
   const done = g.tasks.filter(t => t.status === 'done').length
   return [
     `Session goal: ${g.text}. ${done}/${g.tasks.length} tasks done (${percentOf(g)}%).`,
-    ...g.tasks.map(t => `- [${t.status === 'done' ? 'done' : t.status === 'in_progress' ? 'in progress' : 'pending'}] ${t.id}: ${t.title}`),
-    `When you start a task call ${UPDATE_TOOL} with its id and status "in_progress"; when it is finished, status "done". Work the tasks in order unless the person says otherwise.`,
+    ...g.tasks.map(t => `- [${t.status === 'done' ? 'done' : t.status === 'in_progress' ? 'in progress' : 'pending'}] ${t.id} (${priorityOf(t)} priority): ${t.title}${t.needs?.length ? `, needs ${t.needs.join(', ')}` : ''}`),
+    `The list is the order to work in: by priority, dependencies first, and as the person may have reordered it. Take the first pending task next, not by its id. When you start a task call ${UPDATE_TOOL} with its id and status "in_progress"; when it is finished, status "done".`,
   ].join('\n')
 }
 
@@ -131,6 +194,7 @@ export function addSide(g: Goal, sj: Side): { goal: Goal; taskIds: string[] } {
     title: it.title,
     status: sj.doneIds.includes(it.id) ? 'done' : 'in_progress',
     tokens: share + (i === 0 ? sj.tokens - share * sj.items.length : 0),
+    priority: 'medium',
     followupId: it.id,
   }))
   const tasks = [...g.tasks, ...added]
@@ -170,12 +234,24 @@ export const register: Register = (on, options) => {
     await update($, side, () => null)
     await $.tool.register({
       name: 'plan',
-      description: `Propose the plan for the person's session goal: 3 to 8 concrete tasks, in the order you will do them. The person is asked to approve it; the result says whether they did or what to change. Call it when they set a goal (or ask to re-plan); don't start the work before it is approved.`,
+      description: `Propose the plan for the person's session goal: 3 to 8 concrete tasks, each with a priority (how much it matters to the goal: high, medium or low) and the tasks it depends on (dependsOn: their 1-based places in this list). The plan is ordered by priority, dependencies first, and the person sees it that way. The person is asked to approve it; the result says whether they did or what to change. Call it when they set a goal (or ask to re-plan); don't start the work before it is approved.`,
       inputSchema: {
         type: 'object',
         properties: {
           goal: { type: 'string', description: 'The goal, as the person put it (or a short restatement)' },
-          tasks: { type: 'array', items: { type: 'string' }, description: 'Task titles, short and imperative, in order' },
+          tasks: {
+            type: 'array',
+            description: 'The tasks, in any order: the plan orders them',
+            items: {
+              type: 'object',
+              properties: {
+                title: { type: 'string', description: 'Short and imperative' },
+                priority: { type: 'string', enum: ['high', 'medium', 'low'] },
+                dependsOn: { type: 'array', items: { type: 'integer' }, description: '1-based places in this list of the tasks it needs done first' },
+              },
+              required: ['title', 'priority'],
+            },
+          },
         },
         required: ['tasks'],
       },
@@ -235,11 +311,11 @@ export const register: Register = (on, options) => {
   // The plan, put to the person: approved, sent back with their words, or left waiting in the pane.
   on('tool.call', { tool: PLAN_TOOL }, async ($, e) => {
     const input = e as unknown as { goal?: unknown; tasks?: unknown }
-    const titles = (Array.isArray(input.tasks) ? input.tasks : []).map(t => clip(String(t ?? '').trim(), 120)).filter(Boolean).slice(0, MAX_TASKS)
-    if (!titles.length) return { deny: 'A plan needs at least one task.' }
+    const items = planItems(input.tasks)
+    if (!items.length) return { deny: 'A plan needs at least one task.' }
     const before = await read($, goal)
     const text = clip(String(input.goal ?? '').trim() || before?.text || 'Session goal', 200)
-    const tasks: Task[] = titles.map((title, i) => ({ id: `t${i + 1}`, title, status: 'pending', tokens: 0 }))
+    const tasks = orderPlan(items)
     const proposed: Goal = { text, status: 'proposed', tasks, activeId: null, other: before?.other ?? 0 }
     await update($, asking, () => null)
     await setGoal($, () => proposed)
@@ -446,12 +522,20 @@ export const register: Register = (on, options) => {
         {g.tasks.length ? (
           <Box flexDirection="column">
             {g.tasks.map(t => (
-              <Box key={`row-${t.id}`} flexDirection="row" justifyContent="space-between" gap={1}>
-                <Box flexDirection="row" gap={1}>
-                  <Text color={COLOR[t.status]}>{MARK[t.status]}</Text>
-                  <Text color={t.status === 'pending' ? undefined : COLOR[t.status]} bold={t.status === 'in_progress'} dimColor={t.status === 'done'} wrap="truncate-end">{t.title}</Text>
+              <Box key={`row-${t.id}`} flexDirection="column">
+                <Box flexDirection="row" justifyContent="space-between" gap={1}>
+                  <Box flexDirection="row" gap={1}>
+                    <Text color={COLOR[t.status]}>{MARK[t.status]}</Text>
+                    <Text color={PRIORITY_COLOR[priorityOf(t)]}>{PRIORITY_MARK[priorityOf(t)]}</Text>
+                    <Text color={t.status === 'pending' ? undefined : COLOR[t.status]} bold={t.status === 'in_progress'} dimColor={t.status === 'done'} wrap="truncate-end">{t.title}</Text>
+                  </Box>
+                  <Box flexDirection="row" gap={1}>
+                    {t.status === 'pending' ? <Button key={`up-${t.id}`} label="↑" plain onPress={() => setGoal($, cur => (cur ? movePending(cur, t.id, -1) : cur))} /> : null}
+                    {t.status === 'pending' ? <Button key={`down-${t.id}`} label="↓" plain onPress={() => setGoal($, cur => (cur ? movePending(cur, t.id, 1) : cur))} /> : null}
+                    <Text dimColor>{t.tokens ? `${tok(t.tokens)} tokens` : '–'}</Text>
+                  </Box>
                 </Box>
-                <Text dimColor>{t.tokens ? `${tok(t.tokens)} tokens` : '–'}</Text>
+                {t.needs?.length && t.status !== 'done' ? <Text dimColor wrap="truncate-end">{`   ${needsText(t, g).trim()}`}</Text> : null}
               </Box>
             ))}
             {g.other ? (

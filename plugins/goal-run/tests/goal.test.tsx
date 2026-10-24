@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { runnerX, trackText } from '../hooks/art'
-import { addSide, parseStartPrompt, poseOf, reminder } from '../hooks/register'
+import { addSide, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder } from '../hooks/register'
 import type { Goal } from '../types'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -28,6 +28,7 @@ const USAGE = (n: number) => ({ model: 'm', input_tokens: n, output_tokens: 0, c
 function engine(on: On, { saved = {} as Record<string, unknown>, answers = [] as (string | null)[] } = {}) {
   const sent: string[] = []
   const toasts: string[] = []
+  const asked: string[] = []
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 24, 9) })
   on('store.get', (_, e) => ({ value: saved[e.key] }) as never)
   on('store.set', (_, e) => {
@@ -49,6 +50,7 @@ function engine(on: On, { saved = {} as Record<string, unknown>, answers = [] as
   })
   on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
     const q = e.questions[0]!.question
+    asked.push(q)
     const a = answers.shift()
     if (a === null || a === undefined) throw new Error('dismissed')
     return { result: { questions: e.questions, answers: { [q]: a } } } as never
@@ -63,7 +65,7 @@ function engine(on: On, { saved = {} as Record<string, unknown>, answers = [] as
     return <Box />
   })
   const steps: number[] = []
-  return { sent, toasts, clock, saved, steps }
+  return { sent, toasts, clock, saved, steps, asked }
 }
 
 const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<unknown[]> }) =>
@@ -160,7 +162,7 @@ describe('from the question to the finish line', () => {
     await $.tool.call({ tool: UPDATE, id: 't1', status: 'done' } as never)
     const r = await $.prompt.submit({ text: 'keep going', wait: false, origin: { kind: 'composer' } } as never)
     expect(r.context?.join('\n')).toMatch(/Session goal: Ship it\. 1\/2 tasks done \(50%\)/)
-    expect(r.context?.join('\n')).toMatch(/\[pending\] t2: Two/)
+    expect(r.context?.join('\n')).toMatch(/\[pending\] t2 \(medium priority\): Two/)
     void w
   })
 })
@@ -236,8 +238,9 @@ describe('the runner', () => {
 
   test("the prompt reminder names every task's state and the update tool", () => {
     const text = reminder({ ...g('active', true), tasks: [{ id: 't1', title: 'a', status: 'in_progress', tokens: 0 }, { id: 't2', title: 'b', status: 'done', tokens: 0 }] })
-    expect(text).toMatch(/\[in progress\] t1: a/)
-    expect(text).toMatch(/\[done\] t2: b/)
+    expect(text).toMatch(/\[in progress\] t1 \(medium priority\): a/)
+    expect(text).toMatch(/\[done\] t2 \(medium priority\): b/)
+    expect(text).toMatch(/Take the first pending task next/)
     expect(text).toContain(UPDATE)
   })
 })
@@ -353,5 +356,69 @@ describe('work started from the followups to-do list', () => {
     expect(grown.tasks.slice(2).map(t => [t.status, t.tokens, t.followupId])).toEqual([['in_progress', 5, 'a'], ['done', 4, 'b']])
     expect(grown.activeId).toBe('t3')
     expect(grown.outside).toBe(0)
+  })
+})
+
+describe('the order of the plan', () => {
+  const P = (title: string, priority: 'high' | 'medium' | 'low', dependsOn: number[] = []) => ({ title, priority, dependsOn })
+
+  test('highest priority first, ties in the order given', () => {
+    const order = orderPlan([P('Polish the docs', 'low'), P('Fix the crash', 'high'), P('Add the flag', 'medium'), P('Fix the leak', 'high')])
+    expect(order.map(t => t.title)).toEqual(['Fix the crash', 'Fix the leak', 'Add the flag', 'Polish the docs'])
+    expect(order.map(t => t.id)).toEqual(['t1', 't2', 't3', 't4'])
+  })
+
+  test('a dependency comes first even when it matters less, and the task says what it needs', () => {
+    // Tests (high) can't come before the exporter they test (medium).
+    const order = orderPlan([P('Write the exporter', 'medium'), P('Add tests', 'high', [1]), P('Update the changelog', 'low')])
+    expect(order.map(t => t.title)).toEqual(['Write the exporter', 'Add tests', 'Update the changelog'])
+    expect(order[1]!.needs).toEqual(['t1'])
+    expect(order[0]!.needs).toBeUndefined()
+  })
+
+  test('a dependency cycle or a bad reference does not lose a task', () => {
+    const order = orderPlan([P('A', 'low', [2]), P('B', 'high', [1]), P('C', 'medium', [9, 3])])
+    expect(order.map(t => t.title).sort()).toEqual(['A', 'B', 'C'])
+    expect(order.length).toBe(3)
+  })
+
+  test('plain titles still work, as medium priority', () => {
+    expect(planItems(['One', { title: 'Two', priority: 'high', dependsOn: [1] }, { title: '  ' }])).toEqual([
+      { title: 'One', priority: 'medium', dependsOn: [] },
+      { title: 'Two', priority: 'high', dependsOn: [1] },
+    ])
+  })
+
+  test('↑ and ↓ move a task among the pending ones, never past one in progress or done', () => {
+    const tasks = orderPlan([P('a', 'high'), P('b', 'high'), P('c', 'high'), P('d', 'high')])
+    const g: Goal = { text: 'x', status: 'active', activeId: 't1', other: 0, tasks: tasks.map((t, i) => (i === 0 ? { ...t, status: 'in_progress' } : t)) }
+    expect(movePending(g, 't4', -1).tasks.map(t => t.title)).toEqual(['a', 'b', 'd', 'c'])
+    expect(movePending(g, 't2', -1).tasks.map(t => t.title)).toEqual(['a', 'b', 'c', 'd'])
+    expect(movePending(g, 't4', 1).tasks.map(t => t.title)).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  test('the dialog shows the order with priorities and dependencies, and the pane lets the person reorder', async ($, on) => {
+    const w = engine(on, { answers: ['Approve'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship the export' } as never)
+    const r = await $.tool.call({
+      tool: PLAN,
+      tasks: [{ title: 'Write the exporter', priority: 'medium' }, { title: 'Add tests', priority: 'high', dependsOn: [1] }, { title: 'Fix the crash', priority: 'high' }],
+    } as never)
+    expect(String(r.result)).toMatch(/t1 \(high priority\): Fix the crash/)
+    expect(String(r.result)).toMatch(/t3 \(high priority\): Add tests, needs t2/)
+    expect(w.asked[0]).toMatch(/1\. \[high\] Fix the crash\n2\. \[medium\] Write the exporter\n3\. \[high\] Add tests \(needs 2\)\nOrdered by priority, dependencies first\./)
+
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    let text = await texts(pane)
+    expect(text).toMatch(/▲ high \| Fix the crash.*■ med \| Write the exporter.*▲ high \| Add tests/)
+    expect(text).toMatch(/needs 2/)
+    // The person wants the exporter first.
+    await pane.press({ key: 'up-t2' })
+    text = await texts(pane)
+    expect(text).toMatch(/Write the exporter.*Fix the crash.*Add tests/)
+    await pane.unmount()
+    const next = await $.prompt.submit({ text: 'go', wait: false, origin: { kind: 'composer' } } as never)
+    expect((next.context ?? []).join('\n')).toMatch(/t2 \(medium priority\): Write the exporter\n- \[pending\] t1 \(high priority\): Fix the crash/)
   })
 })

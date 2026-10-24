@@ -1,9 +1,15 @@
 export type TaskStatus = 'pending' | 'in_progress' | 'done'
+export type Priority = 'high' | 'medium' | 'low'
 export type Task = {
   id: string
   title: string
   status: TaskStatus
   tokens: number
+  // How much it matters to the goal; the plan runs highest first. Absent on a goal saved before
+  // priorities: read as medium.
+  priority?: Priority
+  // The tasks it can't start before, by id: they come first whatever their priority.
+  needs?: string[]
   // Set for a task that came from a followups to-do item: that item's id, so its "done" carries over.
   followupId?: string
 }
