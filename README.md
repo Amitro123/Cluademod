@@ -17,6 +17,8 @@ Add the marketplace once, then install the ones you want:
 /plugin install <mod>@claudemod
 ```
 
+The installer may say some options are "not yet set". That's fine: every option has a default, and the mods run on those until you change one with `/plugin configure <mod>@claudemod`.
+
 If you added this marketplace before it was renamed from `clawd-hud`, remove it with `/plugin marketplace remove clawd-hud`, add it again, and reinstall your mods as `<mod>@claudemod`.
 
 ## clawd-hud: a pixel spark
@@ -161,6 +163,12 @@ Tests: `claude plugin test plugins/rtl-toggle`.
 ![goal-run: the question a session opens with, and the Goal pane with the runner at 40% and each task's tokens](assets/goal-run.png)
 
 <sub>A mock-up, not a screenshot. The track and the runner are drawn by the mod's own `art.ts`; the band and the pane around them follow its layout.</sub>
+
+**The whole run, step by step:** the question when a session starts, the plan put to you for approval, the run with a to-do item started on the side, and the goal reached.
+
+![goal-run in four steps: the start-of-session question; the plan in the question dialog with the pane waiting at 0%; the runner at 40% with each task's tokens and the band asking whether a to-do item joins the goal; the runner cheering at the flag at 100%](assets/goal-run-flow.png)
+
+<sub>Also a mock-up: the runner and track are the mod's own drawing at each step; the dialog is Claude Code's, so yours will look like your app's.</sub>
 
 ```text
 /plugin install goal-run@claudemod
