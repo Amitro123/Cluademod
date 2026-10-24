@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { faceFor } from '../hooks/register'
 
 const PERSONAL = [
   { kind: 'five_hour', percentUsed: 34 },
@@ -164,5 +165,15 @@ describe('redraws', () => {
     })
     await $.session.start({ cwd: '.' } as never)
     expect(toasts).toEqual([])
+  })
+})
+
+describe('the terminal face', () => {
+  test('idle, it blinks at least once in any 4 one-second redraws, whatever their phase', () => {
+    for (const phase of [0, 0.125, 0.37, 0.5, 0.875]) {
+      const faces = [0, 1, 2, 3].map(k => faceFor('idle', 10 + phase + k, false))
+      expect(faces).toContain('✦(-_-)')
+      expect(faces).toContain('✦(•_•)')
+    }
   })
 })

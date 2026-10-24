@@ -134,14 +134,15 @@ const ALT: Record<Mood, string> = {
 // The terminal's spark, as text.
 const SPIN = ['◐', '◓', '◑', '◒']
 
-function faceFor(m: Mood, t: number, idea: boolean): string {
+export function faceFor(m: Mood, t: number, idea: boolean): string {
   const f = Math.floor((t * 1000) / FRAME_MS)
   if (m === 'working') return `✦(•_•) ${SPIN[f % SPIN.length]}`
   if (m === 'loop') return '✦(@_@) ↻'
   if (m === 'done') return `✦\\(^o^)/${idea ? ' (!)' : ''}`
   if (m === 'relax') return '✦(˘_˘) ♪'
   if (m === 'error') return '✦(;_;) ϟ'
-  return f % 30 === 0 ? '✦(-_-)' : '✦(•_•)'
+  // On whole seconds, so the once-a-second idle redraw always lands on it.
+  return Math.floor(t) % 4 === 0 ? '✦(-_-)' : '✦(•_•)'
 }
 
 // ---------- loop detector ----------
