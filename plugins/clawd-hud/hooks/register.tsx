@@ -23,6 +23,7 @@ const cost = atom({ plugin: 'clawd-hud', key: 'cost' } as const, null as number 
 const MIN = 60_000
 // The mascot is redrawn as still frames at this interval (8 a second).
 const FRAME_MS = 125
+const IDLE_FRAME_MS = 1_000
 // After the fireworks the spark rests this long before idling.
 const RELAX_MS = 4 * MIN
 // The same tool with the same input this many times in one turn means Claude is going in circles.
@@ -199,8 +200,13 @@ export const register: Register = (on, options) => {
       await update($, minute, () => t)
       await refreshStatus($, cfg)
     }))
+    // Every motion is a function of elapsed time, so an idle or resting spark can redraw
+    // once a second; working, loop, done and error scenes get every frame.
     timers.push($.clock.every(FRAME_MS, async () => {
       const t = await $.clock.now()
+      const scene = sceneFor(await read($, mood), (t - (await read($, moodAt))) / 1000).mood
+      const still = scene === 'idle' || scene === 'relax'
+      if (still && t - (await read($, frame)) < IDLE_FRAME_MS) return
       await update($, frame, () => t)
     }))
     // Tick the cache countdown while it is warm, and once more after expiry: a late tick
@@ -218,7 +224,6 @@ export const register: Register = (on, options) => {
     }))
 
     await refreshStatus($, cfg)
-    $.ui.toast('clawd-hud loaded')
     return next(e)
   })
 

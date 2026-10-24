@@ -120,3 +120,49 @@ describe('sharing its sites', () => {
     expect(text).toMatch(/engine modes/)
   })
 })
+
+describe('redraws', () => {
+  // Counts the spark's frame writes beneath the plugin: each one redraws the band.
+  function frames(on: On) {
+    const count = { n: 0 }
+    on('state.set', (_, e, next) => {
+      if ((e as { key?: string }).key === 'frame') count.n++
+      return next(e)
+    })
+    return count
+  }
+
+  test('idle, the spark redraws about once a second, not eight times', async ($, on) => {
+    const count = frames(on)
+    const clock = mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: PERSONAL } }) as never)
+    on('session.start', () => ({ cwd: '.' }) as never)
+    on('ui.status', () => ({ value: undefined }) as never)
+    on('ui.toast', () => ({ value: undefined }) as never)
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    await $.session.start({ cwd: '.' } as never)
+    count.n = 0
+    await clock.advance(4_000)
+    expect(count.n).toBeLessThanOrEqual(5)
+
+    // A turn starts: the spark animates at full speed again.
+    await $.turn.start({ text: 'go', turnId: 't1' } as never)
+    count.n = 0
+    await clock.advance(1_000)
+    expect(count.n).toBeGreaterThanOrEqual(7)
+  })
+
+  test('no toast on every start', async ($, on) => {
+    const toasts: string[] = []
+    mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: PERSONAL } }) as never)
+    on('session.start', () => ({ cwd: '.' }) as never)
+    on('ui.status', () => ({ value: undefined }) as never)
+    on('ui.toast', (_, e) => {
+      toasts.push(String(e.text))
+      return { value: undefined } as never
+    })
+    await $.session.start({ cwd: '.' } as never)
+    expect(toasts).toEqual([])
+  })
+})
