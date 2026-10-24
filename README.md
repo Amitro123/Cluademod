@@ -1,6 +1,6 @@
 # claudemod: mods for Claude Code
 
-Four mods, each installed on its own:
+Five mods, each installed on its own:
 
 | Mod | What it does |
 |---|---|
@@ -8,6 +8,7 @@ Four mods, each installed on its own:
 | [task-hud](#task-hud-to-dos-and-sub-agents) | A to-do progress bar, and a pane with a pixel creature for each sub-agent |
 | [followups](#followups-dont-lose-what-claude-notices) | Claude flags what it notices, asks whether to track it, and keeps a to-do you can export |
 | [rtl-toggle](#rtl-toggle-hebrew-and-english-on-one-line) | Fixes the reading order of lines that mix English and Hebrew |
+| [goal-run](#goal-run-a-goal-for-the-session) | Asks for a goal when a session starts, has Claude plan it, and runs a pixel Claude to 100% as the tasks get done |
 
 Add the marketplace once, then install the ones you want:
 
@@ -154,6 +155,24 @@ A line that starts in English but is mostly Hebrew (or Arabic, or another right-
 It also lives in its own repo, [Amitro123/RTL-claude-mod](https://github.com/Amitro123/RTL-claude-mod), which has the full rules and the performance notes.
 
 Tests: `claude plugin test plugins/rtl-toggle`.
+
+## goal-run: a goal for the session
+
+![goal-run: the question a session opens with, and the Goal pane with the runner at 40% and each task's tokens](assets/goal-run.png)
+
+<sub>A mock-up, not a screenshot. The track and the runner are drawn by the mod's own `art.ts`; the band and the pane around them follow its layout.</sub>
+
+```text
+/plugin install goal-run@claudemod
+```
+
+- **The question.** When a session starts, a band above the prompt asks *Is there a goal you want to work on this session?*, with a field to type it. **No goal this time** dismisses it. If an earlier session in this project left a goal unfinished, the band offers **Continue**, **New goal** or **Not now** instead. `/session-goal <text>` sets a goal at any time, `/session-goal` shows it, and `/session-goal clear` drops it (Claude Code has its own `/goal`, so the mod's is named apart).
+- **The plan.** Your goal goes to Claude, which breaks it into 3 to 8 tasks with the `plan` tool. You approve it in the question dialog, or say what to change (Claude revises and asks again). Nothing starts before you approve. A plan whose dialog you closed waits in the pane with **Approve plan**.
+- **The run.** The Goal pane shows the goal, a track from 0 to 100%, and a pixel Claude in blue sneakers that stands still between tasks and runs while one is in progress. Claude marks each task in progress and done with the `update` tool, and the runner moves along the track as tasks are done. At 100% it cheers at the flag. Each of your prompts while the goal is open carries the plan's state, so Claude keeps track of where it is.
+- **What each task cost.** Every model request, sub-agents' included, is counted against the task in progress, and the pane shows each task's tokens. Planning and work between tasks have a line of their own. The count is everything a request carries (input, output, cache reads and writes), not a price.
+- The goal is saved per project on the machine running Claude Code, like followups' list. Turn the question off with the `askOnStart` option.
+
+Tests: `claude plugin test plugins/goal-run`.
 
 ## Developing
 

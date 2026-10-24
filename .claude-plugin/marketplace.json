@@ -4,7 +4,7 @@
     "name": "Amit Rosen",
     "url": "https://github.com/Amitro123"
   },
-  "description": "Claude Code mods: a pixel spark HUD, a task/sub-agent HUD, a follow-ups tracker and an RTL toggle",
+  "description": "Claude Code mods: a pixel spark HUD, a task/sub-agent HUD, a follow-ups tracker, an RTL toggle and a session goal runner",
   "plugins": [
     {
       "name": "clawd-hud",
@@ -25,6 +25,11 @@
       "name": "rtl-toggle",
       "source": "./plugins/rtl-toggle",
       "description": "Fixes the reading order of chat lines that mix English and Hebrew (or other RTL) text"
+    },
+    {
+      "name": "goal-run",
+      "source": "./plugins/goal-run",
+      "description": "Set a session goal, approve Claude's plan, and watch a pixel Claude in running shoes run it to 100%, with each task's token cost"
     }
   ]
 }
