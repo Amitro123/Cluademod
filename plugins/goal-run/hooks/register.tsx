@@ -99,14 +99,46 @@ export function orderPlan(items: PlanItem[]): Task[] {
   })
 }
 
+// What a request added: its output, the input it wrote to the cache, and uncached input. Cache reads
+// are the context earlier requests already counted; adding them would count it again on every step.
+export function stepTokens(u: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }): number {
+  return u.input_tokens + u.output_tokens + u.cache_creation_input_tokens
+}
+
+// Everything a task needs, directly or through another task.
+function needsOf(g: Goal, id: string, seen = new Set<string>()): Set<string> {
+  for (const n of g.tasks.find(t => t.id === id)?.needs ?? []) {
+    if (!seen.has(n)) {
+      seen.add(n)
+      needsOf(g, n, seen)
+    }
+  }
+  return seen
+}
+
 // Moves a pending task one place up or down among the pending tasks; the person's order then stands.
+// Dependencies stay first: ↑ carries along the tasks it needs, ↓ the tasks that need it.
 export function movePending(g: Goal, id: string, by: -1 | 1): Goal {
-  const pending = g.tasks.map((t, i) => (t.status === 'pending' ? i : -1)).filter(i => i >= 0)
-  const at = pending.indexOf(g.tasks.findIndex(t => t.id === id))
-  const to = pending[at + by]
-  if (at < 0 || to === undefined) return g
+  const slots = g.tasks.map((t, i) => (t.status === 'pending' ? i : -1)).filter(i => i >= 0)
+  const order = slots.map(i => g.tasks[i]!)
+  let lo = order.findIndex(t => t.id === id)
+  if (lo < 0) return g
+  let hi = lo
+  const before = (a: Task, b: Task) => needsOf(g, b.id).has(a.id)
+  for (;;) {
+    const passed = order[by < 0 ? lo - 1 : hi + 1]
+    if (!passed) return g
+    const group = order.slice(lo, hi + 1)
+    if (!group.some(t => (by < 0 ? before(passed, t) : before(t, passed)))) break
+    if (by < 0) lo--
+    else hi++
+  }
+  const group = order.slice(lo, hi + 1)
+  const moved = by < 0
+    ? [...order.slice(0, lo - 1), ...group, order[lo - 1]!, ...order.slice(hi + 1)]
+    : [...order.slice(0, lo), order[hi + 1]!, ...group, ...order.slice(hi + 2)]
   const tasks = [...g.tasks]
-  ;[tasks[pending[at]!], tasks[to]] = [tasks[to]!, tasks[pending[at]!]!]
+  slots.forEach((s, k) => { tasks[s] = moved[k]! })
   return { ...g, tasks }
 }
 
@@ -451,7 +483,7 @@ export const register: Register = (on, options) => {
     return { result: answer ? 'The person chose not to add it.' : "The person hasn't answered; it wasn't added." }
   })
 
-  // Every request's tokens, the sub-agents' too, are counted against the task in progress (else "other").
+  // Every request's new tokens, the sub-agents' too, are counted against the task in progress (else "other").
   on('turn.step', async function* ($, e, next) {
     const r = yield* next(e)
     const u = r.usage
@@ -459,7 +491,7 @@ export const register: Register = (on, options) => {
     const sj = await read($, side)
     if (u && g && sj?.isLive) {
       // Work started from the to-do list: its tasks' once added to the goal, else counted outside it.
-      const used = u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+      const used = stepTokens(u)
       const into = g.tasks.find(t => sj.taskIds.includes(t.id) && t.status === 'in_progress')
       if (into) {
         await setGoal($, cur => (cur ? { ...cur, tasks: cur.tasks.map(t => (t.id === into.id ? { ...t, tokens: t.tokens + used } : t)) } : cur))
@@ -468,7 +500,7 @@ export const register: Register = (on, options) => {
         await setGoal($, cur => (cur ? { ...cur, outside: (cur.outside ?? 0) + used } : cur))
       }
     } else if (u && g && g.status !== 'done') {
-      const used = u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+      const used = stepTokens(u)
       await setGoal($, cur => {
         if (!cur) return cur
         const active = cur.tasks.find(t => t.id === cur.activeId && t.status === 'in_progress')
