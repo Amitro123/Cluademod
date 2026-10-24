@@ -83,6 +83,8 @@ Set with `claude plugin configure clawd-hud@claudemod`, or in the plugin setting
 
 ### Changelog
 
+**0.6.2**: the terminal face's idle blink shows again (every 4 seconds) at the slower idle redraw.
+
 **0.6.1**: plays well with the other mods: their bands, and other changes beside the model picker, are no longer hidden. Idle redraws drop from 8 a second to 1. No "clawd-hud loaded" toast on every start.
 
 **0.6.0**: a new look. The spark mascot, its scenes, the stage and the batteries, bolt and capsule are all new, drawn by a new animation engine. Everything else carries over: plans, timers, loop detection, the hard-task and eureka moments.
@@ -197,7 +199,7 @@ Tests: `claude plugin test plugins/rtl-toggle`.
 ### Commands and options
 
 - `/session-goal <text>` sets a goal at any time, `/session-goal` shows it, and `/session-goal clear` drops it. Claude Code has its own `/goal`, so the mod's command has a different name.
-- The goal is saved per project on the machine running Claude Code, like followups' list, so it carries over between local sessions in the same folder. If two sessions in the folder each set a goal, the one set later is the one saved.
+- The goal is saved per project on the machine running Claude Code, like followups' list, so it carries over between local sessions in the same folder. If two sessions in the folder each set a goal, the one set later is the one saved. The other session is told once, with a toast, that its progress isn't saved.
 - `askOnStart` (`on` / `off`) turns the start-of-session question off.
 
 Tests: `claude plugin test plugins/goal-run`.
