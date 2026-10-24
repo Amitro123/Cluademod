@@ -13,6 +13,8 @@ export type Task = {
   // Set for a task that came from a followups to-do item: that item's id, so its "done" carries over.
   followupId?: string
 }
+// How Claude moves between tasks: straight on to the next (run), or asking the person after each (ask).
+export type Pace = 'run' | 'ask'
 // planning: Claude is writing the plan; proposed: it waits for the person; active: being worked; done: reached.
 export type GoalStatus = 'planning' | 'proposed' | 'active' | 'done'
 export type Goal = {
@@ -25,12 +27,15 @@ export type Goal = {
   other: number
   // Tokens spent on work started from the to-do list and kept apart from the goal.
   outside?: number
+  // Chosen at approval; absent on a goal saved before it: read as run.
+  pace?: Pace
 }
 
 // Work started from the followups to-do list (its Start button) while a goal is open: counted apart,
 // and offered to the goal as tasks until the person answers.
 export type Side = {
-  items: { id: string; title: string }[]
+  // A bug (followups' kind) joins the goal as high priority, anything else as medium.
+  items: { id: string; title: string; isBug?: boolean }[]
   tokens: number
   // Unanswered: the band asks whether to add the items to the goal.
   isAsking: boolean
