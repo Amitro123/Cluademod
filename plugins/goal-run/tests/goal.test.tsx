@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { runnerX, trackText } from '../hooks/art'
-import { poseOf, reminder } from '../hooks/register'
+import { addSide, parseStartPrompt, poseOf, reminder } from '../hooks/register'
 import type { Goal } from '../types'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -56,6 +56,8 @@ function engine(on: On, { saved = {} as Record<string, unknown>, answers = [] as
   on('turn.step', async function* (_, e) {
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: USAGE(steps.shift() ?? 0) } as never
   })
+  // The followups mod's done tool, as it answers for an item it knows.
+  on('tool.call', { tool: 'mcp__followups__done' }, (_, e) => ({ result: `Marked "${String((e as { id?: unknown }).id)}" done.` }) as never)
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
     return <Box />
@@ -216,5 +218,119 @@ describe('the runner', () => {
     expect(text).toMatch(/\[in progress\] t1: a/)
     expect(text).toMatch(/\[done\] t2: b/)
     expect(text).toContain(UPDATE)
+  })
+})
+
+describe('work started from the followups to-do list', () => {
+  // What followups' Start submits, under its own name.
+  const START = [
+    'Start this item from my to-do list:',
+    '- id fu-1: Rotate the dev key (bug) — A real-looking key is committed [where: .env.example:3]',
+    'Do the work. When an item is finished, call mcp__followups__done with its id (and a short note).',
+  ].join('\n')
+  const fromTodo = { text: START, wait: false, origin: { kind: 'plugin', name: 'followups' } } as never
+  const fromPerson = (text: string) => ({ text, wait: false, origin: { kind: 'composer' } }) as never
+
+  // An approved two-task goal with its first task done: 50%.
+  async function halfway($: Engine, on: On) {
+    const w = engine(on, { answers: ['Approve'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
+    await $.tool.call({ tool: UPDATE, id: 't1', status: 'done' } as never)
+    return w
+  }
+
+  test('kept separate: no goal reminder beside it, and its tokens counted outside the goal', async ($, on) => {
+    const w = await halfway($, on)
+    const r = await $.prompt.submit(fromTodo)
+    expect((r.context ?? []).join('\n')).not.toMatch(/Session goal/)
+
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(band)).toMatch(/Add to your goal\? "Rotate the dev key"/)
+    expect(await texts(band)).toMatch(/The plan grows to 3 tasks: 50% → 33%/)
+    await step($, w, 20_000)
+    await band.press({ key: 'side-apart' })
+    expect(await texts(band)).not.toMatch(/Add to your goal/)
+    await band.unmount()
+
+    // Still the side job's turn: outside. The person's own next prompt ends it.
+    await step($, w, 5_000)
+    const next = await $.prompt.submit(fromPerson('back to the goal'))
+    expect((next.context ?? []).join('\n')).toMatch(/Session goal: Ship it/)
+    await step($, w, 7_000)
+
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const text = await texts(pane)
+    expect(text).toMatch(/Outside the goal \(from the to-do list\) \| 25k tokens/)
+    expect(text).toMatch(/1\/2 tasks/)
+    expect(text).toMatch(/50%/)
+    await pane.unmount()
+  })
+
+  test('added to the goal: a task in progress with the tokens so far, closed when the to-do item is', async ($, on) => {
+    const w = await halfway($, on)
+    await $.prompt.submit(fromTodo)
+    await step($, w, 10_000)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    await band.press({ key: 'side-add' })
+    await band.unmount()
+    await step($, w, 4_000)
+
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    let text = await texts(pane)
+    expect(text).toMatch(/1\/3 tasks/)
+    expect(text).toMatch(/33%/)
+    expect(text).toMatch(/Rotate the dev key \| 14k tokens/)
+    expect(text).not.toMatch(/Outside the goal/)
+
+    await $.tool.call({ tool: 'mcp__followups__done', id: 'fu-1' } as never)
+    text = await texts(pane)
+    expect(text).toMatch(/2\/3 tasks/)
+    expect(text).toMatch(/67%/)
+    await pane.unmount()
+  })
+
+  test('an item followups closed before the answer joins the goal as done', async ($, on) => {
+    await halfway($, on)
+    await $.prompt.submit(fromTodo)
+    await $.tool.call({ tool: 'mcp__followups__done', id: 'fu-1' } as never)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    await band.press({ key: 'side-add' })
+    await band.unmount()
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/2\/3 tasks/)
+    await pane.unmount()
+  })
+
+  test('with a plan not yet approved, nothing is offered, but the work is still kept apart', async ($, on) => {
+    const w = engine(on, { answers: [null] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
+    await $.prompt.submit(fromTodo)
+    await step($, w, 9_000)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(band)).not.toMatch(/Add to your goal/)
+    await band.unmount()
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/Outside the goal \(from the to-do list\) \| 9k tokens/)
+    await pane.unmount()
+  })
+
+  test("reads the items of followups' Start prompt, one or several", () => {
+    expect(parseStartPrompt(START)).toEqual([{ id: 'fu-1', title: 'Rotate the dev key' }])
+    const many = ['Start these 2 items from my to-do list, one after the other:', '- id a: First', '- id b: Second — why it matters', 'Do the work.'].join('\n')
+    expect(parseStartPrompt(many)).toEqual([{ id: 'a', title: 'First' }, { id: 'b', title: 'Second' }])
+    expect(parseStartPrompt('just a prompt')).toEqual([])
+  })
+
+  test('adding splits the tokens so far across the new tasks and numbers them after the plan', () => {
+    const g: Goal = { text: 'x', status: 'active', activeId: null, other: 0, outside: 9, tasks: [{ id: 't1', title: 'a', status: 'done', tokens: 1 }, { id: 't2', title: 'b', status: 'pending', tokens: 0 }] }
+    const { goal: grown, taskIds } = addSide(g, { items: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }], tokens: 9, isAsking: true, taskIds: [], doneIds: ['b'], isLive: true })
+    expect(taskIds).toEqual(['t3', 't4'])
+    expect(grown.tasks.slice(2).map(t => [t.status, t.tokens, t.followupId])).toEqual([['in_progress', 5, 'a'], ['done', 4, 'b']])
+    expect(grown.activeId).toBe('t3')
+    expect(grown.outside).toBe(0)
   })
 })

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Asking, Goal, Task, TaskStatus } from '../types'
+import type { Asking, Goal, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
 
@@ -10,11 +10,15 @@ import type { Pose } from './art'
 const goal = atom({ plugin: 'goal-run', key: 'goal' } as const, null as Goal | null)
 const asking = atom({ plugin: 'goal-run', key: 'asking' } as const, null as Asking)
 const tick = atom({ plugin: 'goal-run', key: 'tick' } as const, 0)
+const side = atom({ plugin: 'goal-run', key: 'side' } as const, null as Side | null)
 
 const PANE = 'goal-run'
 const PANE_TITLE = 'Goal'
 const PLAN_TOOL = 'mcp__goal-run__plan'
 const UPDATE_TOOL = 'mcp__goal-run__update'
+// The followups mod: its to-do Start submits a prompt under its name, and its done tool closes an item.
+const TODO_PLUGIN = 'followups'
+const TODO_DONE_TOOL = 'mcp__followups__done'
 // The runner's stride: four frames a second while a task is in progress.
 const FRAME_MS = 250
 const MAX_TASKS = 12
@@ -98,6 +102,64 @@ async function approve($: EngineInterface) {
   void $.prompt.submit({ text: 'The plan is approved. Start with the first task.' }).catch(() => {})
 }
 
+// The to-do items a followups Start prompt names, from its lines "- id <id>: <title>[ (bug)][ — detail][ [where: …]]".
+export function parseStartPrompt(text: string): { id: string; title: string }[] {
+  const out: { id: string; title: string }[] = []
+  for (const line of text.split('\n')) {
+    const m = /^- id (\S+): (.+?)(?: \(bug\))?(?: — .*?)?(?: \[where: .*\])?$/.exec(line.trim())
+    if (m) out.push({ id: m[1]!, title: clip(m[2]!.trim(), 120) })
+  }
+  return out
+}
+
+const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ')
+
+// One task moved to a status, the goal's active task and done-ness kept in step.
+export function withStatus(g: Goal, id: string, status: TaskStatus): Goal {
+  const tasks = g.tasks.map(t => (t.id === id ? { ...t, status } : t))
+  const activeId = status === 'in_progress' ? id : g.activeId === id ? null : g.activeId
+  return { ...g, tasks, activeId, status: tasks.every(t => t.status === 'done') ? 'done' : 'active' }
+}
+
+// The side job's items as new tasks at the end of the plan: in progress (or done, if followups closed
+// them already), carrying the tokens they used so far, split evenly.
+export function addSide(g: Goal, sj: Side): { goal: Goal; taskIds: string[] } {
+  const next = g.tasks.reduce((n, t) => Math.max(n, Number(t.id.slice(1)) || 0), 0) + 1
+  const share = Math.floor(sj.tokens / Math.max(1, sj.items.length))
+  const added: Task[] = sj.items.map((it, i) => ({
+    id: `t${next + i}`,
+    title: it.title,
+    status: sj.doneIds.includes(it.id) ? 'done' : 'in_progress',
+    tokens: share + (i === 0 ? sj.tokens - share * sj.items.length : 0),
+    followupId: it.id,
+  }))
+  const tasks = [...g.tasks, ...added]
+  const firstOpen = added.find(t => t.status === 'in_progress')
+  return {
+    goal: {
+      ...g,
+      tasks,
+      activeId: firstOpen ? firstOpen.id : g.activeId,
+      outside: Math.max(0, (g.outside ?? 0) - sj.tokens),
+      status: tasks.every(t => t.status === 'done') ? 'done' : 'active',
+    },
+    taskIds: added.map(t => t.id),
+  }
+}
+
+async function addSideToGoal($: EngineInterface) {
+  const sj = await read($, side)
+  const g = await read($, goal)
+  if (!sj || !g) return
+  const { goal: grown, taskIds } = addSide(g, sj)
+  await setGoal($, () => grown)
+  await update($, side, cur => (!cur ? cur : cur.isLive ? { ...cur, isAsking: false, taskIds } : null))
+}
+
+async function keepSideApart($: EngineInterface) {
+  await update($, side, cur => (!cur ? cur : cur.isLive ? { ...cur, isAsking: false } : null))
+}
+
 const isTaskStatus = (s: unknown): s is TaskStatus => s === 'pending' || s === 'in_progress' || s === 'done'
 
 export const register: Register = (on, options) => {
@@ -105,6 +167,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     for (const timer of timers.splice(0)) timer.cancel()
+    await update($, side, () => null)
     await $.tool.register({
       name: 'plan',
       description: `Propose the plan for the person's session goal: 3 to 8 concrete tasks, in the order you will do them. The person is asked to approve it; the result says whether they did or what to change. Call it when they set a goal (or ask to re-plan); don't start the work before it is approved.`,
@@ -205,13 +268,7 @@ export const register: Register = (on, options) => {
     if (!g.tasks.some(t => t.id === id)) return { deny: `No task "${id}" in the plan; its ids are ${g.tasks.map(t => t.id).join(', ')}.` }
     if (!isTaskStatus(input.status)) return { deny: 'status is "in_progress", "done" or "pending".' }
     const status = input.status
-    await setGoal($, cur => {
-      if (!cur) return cur
-      const tasks = cur.tasks.map(t => (t.id === id ? { ...t, status } : t))
-      const activeId = status === 'in_progress' ? id : cur.activeId === id ? null : cur.activeId
-      const isDone = tasks.every(t => t.status === 'done')
-      return { ...cur, tasks, activeId, status: isDone ? 'done' : 'active' }
-    })
+    await setGoal($, cur => (cur ? withStatus(cur, id, status) : cur))
     const now = (await read($, goal))!
     if (now.status === 'done') $.ui.toast(`Goal reached: ${now.text}`)
     return { result: `${id} is ${status.replace('_', ' ')}. ${now.tasks.filter(t => t.status === 'done').length}/${now.tasks.length} tasks done (${percentOf(now)}%).${now.status === 'done' ? ' The goal is reached.' : ''}` }
@@ -222,7 +279,18 @@ export const register: Register = (on, options) => {
     const r = yield* next(e)
     const u = r.usage
     const g = await read($, goal)
-    if (u && g && g.status !== 'done') {
+    const sj = await read($, side)
+    if (u && g && sj?.isLive) {
+      // Work started from the to-do list: its tasks' once added to the goal, else counted outside it.
+      const used = u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+      const into = g.tasks.find(t => sj.taskIds.includes(t.id) && t.status === 'in_progress')
+      if (into) {
+        await setGoal($, cur => (cur ? { ...cur, tasks: cur.tasks.map(t => (t.id === into.id ? { ...t, tokens: t.tokens + used } : t)) } : cur))
+      } else {
+        await update($, side, cur => (cur ? { ...cur, tokens: cur.tokens + used } : cur))
+        await setGoal($, cur => (cur ? { ...cur, outside: (cur.outside ?? 0) + used } : cur))
+      }
+    } else if (u && g && g.status !== 'done') {
       const used = u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
       await setGoal($, cur => {
         if (!cur) return cur
@@ -236,20 +304,69 @@ export const register: Register = (on, options) => {
   }).catch(async function* ($, e, next) { return yield* next(e) })
 
   // While a goal is worked, each of the person's prompts carries where it stands.
+  // A followups Start is a side job: no goal reminder beside it, its tokens counted apart, and the
+  // person asked (in the band) whether its items join the goal. The person's own next prompt ends it.
   on('prompt.submit', async ($, e, next) => {
+    if (e.command) return next(e)
     const g = await read($, goal)
-    if (e.command || !g || g.status !== 'active') return next(e)
+    if (e.origin.kind === 'plugin' && e.origin.name === TODO_PLUGIN) {
+      const items = parseStartPrompt(e.text)
+      if (g && items.length) {
+        await update($, side, () => ({ items, tokens: 0, isAsking: g.status === 'active', taskIds: [], doneIds: [], isLive: true }))
+      }
+      return next(e)
+    }
+    if (e.origin.kind === 'composer') await update($, side, cur => (!cur ? cur : cur.isAsking ? { ...cur, isLive: false } : null))
+    if (!g || g.status !== 'active') return next(e)
     return next({ ...e, context: [...(e.context ?? []), reminder(g)] })
+  }).catch(($, e, next) => next(e))
+
+  // A to-do item followups marks done closes the goal task it became (or will become, if added later).
+  on('tool.call', { tool: TODO_DONE_TOOL }, async ($, e, next) => {
+    const r = await next(e)
+    if (('deny' in r && r.deny) || !String(r.result ?? '').startsWith('Marked')) return r
+    const ref = String((e as unknown as { id?: unknown }).id ?? '').trim()
+    const g = await read($, goal)
+    const task = g?.tasks.find(t => t.followupId && (t.followupId === ref || norm(t.title) === norm(ref)))
+    if (g && task && task.status !== 'done') {
+      await setGoal($, cur => (cur ? withStatus(cur, task.id, 'done') : cur))
+      const now = await read($, goal)
+      if (now?.status === 'done') $.ui.toast(`Goal reached: ${now.text}`)
+    }
+    await update($, side, cur => {
+      if (!cur) return cur
+      const item = cur.items.find(it => it.id === ref || norm(it.title) === norm(ref))
+      return item ? { ...cur, doneIds: [...cur.doneIds, item.id] } : cur
+    })
+    return r
   }).catch(($, e, next) => next(e))
 
   // ---------- the band: the question at the start of a session ----------
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const ask = await read($, asking)
-    if (e.props.hasSurvey || !ask) return next(e)
-    const { Box, Button, Input, Text } = $.ui.resolve(e as typeof e & { surface: 'desktop' })
+    const sj = await read($, side)
     const g = await read($, goal)
+    if (e.props.hasSurvey || (!ask && !(sj?.isAsking && g))) return next(e)
+    const { Box, Button, Input, Text } = $.ui.resolve(e as typeof e & { surface: 'desktop' })
     const below = await next(e)
+    if (sj?.isAsking && g) {
+      const grown = addSide(g, sj).goal
+      const names = sj.items.map(it => `"${it.title}"`).join(', ')
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="column" paddingX={1}>
+            <Text bold color="#d97757" wrap="truncate-end">{`➕ Add to your goal? ${names}`}</Text>
+            <Text dimColor wrap="truncate-end">{`The plan grows to ${grown.tasks.length} tasks: ${percentOf(g)}% → ${percentOf(grown)}%. Kept apart, its tokens show as outside the goal.`}</Text>
+            <Box flexDirection="row" gap={1}>
+              <Button key="side-add" label="Add to goal" hotkey="g" variant="primary" onPress={() => addSideToGoal($)} />
+              <Button key="side-apart" label="Keep it separate" hotkey="k" onPress={() => keepSideApart($)} />
+            </Box>
+          </Box>
+          {below}
+        </Box>
+      )
+    }
     const dismiss = () => update($, asking, () => null)
     return (
       <Box flexDirection="column">
@@ -339,6 +456,12 @@ export const register: Register = (on, options) => {
               <Box flexDirection="row" justifyContent="space-between" gap={1}>
                 <Text dimColor>Planning and between tasks</Text>
                 <Text dimColor>{`${tok(g.other)} tokens`}</Text>
+              </Box>
+            ) : null}
+            {g.outside ? (
+              <Box flexDirection="row" justifyContent="space-between" gap={1}>
+                <Text dimColor>Outside the goal (from the to-do list)</Text>
+                <Text dimColor>{`${tok(g.outside)} tokens`}</Text>
               </Box>
             ) : null}
           </Box>
