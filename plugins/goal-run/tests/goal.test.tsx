@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { runnerX, trackText } from '../hooks/art'
-import { addSide, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder } from '../hooks/register'
+import { addSide, insertTask, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan } from '../hooks/register'
 import type { Goal } from '../types'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -80,7 +80,7 @@ async function step($: Engine, w: { steps: number[] }, tokens: number, agentId?:
 
 describe('from the question to the finish line', () => {
   test('ask, plan, approve, run the tasks with their tokens, reach the goal', async ($, on) => {
-    const w = engine(on, { answers: ['Approve'] })
+    const w = engine(on, { answers: ['Approve, run through'] })
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
 
     // The session opens with the question; the person types a goal.
@@ -146,7 +146,7 @@ describe('from the question to the finish line', () => {
     expect(await texts(pane)).toMatch(/Proposed plan: approve it to start/)
     await pane.press({ key: 'approve' })
     expect(await texts(pane)).not.toMatch(/Proposed plan/)
-    expect(w.sent.at(-1)).toMatch(/The plan is approved/)
+    expect(w.sent.at(-1)).toMatch(/The plan is approved \(runs through\)/)
     expect(await texts(pane)).toMatch(/0\/3 tasks/)
     await pane.unmount()
 
@@ -155,7 +155,7 @@ describe('from the question to the finish line', () => {
   })
 
   test("while a goal is worked, the person's prompts carry where it stands", async ($, on) => {
-    const w = engine(on, { answers: ['Approve'] })
+    const w = engine(on, { answers: ['Approve, run through'] })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
     await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
@@ -169,7 +169,7 @@ describe('from the question to the finish line', () => {
 
 describe('the track fits the pane', () => {
   test('a narrow pane draws the track narrower, keeping its shape', async ($, on) => {
-    engine(on, { answers: ['Approve'] })
+    engine(on, { answers: ['Approve, run through'] })
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
     await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
     await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
@@ -257,7 +257,7 @@ describe('work started from the followups to-do list', () => {
 
   // An approved two-task goal with its first task done: 50%.
   async function halfway($: Engine, on: On) {
-    const w = engine(on, { answers: ['Approve'] })
+    const w = engine(on, { answers: ['Approve, run through'] })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
     await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
@@ -343,7 +343,7 @@ describe('work started from the followups to-do list', () => {
   })
 
   test("reads the items of followups' Start prompt, one or several", () => {
-    expect(parseStartPrompt(START)).toEqual([{ id: 'fu-1', title: 'Rotate the dev key' }])
+    expect(parseStartPrompt(START)).toEqual([{ id: 'fu-1', title: 'Rotate the dev key', isBug: true }])
     const many = ['Start these 2 items from my to-do list, one after the other:', '- id a: First', '- id b: Second — why it matters', 'Do the work.'].join('\n')
     expect(parseStartPrompt(many)).toEqual([{ id: 'a', title: 'First' }, { id: 'b', title: 'Second' }])
     expect(parseStartPrompt('just a prompt')).toEqual([])
@@ -398,7 +398,7 @@ describe('the order of the plan', () => {
   })
 
   test('the dialog shows the order with priorities and dependencies, and the pane lets the person reorder', async ($, on) => {
-    const w = engine(on, { answers: ['Approve'] })
+    const w = engine(on, { answers: ['Approve, run through'] })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     await $.command.run({ command: 'session-goal', args: 'Ship the export' } as never)
     const r = await $.tool.call({
@@ -420,5 +420,124 @@ describe('the order of the plan', () => {
     await pane.unmount()
     const next = await $.prompt.submit({ text: 'go', wait: false, origin: { kind: 'composer' } } as never)
     expect((next.context ?? []).join('\n')).toMatch(/t2 \(medium priority\): Write the exporter\n- \[pending\] t1 \(high priority\): Fix the crash/)
+  })
+})
+
+describe('adding a task mid-goal', () => {
+  const ADD = 'mcp__goal-run__add'
+  // An approved plan: t1 high (done), t2 high, t3 medium, t4 low.
+  async function underway($: Engine, on: On, answers: (string | null)[]) {
+    const w = engine(on, { answers: ['Approve, run through', ...answers] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: [{ title: 'A', priority: 'high' }, { title: 'B', priority: 'high' }, { title: 'C', priority: 'medium' }, { title: 'D', priority: 'low' }] } as never)
+    await $.tool.call({ tool: UPDATE, id: 't1', status: 'done' } as never)
+    return w
+  }
+  const titles = async ($: Engine) => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const t = await texts(ui)
+    await ui.unmount()
+    return t
+  }
+
+  test('goes in by priority among the pending tasks, after what it needs, once the person says add it', async ($, on) => {
+    const w = await underway($, on, ['Add it'])
+    const r = await $.tool.call({ tool: ADD, title: 'Rotate the key', priority: 'high' } as never)
+    expect(w.asked.at(-1)).toMatch(/Add to the goal: \[high\] Rotate the key\. It goes in as #3, before "C"\. Progress 25% → 20%\./)
+    expect(String(r.result)).toMatch(/^Added t5 \(high priority\) as #3/)
+    expect(await titles($)).toMatch(/A .*B .*Rotate the key .*C .*D/)
+  })
+
+  test('a task that needs a later one goes after it', async ($, on) => {
+    await underway($, on, ['Add it'])
+    await $.tool.call({ tool: ADD, title: 'Ship the docs', priority: 'high', needs: ['t3'] } as never)
+    expect(await titles($)).toMatch(/C .*Ship the docs .*D/)
+  })
+
+  test('not now, or no answer, adds nothing', async ($, on) => {
+    await underway($, on, ['Not now', null])
+    expect(String((await $.tool.call({ tool: ADD, title: 'X', priority: 'low' } as never)).result)).toMatch(/chose not to add/)
+    expect(String((await $.tool.call({ tool: ADD, title: 'Y', priority: 'low' } as never)).result)).toMatch(/hasn't answered/)
+    expect(await titles($)).toMatch(/1\/4 tasks/)
+  })
+
+  test('insertTask leaves done and in-progress tasks where they are', () => {
+    const g: Goal = { text: 'x', status: 'active', activeId: 't2', other: 0, tasks: [
+      { id: 't1', title: 'a', status: 'done', tokens: 5, priority: 'low' },
+      { id: 't2', title: 'b', status: 'in_progress', tokens: 3, priority: 'low' },
+      { id: 't3', title: 'c', status: 'pending', tokens: 0, priority: 'low' },
+    ] }
+    const { goal: grown, at } = insertTask(g, { title: 'new', priority: 'high', needs: [] })
+    expect(at).toBe(2)
+    expect(grown.tasks.map(t => t.title)).toEqual(['a', 'b', 'new', 'c'])
+  })
+
+  test('a new plan mid-goal keeps the done tasks and their tokens', () => {
+    const before: Goal = { text: 'x', status: 'active', activeId: 't2', other: 1, outside: 7, pace: 'ask', tasks: [
+      { id: 't1', title: 'a', status: 'done', tokens: 40, priority: 'high' },
+      { id: 't2', title: 'b', status: 'in_progress', tokens: 9, priority: 'high' },
+    ] }
+    const g = replan(before, 'x', orderPlan([{ title: 'b2', priority: 'high', dependsOn: [] }, { title: 'c', priority: 'low', dependsOn: [1] }]))
+    expect(g.tasks.map(t => [t.id, t.title, t.status, t.tokens])).toEqual([['t1', 'a', 'done', 40], ['t2', 'b2', 'pending', 0], ['t3', 'c', 'pending', 0]])
+    expect(g.tasks[2]!.needs).toEqual(['t2'])
+    expect(g.other).toBe(10)
+    expect(g.outside).toBe(7)
+    expect(g.pace).toBe('ask')
+  })
+
+  test('a bug from the to-do list joins the goal as high priority', () => {
+    const g: Goal = { text: 'x', status: 'active', activeId: null, other: 0, tasks: [] }
+    const { goal: grown } = addSide(g, { items: [{ id: 'a', title: 'A', isBug: true }, { id: 'b', title: 'B' }], tokens: 0, isAsking: true, taskIds: [], doneIds: [], isLive: true })
+    expect(grown.tasks.map(t => t.priority)).toEqual(['high', 'medium'])
+  })
+})
+
+describe('after approval: run through, or ask between tasks', () => {
+  async function approved($: Engine, on: On, choice: string, more: (string | null)[] = []) {
+    const w = engine(on, { answers: [choice, ...more] })
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    on('classic.Stop', () => ({}))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    const r = await $.tool.call({ tool: PLAN, tasks: [{ title: 'One', priority: 'high' }, { title: 'Two', priority: 'medium' }, { title: 'Three', priority: 'low' }] } as never)
+    return { w, r }
+  }
+  const stop = { stop_hook_active: false, last_assistant_message: 'Did one.' } as never
+
+  test('run through: a done task says go on, and a stop with tasks left is sent on once', async ($, on) => {
+    const { r } = await approved($, on, 'Approve, run through')
+    expect(String(r.result)).toMatch(/go straight on to the next pending one/)
+    const done = await $.tool.call({ tool: UPDATE, id: 't1', status: 'done' } as never)
+    expect(String(done.result)).toMatch(/Go straight on to t2: Two\./)
+    const first = await $.classic.Stop(stop)
+    expect(first.block).toMatch(/2 tasks to do.*Go on with t2: Two\. If you are blocked or need their decision, say so plainly and stop\./)
+    expect((await $.classic.Stop(stop)).block).toBeUndefined()
+    // The person's next prompt allows one more nudge.
+    await $.prompt.submit({ text: 'next', wait: false, origin: { kind: 'composer' } } as never)
+    expect((await $.classic.Stop({ stop_hook_active: true, last_assistant_message: '' } as never)).block).toBeUndefined()
+    expect((await $.classic.Stop(stop)).block).toMatch(/Go on with t2/)
+  })
+
+  test('ask between tasks: the person decides after each one, and no stop is sent on', async ($, on) => {
+    const { w, r } = await approved($, on, 'Approve, ask between tasks', ['Continue', 'Stop here'])
+    expect(String(r.result)).toMatch(/marking a task done asks them whether to go on/)
+    const one = await $.tool.call({ tool: UPDATE, id: 't1', status: 'done' } as never)
+    expect(w.asked.at(-1)).toMatch(/"One" is done \(33%\)\. Go on to "Two"\?/)
+    expect(String(one.result)).toMatch(/The person says go on: start t2: Two\./)
+    const two = await $.tool.call({ tool: UPDATE, id: 't2', status: 'done' } as never)
+    expect(String(two.result)).toMatch(/wants to stop here\. Don't start t3/)
+    expect((await $.classic.Stop(stop)).block).toBeUndefined()
+  })
+
+  test('the pace can be switched in the pane, and the last task needs no question', async ($, on) => {
+    const { w } = await approved($, on, 'Approve, ask between tasks')
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    await pane.press({ key: 'pace' })
+    await pane.unmount()
+    const asked = w.asked.length
+    const r = await $.tool.call({ tool: UPDATE, id: 't1', status: 'done' } as never)
+    expect(String(r.result)).toMatch(/Go straight on to t2/)
+    expect(w.asked.length).toBe(asked)
   })
 })

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Asking, Goal, Priority, Side, Task, TaskStatus } from '../types'
+import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
 
@@ -16,6 +16,7 @@ const PANE = 'goal-run'
 const PANE_TITLE = 'Goal'
 const PLAN_TOOL = 'mcp__goal-run__plan'
 const UPDATE_TOOL = 'mcp__goal-run__update'
+const ADD_TOOL = 'mcp__goal-run__add'
 // The followups mod: its to-do Start submits a prompt under its name, and its done tool closes an item.
 const TODO_PLUGIN = 'followups'
 const TODO_DONE_TOOL = 'mcp__followups__done'
@@ -23,8 +24,15 @@ const TODO_DONE_TOOL = 'mcp__followups__done'
 const FRAME_MS = 250
 const MAX_TASKS = 12
 
-const APPROVE = 'Approve'
+const APPROVE_RUN = 'Approve, run through'
+const APPROVE_ASK = 'Approve, ask between tasks'
 const CHANGE = 'Change it'
+const ADD_IT = 'Add it'
+const NOT_NOW = 'Not now'
+const GO_ON = 'Continue'
+const STOP_HERE = 'Stop here'
+export const paceOf = (g: Goal): Pace => g.pace ?? 'run'
+const PACE_TEXT: Record<Pace, string> = { run: 'runs through', ask: 'asks between tasks' }
 
 const timers: { cancel: () => void }[] = []
 
@@ -102,6 +110,37 @@ export function movePending(g: Goal, id: string, by: -1 | 1): Goal {
   return { ...g, tasks }
 }
 
+// Where a new task goes: before the first pending task of lower priority, but never ahead of a task it
+// needs. Done and in-progress tasks keep their places.
+export function insertTask(g: Goal, item: { title: string; priority: Priority; needs: string[] }): { goal: Goal; task: Task; at: number } {
+  const id = `t${g.tasks.reduce((n, t) => Math.max(n, Number(t.id.slice(1)) || 0), 0) + 1}`
+  const needs = item.needs.filter(n => g.tasks.some(t => t.id === n))
+  const task: Task = { id, title: item.title, status: 'pending', tokens: 0, priority: item.priority, ...(needs.length ? { needs } : {}) }
+  const floor = Math.max(-1, ...needs.map(n => g.tasks.findIndex(t => t.id === n))) + 1
+  let at = g.tasks.findIndex((t, i) => i >= floor && t.status === 'pending' && RANK[priorityOf(t)] > RANK[item.priority])
+  if (at < 0) at = g.tasks.length
+  const tasks = [...g.tasks.slice(0, at), task, ...g.tasks.slice(at)]
+  return { goal: { ...g, tasks, status: g.status === 'done' ? 'active' : g.status }, task, at }
+}
+
+// A new plan for a goal already under way keeps the done tasks (their tokens too) ahead of it; the
+// tokens of tasks it drops move to "planning and between tasks", so the total stays right.
+export function replan(before: Goal | null, text: string, tasks: Task[]): Goal {
+  const kept = before && before.status !== 'planning' ? before.tasks.filter(t => t.status === 'done') : []
+  const dropped = before ? before.tasks.filter(t => !kept.includes(t)).reduce((n, t) => n + t.tokens, 0) : 0
+  const shift = kept.reduce((n, t) => Math.max(n, Number(t.id.slice(1)) || 0), 0)
+  const renamed = tasks.map(t => ({ ...t, id: `t${Number(t.id.slice(1)) + shift}`, ...(t.needs ? { needs: t.needs.map(n => `t${Number(n.slice(1)) + shift}`) } : {}) }))
+  return {
+    text,
+    status: 'proposed',
+    tasks: [...kept, ...renamed],
+    activeId: null,
+    other: (before?.other ?? 0) + dropped,
+    ...(before?.outside ? { outside: before.outside } : {}),
+    ...(before?.pace ? { pace: before.pace } : {}),
+  }
+}
+
 const needsText = (t: Task, g: Goal) => (t.needs?.length ? ` (needs ${t.needs.map(id => g.tasks.findIndex(x => x.id === id) + 1).join(', ')})` : '')
 
 // The plan as the person reads it in the approval dialog: in order, each with its priority and what it waits on.
@@ -119,7 +158,10 @@ export function reminder(g: Goal): string {
   return [
     `Session goal: ${g.text}. ${done}/${g.tasks.length} tasks done (${percentOf(g)}%).`,
     ...g.tasks.map(t => `- [${t.status === 'done' ? 'done' : t.status === 'in_progress' ? 'in progress' : 'pending'}] ${t.id} (${priorityOf(t)} priority): ${t.title}${t.needs?.length ? `, needs ${t.needs.join(', ')}` : ''}`),
-    `The list is the order to work in: by priority, dependencies first, and as the person may have reordered it. Take the first pending task next, not by its id. When you start a task call ${UPDATE_TOOL} with its id and status "in_progress"; when it is finished, status "done".`,
+    `The list is the order to work in: by priority, dependencies first, and as the person may have reordered it. Take the first pending task next, not by its id. When you start a task call ${UPDATE_TOOL} with its id and status "in_progress"; when it is finished, status "done". To add a task the person asks for, use ${ADD_TOOL}, not a new plan.`,
+    paceOf(g) === 'run'
+      ? 'The person chose to run through: after a task, go straight on to the next pending one. Stop only when you are blocked or need their decision.'
+      : 'The person chose to be asked between tasks: marking a task done asks them whether to go on.',
   ].join('\n')
 }
 
@@ -160,17 +202,17 @@ async function startGoal($: EngineInterface, text: string) {
   }).catch(() => {})
 }
 
-async function approve($: EngineInterface) {
-  await setGoal($, g => (g ? { ...g, status: 'active' } : g))
-  void $.prompt.submit({ text: 'The plan is approved. Start with the first task.' }).catch(() => {})
+async function approve($: EngineInterface, pace: Pace) {
+  await setGoal($, g => (g ? { ...g, status: 'active', pace } : g))
+  void $.prompt.submit({ text: `The plan is approved (${PACE_TEXT[pace]}). Start with the first pending task.` }).catch(() => {})
 }
 
 // The to-do items a followups Start prompt names, from its lines "- id <id>: <title>[ (bug)][ — detail][ [where: …]]".
-export function parseStartPrompt(text: string): { id: string; title: string }[] {
-  const out: { id: string; title: string }[] = []
+export function parseStartPrompt(text: string): { id: string; title: string; isBug?: boolean }[] {
+  const out: { id: string; title: string; isBug?: boolean }[] = []
   for (const line of text.split('\n')) {
-    const m = /^- id (\S+): (.+?)(?: \(bug\))?(?: — .*?)?(?: \[where: .*\])?$/.exec(line.trim())
-    if (m) out.push({ id: m[1]!, title: clip(m[2]!.trim(), 120) })
+    const m = /^- id (\S+): (.+?)( \(bug\))?(?: — .*?)?(?: \[where: .*\])?$/.exec(line.trim())
+    if (m) out.push({ id: m[1]!, title: clip(m[2]!.trim(), 120), ...(m[3] ? { isBug: true } : {}) })
   }
   return out
 }
@@ -194,7 +236,7 @@ export function addSide(g: Goal, sj: Side): { goal: Goal; taskIds: string[] } {
     title: it.title,
     status: sj.doneIds.includes(it.id) ? 'done' : 'in_progress',
     tokens: share + (i === 0 ? sj.tokens - share * sj.items.length : 0),
-    priority: 'medium',
+    priority: it.isBug ? 'high' : 'medium',
     followupId: it.id,
   }))
   const tasks = [...g.tasks, ...added]
@@ -228,8 +270,12 @@ const isTaskStatus = (s: unknown): s is TaskStatus => s === 'pending' || s === '
 
 export const register: Register = (on, options) => {
   const askOnStart = String(options.askOnStart ?? 'on') !== 'off'
+  // Per turn: a person is at the prompt (so a stop can be sent back), and the run-through nudge was used.
+  let isInteractive = false
+  let isNudged = false
 
   on('session.start', async ($, e, next) => {
+    isInteractive = e.isInteractive
     for (const timer of timers.splice(0)) timer.cancel()
     await update($, side, () => null)
     await $.tool.register({
@@ -267,6 +313,20 @@ export const register: Register = (on, options) => {
           status: { type: 'string', enum: ['in_progress', 'done', 'pending'] },
         },
         required: ['id', 'status'],
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
+      name: 'add',
+      description: `Add one task to the approved goal plan, when the person asks for more work during the goal: give it a priority (high, medium or low) and the ids of tasks it needs first. It goes in among the pending tasks by priority, after what it needs, and the person confirms. Use it instead of proposing a new plan; done and in-progress tasks are untouched.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Short and imperative' },
+          priority: { type: 'string', enum: ['high', 'medium', 'low'] },
+          needs: { type: 'array', items: { type: 'string' }, description: 'Ids of tasks it needs done first, e.g. ["t2"]' },
+        },
+        required: ['title', 'priority'],
       },
       isDeferred: false,
     })
@@ -315,21 +375,21 @@ export const register: Register = (on, options) => {
     if (!items.length) return { deny: 'A plan needs at least one task.' }
     const before = await read($, goal)
     const text = clip(String(input.goal ?? '').trim() || before?.text || 'Session goal', 200)
-    const tasks = orderPlan(items)
-    const proposed: Goal = { text, status: 'proposed', tasks, activeId: null, other: before?.other ?? 0 }
+    const proposed = replan(before, text, orderPlan(items))
     await update($, asking, () => null)
     await setGoal($, () => proposed)
     void $.ui.open({ id: PANE, title: PANE_TITLE })
 
     let answer = ''
     try {
-      answer = await $.ui.ask(`${planText(proposed)}\n\nApprove this plan?`, { header: 'Goal plan', options: [APPROVE, CHANGE] })
+      answer = await $.ui.ask(`${planText(proposed)}\n\nApprove this plan? Run straight through the tasks, or be asked before each next one.`, { header: 'Goal plan', options: [APPROVE_RUN, APPROVE_ASK, CHANGE] })
     } catch {
       answer = ''
     }
-    if (answer === APPROVE) {
-      await setGoal($, g => (g ? { ...g, status: 'active' } : g))
-      return { result: `Approved. ${reminder({ ...proposed, status: 'active' })}` }
+    if (answer === APPROVE_RUN || answer === APPROVE_ASK) {
+      const pace: Pace = answer === APPROVE_RUN ? 'run' : 'ask'
+      await setGoal($, g => (g ? { ...g, status: 'active', pace } : g))
+      return { result: `Approved. ${reminder({ ...proposed, status: 'active', pace })}` }
     }
     if (!answer.trim()) return { result: "The person hasn't answered; the plan waits for approval in the Goal pane. Don't start the work yet." }
     if (answer === CHANGE) return { result: 'The person wants changes to the plan. Ask what to change, then propose it again with this tool.' }
@@ -347,7 +407,48 @@ export const register: Register = (on, options) => {
     await setGoal($, cur => (cur ? withStatus(cur, id, status) : cur))
     const now = (await read($, goal))!
     if (now.status === 'done') $.ui.toast(`Goal reached: ${now.text}`)
-    return { result: `${id} is ${status.replace('_', ' ')}. ${now.tasks.filter(t => t.status === 'done').length}/${now.tasks.length} tasks done (${percentOf(now)}%).${now.status === 'done' ? ' The goal is reached.' : ''}` }
+    const where = `${id} is ${status.replace('_', ' ')}. ${now.tasks.filter(t => t.status === 'done').length}/${now.tasks.length} tasks done (${percentOf(now)}%).`
+    const next = now.tasks.find(t => t.status === 'pending')
+    if (now.status === 'done') return { result: `${where} The goal is reached.` }
+    if (status !== 'done' || !next) return { result: where }
+    if (paceOf(now) === 'run') return { result: `${where} Go straight on to ${next.id}: ${next.title}.` }
+    // Asked between tasks: the person decides whether the next one starts now.
+    const done = now.tasks.find(t => t.id === id)!
+    let answer = ''
+    try {
+      answer = await $.ui.ask(`"${done.title}" is done (${percentOf(now)}%). Go on to "${next.title}"?`, { header: 'Goal', options: [GO_ON, STOP_HERE] })
+    } catch {
+      answer = ''
+    }
+    if (answer === GO_ON) return { result: `${where} The person says go on: start ${next.id}: ${next.title}.` }
+    if (answer && answer !== STOP_HERE) return { result: `${where} The person says: ${answer}` }
+    return { result: `${where} The person wants to stop here. Don't start ${next.id}; sum up where the goal stands and wait for them.` }
+  })
+
+  // A task the person asks for mid-goal: put in by its priority among the pending tasks, with their OK.
+  on('tool.call', { tool: ADD_TOOL }, async ($, e) => {
+    const input = e as unknown as { title?: unknown; priority?: unknown; needs?: unknown }
+    const g = await read($, goal)
+    if (!g || g.status === 'planning' || g.status === 'proposed') return { deny: `There is no approved plan to add to; propose one with ${PLAN_TOOL}.` }
+    const title = clip(String(input.title ?? '').trim(), 120)
+    if (!title) return { deny: 'A task needs a title.' }
+    const priority: Priority = isPriority(input.priority) ? input.priority : 'medium'
+    const needs = Array.isArray(input.needs) ? input.needs.map(n => String(n).trim()) : []
+    const { goal: grown, task, at } = insertTask(g, { title, priority, needs })
+    const before = grown.tasks[at + 1]
+    const place = `#${at + 1}${before ? `, before "${before.title}"` : ', last'}`
+    let answer = ''
+    try {
+      answer = await $.ui.ask(`Add to the goal: [${priority}] ${title}${task.needs ? ` (needs ${task.needs.join(', ')})` : ''}. It goes in as ${place}. Progress ${percentOf(g)}% → ${percentOf(grown)}%.`, { header: 'Goal', options: [ADD_IT, NOT_NOW] })
+    } catch {
+      answer = ''
+    }
+    if (answer === ADD_IT) {
+      await setGoal($, () => grown)
+      return { result: `Added ${task.id} (${priority} priority) as ${place}. ${reminder(grown)}` }
+    }
+    if (answer && answer !== NOT_NOW) return { result: `Not added yet. The person says: ${answer}` }
+    return { result: answer ? 'The person chose not to add it.' : "The person hasn't answered; it wasn't added." }
   })
 
   // Every request's tokens, the sub-agents' too, are counted against the task in progress (else "other").
@@ -392,6 +493,7 @@ export const register: Register = (on, options) => {
       }
       return next(e)
     }
+    if (e.origin.kind === 'composer') isNudged = false
     if (e.origin.kind === 'composer') await update($, side, cur => (!cur ? cur : cur.isAsking ? { ...cur, isLive: false } : null))
     if (!g || g.status !== 'active') return next(e)
     return next({ ...e, context: [...(e.context ?? []), reminder(g)] })
@@ -416,6 +518,19 @@ export const register: Register = (on, options) => {
     })
     return r
   }).catch(($, e, next) => next(e))
+
+  // Running through: a turn that ends with pending tasks left is sent on once, to the next one. Claude
+  // may still stop when it is blocked or needs the person; the second stop of a turn always passes.
+  on('classic.Stop', async ($, e, next) => {
+    const r = await next(e)
+    const g = await read($, goal)
+    const next1 = g?.tasks.find(t => t.status === 'pending')
+    if (!isInteractive || isNudged || e.stop_hook_active || r.block || !g || g.status !== 'active' || paceOf(g) !== 'run' || !next1) return r
+    if ((await read($, side))?.isLive) return r
+    isNudged = true
+    const left = g.tasks.filter(t => t.status !== 'done').length
+    return { ...r, block: `The goal still has ${left} task${left === 1 ? '' : 's'} to do, and the person chose to run through. Go on with ${next1.id}: ${next1.title}. If you are blocked or need their decision, say so plainly and stop.` }
+  }).catch(($, e, next) => (next.called ? next(e) : {}))
 
   // ---------- the band: the question at the start of a session ----------
 
@@ -515,7 +630,8 @@ export const register: Register = (on, options) => {
         {g.status === 'proposed' ? (
           <Box flexDirection="row" gap={1}>
             <Text color="#c9a227" bold>Proposed plan: approve it to start</Text>
-            <Button key="approve" label="Approve plan" variant="primary" onPress={() => approve($)} />
+            <Button key="approve" label="Approve, run through" variant="primary" onPress={() => approve($, 'run')} />
+            <Button key="approve-ask" label="Approve, ask between" onPress={() => approve($, 'ask')} />
           </Box>
         ) : null}
         {g.status === 'done' ? <Text color="#1f9d6b" bold>Goal reached!</Text> : null}
@@ -553,6 +669,9 @@ export const register: Register = (on, options) => {
           </Box>
         ) : null}
         <Box flexDirection="row" gap={1}>
+          {g.status === 'active' ? (
+            <Button key="pace" label={paceOf(g) === 'run' ? '⏩ Runs through · ask between' : '⏸ Asks between · run through'} plain onPress={() => setGoal($, cur => (cur ? { ...cur, pace: paceOf(cur) === 'run' ? 'ask' : 'run' } : cur))} />
+          ) : null}
           <Button key="clear" label="Clear goal" plain onPress={() => setGoal($, () => null)} />
         </Box>
       </Box>
