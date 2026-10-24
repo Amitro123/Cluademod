@@ -421,12 +421,14 @@ export const register: Register = (on, options) => {
     const pose = poseOf(g)
     const done = g.tasks.filter(t => t.status === 'done').length
     const cells = Math.max(16, Math.min(48, e.props.bodyColumns - 4))
+    // The track scales down to a narrow pane (about 7 px a cell) rather than running past its edge.
+    const trackWidth = Math.min(TRACK_SIZE.width, Math.max(180, e.props.bodyColumns * 7))
 
     return (
       <Box flexDirection="column" gap={1}>
         <Text bold color="#d97757" wrap="truncate-end">{`🎯 ${g.text}`}</Text>
         {Svg
-          ? <Svg source={trackSvg(fractionOf(g), pose, frame)} alt={`${percentOf(g)}% of the way to the goal`} width={TRACK_SIZE.width} height={TRACK_SIZE.height} />
+          ? <Svg source={trackSvg(fractionOf(g), pose, frame)} alt={`${percentOf(g)}% of the way to the goal`} width={trackWidth} height={Math.round((trackWidth * TRACK_SIZE.height) / TRACK_SIZE.width)} />
           : <Text color="#d97757">{trackText(fractionOf(g), pose, frame, cells)}</Text>}
         <Box flexDirection="row" gap={2}>
           <Text bold>{`${percentOf(g)}%`}</Text>
