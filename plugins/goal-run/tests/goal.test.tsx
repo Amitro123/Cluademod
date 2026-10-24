@@ -203,6 +203,19 @@ describe('a new session', () => {
     await band.unmount()
   })
 
+  test('where the band has no text field (mobile), the question says to type /session-goal', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'mobile', isInteractive: true } as never)
+    const phone = await $.ui.mount({ ...BAND, surface: 'mobile' } as never)
+    expect(await phone.find({ key: 'goal' } as never)).toBeUndefined()
+    expect(await texts(phone)).toMatch(/Type \/session-goal and your goal to set one/)
+    await phone.unmount()
+    const desk = await $.ui.mount({ ...BAND, surface: 'desktop' } as never)
+    expect(await desk.find({ key: 'goal' } as never)).toBeDefined()
+    expect(await texts(desk)).not.toMatch(/Type \/session-goal/)
+    await desk.unmount()
+  })
+
   test('a newer goal set in another session of the project is not overwritten', async ($, on) => {
     const w = engine(on, { saved: { 'goal:/repo': unfinished } })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
@@ -214,6 +227,16 @@ describe('a new session', () => {
     // A goal this session sets afterwards is the newer one, and is saved.
     await $.command.run({ command: 'session-goal', args: 'My goal' } as never)
     expect((w.saved['goal:/repo'] as Goal).text).toBe('My goal')
+  })
+
+  test("once another session's newer goal wins, the person is told once that progress here isn't saved", async ($, on) => {
+    const w = engine(on, { saved: { 'goal:/repo': unfinished } })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    w.saved['goal:/repo'] = { ...unfinished, text: 'Their goal', setAt: Date.UTC(2026, 9, 24, 8) }
+    await step($, w, 1_000)
+    await step($, w, 1_000)
+    expect((w.saved['goal:/repo'] as Goal).text).toBe('Their goal')
+    expect(w.toasts.filter(t => /newer goal was set in another session/.test(t))).toHaveLength(1)
   })
 
   test('/goal clear forgets the goal', async ($, on) => {

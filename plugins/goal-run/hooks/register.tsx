@@ -10,6 +10,8 @@ import type { Pose } from './art'
 const goal = atom({ plugin: 'goal-run', key: 'goal' } as const, null as Goal | null)
 // When the goal this session last loaded or saved was set: a newer one saved by another session wins.
 const heldAt = atom({ plugin: 'goal-run', key: 'heldAt' } as const, 0)
+// Set once this session was told its goal is no longer the one saved.
+const superseded = atom({ plugin: 'goal-run', key: 'superseded' } as const, false)
 const asking = atom({ plugin: 'goal-run', key: 'asking' } as const, null as Asking)
 const tick = atom({ plugin: 'goal-run', key: 'tick' } as const, 0)
 const side = atom({ plugin: 'goal-run', key: 'side' } as const, null as Side | null)
@@ -209,9 +211,16 @@ async function save($: EngineInterface) {
   const g = await read($, goal)
   const saved = (await $.store.get(key)) as Goal | null | undefined
   // Another session in this project set a newer goal: it stays saved, and this session's copy stays its own.
-  if (saved && typeof saved === 'object' && (saved.setAt ?? 0) > (g ? g.setAt ?? 0 : await read($, heldAt))) return
+  if (saved && typeof saved === 'object' && (saved.setAt ?? 0) > (g ? g.setAt ?? 0 : await read($, heldAt))) {
+    if (!(await read($, superseded))) {
+      await update($, superseded, () => true)
+      $.ui.toast("A newer goal was set in another session; progress here isn't saved")
+    }
+    return
+  }
   await $.store.set(key, g)
   await update($, heldAt, () => g?.setAt ?? 0)
+  if (await read($, superseded)) await update($, superseded, () => false)
 }
 
 async function setGoal($: EngineInterface, fn: (g: Goal | null) => Goal | null) {
@@ -584,7 +593,10 @@ export const register: Register = (on, options) => {
     const sj = await read($, side)
     const g = await read($, goal)
     if (e.props.hasSurvey || (!ask && !(sj?.isAsking && g))) return next(e)
-    const { Box, Button, Input, Text } = $.ui.resolve(e as typeof e & { surface: 'desktop' })
+    const { Box, Button, Input: Field, Text } = $.ui.resolve(e as typeof e & { surface: 'desktop' })
+    // The mobile app draws no field yet (should the band reach it): there the question points at the command.
+    const surface: string = e.surface
+    const Input = surface === 'mobile' ? null : Field
     const below = await next(e)
     if (sj?.isAsking && g) {
       const grown = addSide(g, sj).goal
@@ -625,9 +637,13 @@ export const register: Register = (on, options) => {
           ) : (
             <Box flexDirection="column">
               <Text bold color="#d97757">🎯 Is there a goal you want to work on this session?</Text>
-              <Input key="goal" placeholder="e.g. ship the CSV export with tests" submitLabel="set goal" onSubmit={async v => {
-                if (v.trim()) await startGoal($, v)
-              }} />
+              {Input ? (
+                <Input key="goal" placeholder="e.g. ship the CSV export with tests" submitLabel="set goal" onSubmit={async v => {
+                  if (v.trim()) await startGoal($, v)
+                }} />
+              ) : (
+                <Text dimColor>Type /session-goal and your goal to set one.</Text>
+              )}
               <Box flexDirection="row" gap={1}>
                 <Button key="no-goal" label="No goal this time" onPress={dismiss} />
               </Box>

@@ -56,6 +56,7 @@ declare module 'claude-code' {
     'goal-run': {
       goal: Goal | null
       heldAt: number
+      superseded: boolean
       asking: Asking
       side: Side | null
       tick: number
