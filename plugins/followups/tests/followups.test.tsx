@@ -396,6 +396,21 @@ describe('statuses, bugs, start and done', () => {
     expect(String(empty.deny ?? empty.result)).toMatch(/No to-do item/)
   })
 
+  test("a Start whose prompt can't be sent puts the item back to open, so it can be started again", async ($, on) => {
+    engine(on, {})
+    on('prompt.submit', () => {
+      throw new Error('no session to send it to')
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'followup', args: 'Rotate the key' } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const sKey = (await find(pane, 'Button')).map(b => String(b.key)).find(k => k.startsWith('s-'))!
+    await pane.press({ key: sKey })
+    expect(await texts(pane)).toMatch(/1 open · 0 in progress · 0 done/)
+    expect((await find(pane, 'Button')).map(b => String(b.key))).toContain(sKey)
+    await pane.unmount()
+  })
+
   test('Start sets in progress, submits a prompt naming the item and id, and done completes it', async ($, on) => {
     const files: Record<string, string> = {}
     engine(on, files)

@@ -306,8 +306,9 @@ async function setStatus($: EngineInterface, ids: Set<string>, status: Status) {
 async function start($: EngineInterface, which: Item[]) {
   if (!which.length) return
   await setStatus($, new Set(which.map(i => i.id)), 'in_progress')
-  // A turn of its own once the session is idle; it may not resolve until then, so not awaited.
-  $.prompt.submit({ text: startPrompt(which) }).catch(() => {})
+  // A turn of its own once the session is idle; it may not resolve until then, so not awaited. If
+  // it can't be sent, the items go back to open, where their Start button is.
+  $.prompt.submit({ text: startPrompt(which) }).catch(() => setStatus($, new Set(which.map(i => i.id)), 'open'))
 }
 
 // The markdown an export writes: the items as a checklist between two markers.
@@ -475,10 +476,10 @@ export const register: Register = (on, options) => {
     reports = []
     // A turn the Stop check sent back has had Claude go over its own reply: a second reading would
     // only offer the same loose ends again under other titles.
-    const read = [e.answer, ...taken].join('\n').trim().length
-    if (autoDetect && !isBlocked && e.reason === 'answer' && read >= SWEEP_MIN_CHARS) {
+    const chars = [e.answer, ...taken].join('\n').trim().length
+    if (autoDetect && !isBlocked && e.reason === 'answer' && chars >= SWEEP_MIN_CHARS) {
       const answer = e.answer
-      $.clock.after(0, () => sweep($, answer, taken))
+      $.clock.after(0, () => sweep($, answer, taken).catch(err => warn($, err instanceof Error ? err.message : String(err))))
     }
     return r
   })
