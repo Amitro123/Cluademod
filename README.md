@@ -244,6 +244,16 @@ The [mistake-brain](https://github.com/Keshet-Broadcasting/agent-brain-org) skil
   - A **handoff** entry in the pane has **+ to-do**, which adds it to followups' list with `/followup`.
 - In a project with no `MISTAKES.md` and no `.agent-brain/` the mod stays quiet; the pane says that `/mistake-brain init` sets one up.
 
+### The memory graph
+
+![The Brain pane's knowledge graph, dark and light: MEMORY.md at the centre, the four PARA folders, their files, and each MISTAKES.md entry as a dot linked to its file](assets/brain-hud-graph.png)
+
+<sub>The palette follows the theme in `/config`. The graph is the mod's own SVG, drawn from agent-brain-org's real memory: 30 lessons in one Project file (its ring of mostly red dots is the mistakes that taught them), 3 Resource files, empty Areas and Archives, and 2 entries still in the inbox.</sub>
+
+![A routed entry in four frames: logged and waiting in the inbox, on its way, almost at its file, filed with the file glowing](assets/brain-hud-route.png)
+
+<sub>When the skill routes an entry, its dot travels from the inbox to the file its `PARA route` names (about two seconds), then the file glows.</sub>
+
 Tests: `claude plugin test plugins/brain-hud`.
 
 ## Developing
