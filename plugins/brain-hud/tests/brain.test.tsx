@@ -3,6 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { claudeCells, sceneSvg } from '../hooks/art'
+import { graphSvg, routeOf } from '../hooks/graph'
 import { diffBrain, logPrompt, parseMemory, parseMistakes, withListing } from '../hooks/brain'
 import type { Brain } from '../types'
 // The wording followups and goal-run write, from the copy of shared/texts.ts they use too.
@@ -103,6 +104,42 @@ describe('what changed', () => {
     const text = logPrompt('mistake', 'Fix the upload', 'retried without backoff')
     expect(text).toMatch(/\/mistake-brain log, as Type: mistake/)
     expect(text).toContain('Fix the upload')
+  })
+})
+
+describe('the graph', () => {
+  const routed = (title: string, file: string, type: 'mistake' | 'success' = 'mistake') =>
+    entry('2026-10-01 10:00', title, type, 'routed').replace(/- \*\*PARA route:\*\* .*/, `- **PARA route:** Project: .agent-brain/claude/Projects/${file}`)
+  const brain = (): Brain => ({
+    ...parseMemory(MEMORY),
+    entries: parseMistakes(MISTAKES_HEAD + entry('2026-10-24 09:00', 'Waiting one', 'handoff') + routed('Old one', 'mistake-brain-skill.md') + routed('Another', 'mistake-brain-skill.md', 'success')),
+  })
+
+  test("an entry's route names its folder and file, the pre-shared .agent-brain/claude/ path too", () => {
+    expect(routeOf(brain().entries[1]!)).toEqual({ folder: 'Projects', file: 'mistake-brain-skill.md' })
+    expect(routeOf(brain().entries[0]!)).toBeNull()
+  })
+
+  test('MEMORY.md at the centre, the four folders, a dot per routed entry, the rest in the inbox', () => {
+    const svg = graphSvg(brain(), { theme: 'dark' })
+    expect(svg).toContain('>MEMORY.md<')
+    for (const f of ['Projects', 'Areas · empty', 'Resources', 'Archives · empty']) expect(svg).toContain(`>${f}<`)
+    expect(svg).toContain('>mistake-brain-skill<')
+    expect(svg.match(/r="2\.4"/g)).toHaveLength(2)
+    expect(svg).toContain('inbox · 1 to route')
+  })
+
+  test('the file just written to and the entry just logged glow; a routed entry travels from the inbox', () => {
+    const plain = graphSvg(brain(), { theme: 'dark' })
+    const lit = graphSvg(brain(), { theme: 'dark', hot: 'mistake-brain-skill.md', fresh: 0, travelling: { entry: 1, t: 0.5 } })
+    expect(plain).not.toContain('filter="url(#glow)" /><circle cx')
+    expect((lit.match(/url\(#glow\)/g) ?? []).length).toBeGreaterThan((plain.match(/url\(#glow\)/g) ?? []).length + 2)
+    expect(lit).toContain('stroke-dasharray="3 3"')
+  })
+
+  test('a dark and a light palette', () => {
+    expect(graphSvg(brain(), { theme: 'dark' })).toContain('fill="#0b0e14"')
+    expect(graphSvg(brain(), { theme: 'light' })).toContain('fill="#fbfaf7"')
   })
 })
 
@@ -227,7 +264,12 @@ describe('in a session', () => {
       expect(text).toMatch(/skill-deployment-pattern\.md/)
       expect(text).toMatch(/output-discipline\.md \| not in MEMORY\.md/)
       expect(text).not.toMatch(/one adapter per host/)
-      if (surface === 'desktop') expect(await pane.find({ type: 'Svg' } as never)).toBeDefined()
+      if (surface === 'desktop') {
+        const svg = String(((await pane.find({ type: 'Svg' } as never)) as { props?: { source?: string } }).props?.source)
+        expect(svg).toContain('>MEMORY.md<')
+        // No theme in /config here: dark.
+        expect(svg).toContain('fill="#0b0e14"')
+      }
       await pane.unmount()
     })
   }
@@ -371,6 +413,16 @@ describe('in a session', () => {
     w.write('.agent-brain/shared/MEMORY.md', MEMORY.replace('(29 lessons', '(30 lessons'))
     await w.clock.advance(10_000)
     expect(w.pulses).toBe(0)
+  })
+
+  test('the graph follows a light theme set in /config', async ($, on) => {
+    on('config.list', () => ({ value: [{ key: 'theme', value: 'light-daltonized' }] }) as never)
+    engine(on, project())
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+    const svg = String(((await pane.find({ type: 'Svg' } as never)) as { props?: { source?: string } }).props?.source)
+    expect(svg).toContain('fill="#fbfaf7"')
+    await pane.unmount()
   })
 
   test("a handoff's next step goes to followups' to-do list", async ($, on) => {

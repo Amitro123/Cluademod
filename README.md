@@ -207,7 +207,7 @@ Tests: `claude plugin test plugins/goal-run`.
 
 ## brain-hud: the agent's memory, made visible
 
-![brain-hud: three of the scenes above the prompt, an offer from followups, and the Brain pane with the brain map and the memory tree](assets/brain-hud.png)
+![brain-hud: three of the scenes above the prompt, an offer from followups, and the Brain pane with the memory drawn as a knowledge graph](assets/brain-hud.png)
 
 <sub>The scenes and the brain map are the mod's own SVG output; the windows around them are mock-ups. The data is agent-brain-org's own memory, with one new lesson just routed into Projects (✦).</sub>
 
@@ -230,11 +230,13 @@ The [mistake-brain](https://github.com/Keshet-Broadcasting/agent-brain-org) skil
 | a dream | Claude asleep, Zs rising |
 
   In the terminal the scene is a text face, e.g. `🧠ϟ(>_<)` for a mistake. A write through Claude's Edit or Write shows at once; a change from anywhere else (the skill's own hooks, a script) is picked up within a few seconds.
-- **A Brain pane** (opens by itself on the first change of a session, and any time with `/brain`) draws the memory as a tree. One line on top counts the lessons and the entries still unrouted. On desktop a brain map shows four lobes, one per PARA folder, brighter the more lessons it holds, with the inbox as a stack of notes beside it. Below it:
-  - **📥 Inbox**: the 3 newest `MISTAKES.md` entries, colored by type, with their status.
-  - **📁 Projects, Areas, Resources** and **🗄 Archives**: each PARA file with its lesson count and date from `MEMORY.md`; the file that just changed shows its summary too. A file on disk that `MEMORY.md` doesn't name shows as *not in MEMORY.md*, the gap the skill's dream fixes.
-  - **⚖ Rules**: what has been promoted, once there is something.
-  - What just changed is marked ✦, and its lobe lights up on the map.
+- **A Brain pane** (opens by itself on the first change of a session, and any time with `/brain`) shows the memory. One line on top counts the lessons and the entries still unrouted.
+  - **On desktop, a knowledge graph.** `MEMORY.md` sits at the centre, linked to the four PARA folders, each folder to its files (bigger the more lessons they hold), and every `MISTAKES.md` entry is a dot, colored by type, linked to the file it was routed to (its `PARA route`). Entries not routed yet wait in an inbox cluster with no link. When an entry is routed, its dot travels from the inbox to its file and the file glows; a new entry glows where it lands. The layout is fixed, so the graph doesn't jump between refreshes, and its palette follows the theme in `/config` (dark unless it's a light theme).
+  - **Below the graph, and alone in the terminal, a tree:**
+    - **📥 Inbox**: the 3 newest `MISTAKES.md` entries, colored by type, with their status.
+    - **📁 Projects, Areas, Resources** and **🗄 Archives**: each PARA file with its lesson count and date from `MEMORY.md`; the file that just changed shows its summary too. A file on disk that `MEMORY.md` doesn't name shows as *not in MEMORY.md*, the gap the skill's dream fixes.
+    - **⚖ Rules**: what has been promoted, once there is something.
+    - What just changed is marked ✦.
 - **With the other mods.**
   - **followups:** when Claude finishes a to-do item you started (its `done` tool), the band asks *Worth remembering?* in one line: **Log as** the suggested type (a bug as a mistake, anything else as a success), **…** for the other types, and **Not now**. A press asks Claude to log it with `/mistake-brain log`, so the entry keeps the skill's format.
   - **goal-run:** a reached goal is offered as a success or a handoff, named as you set it. That includes a goal a to-do item closed: goal-run says so on followups' `done` result.

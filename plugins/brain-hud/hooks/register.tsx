@@ -2,7 +2,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Brain, EntryType, Folder, Offer, Pulse, PulseKind } from '../types'
-import { brainMapSvg, faceText, KIND_COLOR, MAP, SCENE, sceneSvg } from './art'
+import { faceText, KIND_COLOR, SCENE, sceneSvg } from './art'
+import { GRAPH, graphSvg, routeOf } from './graph'
+import type { Theme } from './graph'
 import { diffBrain, FOLDERS, lessonCount, logPrompt, parseMemory, parseMistakes, unrouted, withListing } from './brain'
 import { GOAL_REACHED, parseDoneResult, parseGoalClosedNote, parseGoalPrompt, parseStartPrompt } from './texts'
 
@@ -16,6 +18,7 @@ const started = atom({ plugin: 'brain-hud', key: 'started' } as const, [] as { i
 const goalText = atom({ plugin: 'brain-hud', key: 'goalText' } as const, '')
 const paneShown = atom({ plugin: 'brain-hud', key: 'paneShown' } as const, false)
 const more = atom({ plugin: 'brain-hud', key: 'more' } as const, '')
+const theme = atom({ plugin: 'brain-hud', key: 'theme' } as const, 'dark' as Theme)
 
 const PANE = 'brain-hud'
 const PANE_TITLE = 'Brain'
@@ -159,6 +162,13 @@ async function checkFollow($: EngineInterface) {
   if (names.includes('followup')) await update($, canFollow, () => true)
 }
 
+// The graph's palette follows the theme set in /config; dark when it can't be read.
+async function readTheme($: EngineInterface) {
+  const row = (await $.config.list().catch(() => [])).find(r => r.key === 'theme')
+  const value = String((row as { value?: unknown } | undefined)?.value ?? '')
+  await update($, theme, () => (/light/i.test(value) ? 'light' : 'dark'))
+}
+
 async function toggle($: EngineInterface, name: string) {
   await update($, open, l => (l.includes(name) ? l.filter(x => x !== name) : [...l, name]))
 }
@@ -169,6 +179,7 @@ export const register: Register = on => {
     anim?.cancel()
     anim = null
     await $.command.register({ name: 'brain', description: "Show the agent's project memory (mistake-brain)" })
+    await readTheme($)
     await refresh($)
     timers.push($.clock.every(POLL_MS, async () => {
       if ((await stamp($)) !== mtimes) await refresh($)
@@ -317,8 +328,11 @@ export const register: Register = on => {
     const follow = await read($, canFollow)
     const isOpen = (name: string) => opened.includes(name)
     const arrow = (name: string) => (isOpen(name) ? '▾' : '▸')
-    const counts = Object.fromEntries(FOLDERS.map(f => [f, b.folders[f].length])) as Record<Folder, number>
-    if (b.archives > counts.Archives) counts.Archives = b.archives
+    // What the graph lights up: the file a lesson just went into, and the entry just logged or
+    // routed, travelling from the inbox to its file for the first two seconds of a route.
+    const t = p ? (await read($, frame)) - p.at : 0
+    const freshAt = p ? b.entries.findIndex(en => en.title === p.title) : -1
+    const travelling = p?.kind === 'route' && freshAt >= 0 && routeOf(b.entries[freshAt]!) && t < 2_000 ? { entry: freshAt, t: Math.max(0.05, t / 2_000) } : undefined
     const fresh = (title: string) => (p && (p.title === title || p.file === title) ? '✦ ' : '')
     const waiting = unrouted(b)
 
@@ -328,7 +342,14 @@ export const register: Register = on => {
           <Text bold color={ACCENT}>{`🧠 ${lessons(lessonCount(b))}`}</Text>
           <Text dimColor>{`· ${waiting} unrouted`}</Text>
         </Box>
-        {Svg ? <Svg source={brainMapSvg(counts, waiting, p?.folder)} alt={`Memory: ${FOLDERS.map(f => `${f} ${counts[f]}`).join(', ')}; ${waiting} unrouted`} width={MAP.width} height={MAP.height} /> : null}
+        {Svg ? (
+          <Svg
+            source={graphSvg(b, { theme: await read($, theme), ...(p?.file ? { hot: p.file } : {}), ...(freshAt >= 0 ? { fresh: freshAt } : {}), ...(travelling ? { travelling } : {}) })}
+            alt={`Memory graph: MEMORY.md, ${FOLDERS.map(f => `${f} ${b.folders[f].length} files`).join(', ')}; ${b.entries.length} entries, ${waiting} still to route`}
+            width={GRAPH.width}
+            height={GRAPH.height}
+          />
+        ) : null}
         <Box flexDirection="column">
           <Button key="f-Inbox" label={`${arrow('Inbox')} 📥 Inbox · MISTAKES.md (${b.entries.length})`} plain onPress={() => toggle($, 'Inbox')} />
           {isOpen('Inbox')

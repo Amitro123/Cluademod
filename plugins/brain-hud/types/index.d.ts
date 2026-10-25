@@ -37,6 +37,8 @@ declare module 'claude-code' {
       paneShown: boolean
       // The offer whose other types "…" opened.
       more: string
+      // The graph's palette, from the theme in /config.
+      theme: 'dark' | 'light'
     }
   }
 }
