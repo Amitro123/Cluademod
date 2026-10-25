@@ -1,6 +1,6 @@
 # claudemod: mods for Claude Code
 
-Six mods, each installed on its own. They also work side by side: each draws its part of the band above the prompt, and the others' parts stay.
+Seven mods, each installed on its own. They also work side by side: each draws its part of the band above the prompt, and the others' parts stay.
 
 | Mod | What it does |
 |---|---|
@@ -10,6 +10,7 @@ Six mods, each installed on its own. They also work side by side: each draws its
 | [rtl-toggle](#rtl-toggle-hebrew-and-english-on-one-line) | Fixes the reading order of lines that mix English and Hebrew |
 | [goal-run](#goal-run-a-goal-for-the-session) | Asks for a goal when a session starts, has Claude plan it, and runs a pixel Claude to 100% as the tasks get done |
 | [brain-hud](#brain-hud-the-agents-memory-made-visible) | A pixel Claude with a brain reacts to each entry Claude logs to `MISTAKES.md`, and a pane draws the project's memory as a tree |
+| [factory](#factory-a-software-factory) | `/factory <feature>`: a spec, your approval of its plan, a build on its own branch, checks, parallel reviews and an approver, then Claude opens the PR |
 
 Add the marketplace once, then install the ones you want:
 
@@ -202,6 +203,7 @@ Tests: `claude plugin test plugins/rtl-toggle`.
 - `/session-goal <text>` sets a goal at any time, `/session-goal` shows it, and `/session-goal clear` drops it. Claude Code has its own `/goal`, so the mod's command has a different name.
 - The goal is saved per project on the machine running Claude Code, like followups' list, so it carries over between local sessions in the same folder. If two sessions in the folder each set a goal, the one set later is the one saved. The other session is told once, with a toast, that its progress isn't saved.
 - `askOnStart` (`on` / `off`) turns the start-of-session question off.
+- **A plan from factory.** When the factory's spec is put to you as the goal's plan, the dialog is titled *Factory plan* and offers **Approve, start building** or **Change it**. Approved, the factory's builder does the tasks and marks them, and the main Claude is told not to: there's no goal reminder on your prompts, no nudge at a stop and no question between tasks. Changes go back to the factory's spec-writer. Approving later in the pane runs `/factory plan-approved`.
 
 Tests: `claude plugin test plugins/goal-run`.
 
@@ -258,6 +260,51 @@ The [mistake-brain](https://github.com/Keshet-Broadcasting/agent-brain-org) skil
 
 Tests: `claude plugin test plugins/brain-hud`.
 
+## factory: a software factory
+
+A feature goes in and a reviewed PR comes out. Each step is a sub-agent with its own role and model, and the mod runs the order as code, so no step is skipped: the reviews always happen, every reviewer is waited for, and the round limit holds. It's aimed at backend work, so it runs no UI checks.
+
+```text
+/plugin install factory@claudemod
+```
+
+### How a run goes
+
+```text
+/factory <feature>
+  spec-writer (opus)    writes docs/specs/<slug>.md and a task list
+  plan approval (you)   in goal-run's dialog, or factory's own Approve plan button
+  builder (opus)        implements on branch factory/<slug>, in the worktree .factory/<slug>
+  checks (no model)     tests, lint, typecheck; red goes back to the builder (2 passes)
+  reviewers, at once    security (opus) and code (sonnet): VERDICT PASS or CHANGES, with findings
+                        any CHANGES, with rounds left: the builder again, only those reviewers again
+  approver (opus)       APPROVE: Claude pushes the branch and opens the PR
+                        ESCALATE: the run waits for you (/factory approve or /factory stop)
+```
+
+1. **The spec.** `/factory Add a rate limiter to the API` creates a git worktree on a new branch from your current commit, so the work never touches your working copy (`.factory/` is added to `.git/info/exclude`). The spec-writer writes the PRD, the technical spec and the acceptance criteria to `docs/specs/<slug>.md`, and ends with 3 to 8 tasks, each with a priority and the tasks it needs.
+2. **The plan is goal-run's.** With goal-run installed, the spec's tasks become the session goal's plan and its dialog is the factory's human gate. No code is written before you approve. **Change it** sends your words back to the spec-writer. Without goal-run, the band and the pane show **Approve plan**.
+3. **Build and checks.** The builder implements the tasks in the worktree, marks them in goal-run as it goes, and commits. Then the checks run with no model: the `checks` option, or what the project has (`npm test` and its `lint` and `typecheck` scripts, `pytest`, `go test`, `cargo test`). A failure goes back to the builder with its output, twice at most; reviewers only ever see a green build.
+4. **Reviews.** The security and code reviewers read the spec and the diff in parallel. Each ends with `VERDICT: PASS` or `VERDICT: CHANGES` and findings tagged `blocker`, `major` or `minor`. A missing verdict counts as changes, and so does a PASS that lists a blocker. With changes and rounds left (`maxRounds`, 2 by default), a fresh builder gets the findings, and only the reviewers who asked for changes look again.
+5. **The approver** reads the spec, the diff and the verdicts. **APPROVE** sends the main Claude a prompt to push the branch and open a PR, with the spec in it and the minor findings listed under "Not fixed". **ESCALATE**, or an agent that fails, stops the run at *needs-human* with the reason.
+
+### What you see
+
+- **The Factory pane** (`/factory` opens it) draws the pipeline: each box with its model, its state (waiting, running, PASS, changes, skipped, failed) and its tokens, the reviewers side by side, the loop back to the builder with its round, and the branch. Under it are the current round's findings and the failing checks. In the terminal it's the same pipeline as text lines with ✓ ! ◐ ◌ marks. The palette follows the theme in `/config`.
+- **The band** above the prompt: *🏭 Rate limiter · reviewing, round 1 · 184k tokens*, with **Approve plan** or **Approve** when the run waits for you, **Open** and **Stop**.
+- **task-hud** shows each of the factory's agents as a creature, named by run and role (*factory · security review*), with no change to task-hud.
+
+### Commands and options
+
+- `/factory <feature>` starts a run (one at a time), `/factory` opens the pane, `/factory approve` approves the plan or a run at needs-human, and `/factory stop` ends the run. The branch and the worktree stay; remove them with `git worktree remove` when you're done.
+- `checks`: commands to run after each build, separated by `;` (run without a shell). Empty detects them from the project.
+- `maxRounds` (`1`, `2`, `3`): how many times reviewers may send the builder back before the approver decides on what there is.
+- The roles are agent types, `factory:spec-writer`, `factory:builder`, `factory:security-reviewer`, `factory:code-reviewer` and `factory:approver`, hidden from the model so only the factory runs them. Their instructions are short defaults in the mod.
+
+Not yet: reviewers chosen by the diff (database, API, tests, logging), role skills loaded from a folder such as keshet-builder-skills, 🏭 buttons in goal-run's and followups' panes, minor findings offered to followups, and an ESCALATE offered to brain-hud. Not yet run end to end in a live session: the tests drive the engine's events with the agents, git and the checks stubbed.
+
+Tests: `claude plugin test plugins/factory`.
+
 ## Developing
 
 Each mod's `tsconfig.json` extends `.claude-plugin/types/tsconfig.json`. Claude Code writes that folder (the API types for your build) the first time it loads the mod, so a fresh clone doesn't have it, and it's git-ignored. To type-check a mod:
@@ -269,7 +316,7 @@ tsc -p plugins/<mod>
 
 Run each mod's tests with `claude plugin test plugins/<mod>`; they don't need the types folder.
 
-The wording one mod writes and another reads (followups' Start prompt and `done` result, goal-run's goal prompt and reached-goal texts) lives in `shared/texts.ts`, together with its parsers. A mod can import nothing outside its folder, so followups, goal-run and brain-hud each keep a generated copy in `hooks/texts.ts`. Edit `shared/texts.ts`, then run `node tools/sync-texts.mjs`. CI runs it with `--check` and fails on a stale copy.
+The wording one mod writes and another reads (followups' Start prompt and `done` result, goal-run's goal prompt and reached-goal texts, the factory plan's outcomes) lives in `shared/texts.ts`, together with its parsers. A mod can import nothing outside its folder, so followups, goal-run, brain-hud and factory each keep a generated copy in `hooks/texts.ts`. Edit `shared/texts.ts`, then run `node tools/sync-texts.mjs`. CI runs it with `--check` and fails on a stale copy.
 
 ## License
 

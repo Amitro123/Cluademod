@@ -18,6 +18,8 @@ export type Pace = 'run' | 'ask'
 // planning: Claude is writing the plan; proposed: it waits for the person; active: being worked; done: reached.
 export type GoalStatus = 'planning' | 'proposed' | 'active' | 'done'
 export type Goal = {
+  // 'factory' when a /factory run submitted the plan: its builder does the work, not the main loop.
+  source?: 'factory'
   text: string
   status: GoalStatus
   tasks: Task[]

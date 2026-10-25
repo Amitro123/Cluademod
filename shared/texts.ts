@@ -43,3 +43,20 @@ export const GOAL_REACHED = 'The goal is reached.'
 // goal-run: the note it adds to followups' done result when that to-do item closed the goal's last task.
 export const goalClosedNote = (text: string) => `That closed the last task of the session goal "${text}". ${GOAL_REACHED}`
 export const parseGoalClosedNote = (text: string) => /^That closed the last task of the session goal "(.+)"\. /.exec(text)?.[1] ?? null
+
+// goal-run ↔ factory: a plan the factory's spec-writer wrote is submitted with source "factory".
+// goal-run then lets the factory's builder do the work, and answers the plan tool in these words;
+// the factory reads them to go on to the build or back to the spec. A plan approved later in the
+// Goal pane is passed on with the command /factory plan-approved.
+export const FACTORY_SOURCE = 'factory' as const
+export const FACTORY_PLAN_APPROVED_ARG = 'plan-approved'
+export const PLAN_APPROVED_FOR_FACTORY = "Approved. The factory's builder does the work: don't start the tasks yourself, and don't propose another plan."
+export const planChangesForFactory = (said: string) => `The person wants changes: ${said}\nThe factory's spec-writer revises the spec; don't propose a plan yourself.`
+export const PLAN_WAITING_FOR_FACTORY = "The person hasn't answered; the plan waits for approval in the Goal pane, and the factory waits with it."
+
+export function parsePlanOutcome(text: string): { approved: true } | { changes: string } | null {
+  if (text.startsWith('Approved.')) return { approved: true }
+  const m = /^The person wants changes(?:: ([\s\S]*?)\n| to the plan)/.exec(text)
+  return m ? { changes: (m[1] ?? '').trim() } : null
+}
+

@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import { runnerX, trackText } from '../hooks/art'
 import { addSide, insertTask, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan, stepTokens } from '../hooks/register'
 import type { Goal } from '../types'
-import { doneResult } from '../hooks/texts'
+import { doneResult, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 const UPDATE = 'mcp__goal-run__update'
@@ -626,3 +626,50 @@ describe('after approval: run through, or ask between tasks', () => {
     expect(w.asked.length).toBe(asked)
   })
 })
+
+describe('a plan from a factory run', () => {
+  const tasks = [{ title: 'Token bucket core', priority: 'high' }, { title: 'Middleware with Retry-After', priority: 'high', dependsOn: [1] }]
+
+  test('its dialog approves the build, and the main loop is told not to work the tasks', async ($, on) => {
+    const w = engine(on, { answers: ['Approve, start building'] })
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    on('classic.Stop', () => ({}))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks } as never)
+    expect(w.asked.at(-1)).toMatch(/The factory's spec for this goal\. Approve it, and the builder starts\?/)
+    expect(String(r.result)).toBe(PLAN_APPROVED_FOR_FACTORY)
+    expect(parsePlanOutcome(String(r.result))).toEqual({ approved: true })
+    // No goal reminder on the person's prompts, no nudge at a stop, no question between tasks.
+    const p = await $.prompt.submit({ text: 'how is it going?', origin: { kind: 'composer' } } as never)
+    expect((p.context ?? []).join('\n')).not.toMatch(/Session goal/)
+    const done = await $.tool.call({ tool: UPDATE, id: 't1', status: 'done' } as never)
+    expect(String(done.result)).toBe('t1 is done. 1/2 tasks done (50%).')
+    expect((await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'x' } as never)).block).toBeUndefined()
+  })
+
+  test('changes go back to the factory, not to a new plan from the main loop', async ($, on) => {
+    engine(on, { answers: ['Split the middleware task'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks } as never)
+    expect(parsePlanOutcome(String(r.result))).toEqual({ changes: 'Split the middleware task' })
+    expect(String(r.result)).toMatch(/spec-writer revises the spec; don't propose a plan yourself/)
+  })
+
+  test("approved later in the Goal pane, it's passed on with /factory plan-approved", async ($, on) => {
+    const ran: string[] = []
+    on('command.run', (_, e) => {
+      ran.push(`${e.command} ${e.args ?? ''}`.trim())
+      return { text: '' } as never
+    })
+    const w = engine(on, { answers: [null] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks } as never)
+    expect(parsePlanOutcome(String(r.result))).toBeNull()
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    await pane.press({ key: 'approve' })
+    expect(ran).toContain('factory plan-approved')
+    expect(w.sent.some(t => /Start with the first pending task/.test(t))).toBe(false)
+    await pane.unmount()
+  })
+})
+

@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
-import { GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, toolText } from './texts'
+import { FACTORY_PLAN_APPROVED_ARG, FACTORY_SOURCE, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, toolText } from './texts'
 // The goal-run tests import the start-prompt parser from here, as before it was shared.
 export { parseStartPrompt }
 
@@ -33,6 +33,7 @@ const MAX_TASKS = 12
 
 const APPROVE_RUN = 'Approve, run through'
 const APPROVE_ASK = 'Approve, ask between tasks'
+const APPROVE_BUILD = 'Approve, start building'
 const CHANGE = 'Change it'
 const ADD_IT = 'Add it'
 const NOT_NOW = 'Not now'
@@ -257,6 +258,11 @@ async function startGoal($: EngineInterface, text: string) {
 
 async function approve($: EngineInterface, pace: Pace) {
   await setGoal($, g => (g ? { ...g, status: 'active', pace } : g))
+  // A factory's plan: the factory starts its builder; the main loop is not asked to work.
+  if ((await read($, goal))?.source === FACTORY_SOURCE) {
+    void $.command.run({ command: 'factory', args: FACTORY_PLAN_APPROVED_ARG }).catch(() => {})
+    return
+  }
   void $.prompt.submit({ text: `The plan is approved (${PACE_TEXT[pace]}). Start with the first pending task.` }).catch(() => {})
 }
 
@@ -352,6 +358,7 @@ export const register: Register = (on, options) => {
         type: 'object',
         properties: {
           goal: { type: 'string', description: 'The goal, as the person put it (or a short restatement)' },
+          source: { type: 'string', enum: [FACTORY_SOURCE], description: 'Only "factory", when a /factory run asks you to submit its spec\'s tasks: the factory\'s builder then does the work' },
           tasks: {
             type: 'array',
             description: 'The tasks, in any order: the plan orders them',
@@ -440,22 +447,33 @@ export const register: Register = (on, options) => {
 
   // The plan, put to the person: approved, sent back with their words, or left waiting in the pane.
   on('tool.call', { tool: PLAN_TOOL }, async ($, e) => {
-    const input = e as unknown as { goal?: unknown; tasks?: unknown }
+    const input = e as unknown as { goal?: unknown; tasks?: unknown; source?: unknown }
+    const isFactory = input.source === FACTORY_SOURCE
     const items = planItems(input.tasks)
     if (!items.length) return { deny: 'A plan needs at least one task.' }
     const before = await read($, goal)
     const text = clip(String(input.goal ?? '').trim() || before?.text || 'Session goal', 200)
     // A plan with no goal set before it is a new goal, set now.
-    const proposed = { setAt: await $.clock.now(), ...replan(before, text, orderPlan(items)) }
+    const proposed = { setAt: await $.clock.now(), ...replan(before, text, orderPlan(items)), ...(isFactory ? { source: FACTORY_SOURCE } : {}) }
     await update($, asking, () => null)
     await setGoal($, () => proposed)
     void $.ui.open({ id: PANE, title: PANE_TITLE })
 
     let answer = ''
     try {
-      answer = await $.ui.ask(`${planText(proposed)}\n\nApprove this plan? Run straight through the tasks, or be asked before each next one.`, { header: 'Goal plan', options: [APPROVE_RUN, APPROVE_ASK, CHANGE] })
+      answer = isFactory
+        ? await $.ui.ask(`${planText(proposed)}\n\nThe factory's spec for this goal. Approve it, and the builder starts?`, { header: 'Factory plan', options: [APPROVE_BUILD, CHANGE] })
+        : await $.ui.ask(`${planText(proposed)}\n\nApprove this plan? Run straight through the tasks, or be asked before each next one.`, { header: 'Goal plan', options: [APPROVE_RUN, APPROVE_ASK, CHANGE] })
     } catch {
       answer = ''
+    }
+    if (isFactory) {
+      if (answer === APPROVE_BUILD) {
+        await setGoal($, g => (g ? { ...g, status: 'active', pace: 'run' } : g))
+        return { result: PLAN_APPROVED_FOR_FACTORY }
+      }
+      if (!answer.trim()) return { result: PLAN_WAITING_FOR_FACTORY }
+      return { result: planChangesForFactory(answer === CHANGE ? '' : answer) }
     }
     if (answer === APPROVE_RUN || answer === APPROVE_ASK) {
       const pace: Pace = answer === APPROVE_RUN ? 'run' : 'ask'
@@ -481,7 +499,8 @@ export const register: Register = (on, options) => {
     const where = `${id} is ${status.replace('_', ' ')}. ${now.tasks.filter(t => t.status === 'done').length}/${now.tasks.length} tasks done (${percentOf(now)}%).`
     const next = now.tasks.find(t => t.status === 'pending')
     if (now.status === 'done') return { result: `${where} ${GOAL_REACHED}` }
-    if (status !== 'done' || !next) return { result: where }
+    // In a factory run the builder works through the tasks on its own: nothing to ask, nowhere to send it.
+    if (status !== 'done' || !next || now.source === FACTORY_SOURCE) return { result: where }
     if (paceOf(now) === 'run') return { result: `${where} Go straight on to ${next.id}: ${next.title}.` }
     // Asked between tasks: the person decides whether the next one starts now.
     const done = now.tasks.find(t => t.id === id)!
@@ -566,7 +585,7 @@ export const register: Register = (on, options) => {
     }
     if (e.origin.kind === 'composer') isNudged = false
     if (e.origin.kind === 'composer') await update($, side, cur => (!cur ? cur : cur.isAsking ? { ...cur, isLive: false } : null))
-    if (!g || g.status !== 'active') return next(e)
+    if (!g || g.status !== 'active' || g.source === FACTORY_SOURCE) return next(e)
     return next({ ...e, context: [...(e.context ?? []), reminder(g)] })
   }).catch(($, e, next) => next(e))
 
@@ -596,7 +615,7 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     const g = await read($, goal)
     const next1 = g?.tasks.find(t => t.status === 'pending')
-    if (!isInteractive || isNudged || e.stop_hook_active || r.block || !g || g.status !== 'active' || paceOf(g) !== 'run' || !next1) return r
+    if (!isInteractive || isNudged || e.stop_hook_active || r.block || !g || g.status !== 'active' || g.source === FACTORY_SOURCE || paceOf(g) !== 'run' || !next1) return r
     if ((await read($, side))?.isLive) return r
     isNudged = true
     const left = g.tasks.filter(t => t.status !== 'done').length
