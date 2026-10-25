@@ -73,13 +73,43 @@ export function parseMemory(text: string): Omit<Brain, 'entries'> {
   return { folders, archives, rules, lastDream }
 }
 
-// The index joined with what is on disk: a PARA file the index doesn't name still shows, marked.
-export function withListing(folders: Record<Folder, Lesson[]>, onDisk: Partial<Record<Folder, string[]>>): Record<Folder, Lesson[]> {
+// What a PARA file itself says: one lesson per `## [YYYY-MM-DD] title` heading, the newest date
+// among those and its `- Added:` lines, and the first paragraph under the title as a summary.
+export type ParaFile = { file: string; lessons: number; updated: string; summary: string }
+export function paraStats(file: string, text: string): ParaFile {
+  let lessons = 0
+  let updated = ''
+  let summary = ''
+  let isTitle = false
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    const head = /^## \[(\d{4}-\d{2}-\d{2})/.exec(line)
+    const added = /^- Added:\s*(\d{4}-\d{2}-\d{2})/.exec(line)
+    if (head) lessons++
+    for (const d of [head?.[1], added?.[1]]) if (d && d > updated) updated = d
+    if (/^# /.test(line)) isTitle = true
+    else if (isTitle && !summary && line && !line.startsWith('#')) summary = line
+    if (/^## /.test(line)) isTitle = false
+  }
+  return { file, lessons, updated, summary }
+}
+
+// The index joined with what is on disk. A file's lessons and date are counted from the file (the
+// index's own numbers can be missing or stale); its summary is the index's, else the file's. A
+// PARA file the index doesn't name still shows, marked.
+export function withListing(folders: Record<Folder, Lesson[]>, onDisk: Partial<Record<Folder, (string | ParaFile)[]>>): Record<Folder, Lesson[]> {
   const out = empty()
   for (const f of FOLDERS) {
+    const disk = new Map((onDisk[f] ?? []).map(d => (typeof d === 'string' ? { file: d, lessons: -1, updated: '', summary: '' } : d)).map(d => [d.file, d]))
+    const counted = (l: Lesson): Lesson => {
+      const d = disk.get(l.file)
+      return d && d.lessons >= 0 ? { ...l, lessons: d.lessons, updated: d.updated || l.updated, summary: l.summary || d.summary } : l
+    }
     const named = new Set(folders[f].map(l => l.file))
-    const extra = (onDisk[f] ?? []).filter(n => !named.has(n)).map(file => ({ file, summary: '', lessons: 0, updated: '', isIndexed: false }))
-    out[f] = [...folders[f], ...extra]
+    const extra = [...disk.values()]
+      .filter(d => !named.has(d.file))
+      .map(d => ({ file: d.file, summary: d.summary, lessons: Math.max(0, d.lessons), updated: d.updated, isIndexed: false }))
+    out[f] = [...folders[f].map(counted), ...extra]
   }
   return out
 }

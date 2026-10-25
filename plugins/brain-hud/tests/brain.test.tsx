@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import { claudeCells, sceneSvg } from '../hooks/art'
 import { GRAPH, graphSvg, routeOf, shownFiles } from '../hooks/graph'
-import { diffBrain, logPrompt, parseMemory, parseMistakes, withListing } from '../hooks/brain'
+import { diffBrain, logPrompt, paraStats, parseMemory, parseMistakes, withListing } from '../hooks/brain'
 import type { Brain } from '../types'
 // The wording followups and goal-run write, from the copy of shared/texts.ts they use too.
 import { doneResult, GOAL_REACHED, goalClosedNote, goalPrompt, parseStartPrompt, startLine } from '../hooks/texts'
@@ -63,6 +63,21 @@ describe('reading the memory', () => {
       ['independent-review-before-commit.md', true],
       ['skill-deployment-pattern.md', true],
       ['output-discipline.md', false],
+    ])
+  })
+
+  test("a PARA file's own lessons: one per dated heading, the newest date, the first paragraph", () => {
+    const text = '# model-router\n\nRouting tasks to the cheapest capable model.\n\n## [2026-09-02] Aliases only\n- Added: 2026-09-02 10:00\nx\n\n## [2026-10-12] Grafana does cost\n- Added: 2026-10-13 09:00\ny\n\n## [2026-09-20] An older one with no Added line\nz\n'
+    expect(paraStats('model-router.md', text)).toEqual({ file: 'model-router.md', lessons: 3, updated: '2026-10-13', summary: 'Routing tasks to the cheapest capable model.' })
+  })
+
+  test('an index whose lines lack "(N lessons…)" still counts each file from disk, keeping its summary', () => {
+    const index = parseMemory('## Areas\n- [Area] Areas/model-router.md — routing decisions\n')
+    expect(index.folders.Areas[0]!.lessons).toBe(0)
+    const f = withListing(index.folders, { Areas: [{ file: 'model-router.md', lessons: 8, updated: '2026-10-25', summary: 'from the file' }, { file: 'loop-guard.md', lessons: 3, updated: '2026-10-25', summary: 'Loop guard notes' }] })
+    expect(f.Areas).toEqual([
+      { file: 'model-router.md', summary: 'routing decisions', lessons: 8, updated: '2026-10-25', isIndexed: true },
+      { file: 'loop-guard.md', summary: 'Loop guard notes', lessons: 3, updated: '2026-10-25', isIndexed: false },
     ])
   })
 
@@ -237,7 +252,7 @@ function engine(on: On, files: Record<string, string>, { commands = ['followup']
   on('fs.list', (_, e) => {
     const dir = `${rel(e.path ?? '').replace(/\/$/, '')}/`
     const names = Object.keys(files).filter(p => p.startsWith(dir) && !p.slice(dir.length).includes('/')).map(p => p.slice(dir.length))
-    return { value: names.map(name => ({ name, kind: 'file', size: 1, mtimeMs: 1, isLink: false })) } as never
+    return { value: names.map(name => ({ name, kind: 'file', size: files[dir + name]!.length, mtimeMs: w.times[dir + name] ?? 1, isLink: false })) } as never
   })
   on('command.register', (_, e) => ({ value: { command: e.name } }) as never)
   on('command.list', () => ({ value: commands.map(name => ({ name })) }) as never)
@@ -275,13 +290,17 @@ function engine(on: On, files: Record<string, string>, { commands = ['followup']
   return Object.assign(w, { clock, write })
 }
 
-const project = () => ({
+// A PARA file with n lessons, as the skill writes them.
+const para = (title: string, n: number, first = 'What these lessons cover.') =>
+  `# ${title}\n\n${first}\n\n${Array.from({ length: n }, (_, k) => `## [2026-08-${String(k % 28 + 1).padStart(2, '0')}] Lesson ${k + 1}\n- Added: 2026-08-${String(k % 28 + 1).padStart(2, '0')} 10:00\nBody.\n`).join('\n')}`
+
+const project = (): Record<string, string> => ({
   'MISTAKES.md': MISTAKES_HEAD + entry('2026-10-05 15:55', 'Added an end-to-end test', 'decision', 'routed') + entry('2026-10-05 14:10', 'Pick up the rollout', 'handoff'),
   '.agent-brain/shared/MEMORY.md': MEMORY,
-  '.agent-brain/shared/Projects/mistake-brain-skill.md': '# lessons',
-  '.agent-brain/shared/Resources/independent-review-before-commit.md': '#',
-  '.agent-brain/shared/Resources/skill-deployment-pattern.md': '#',
-  '.agent-brain/shared/Resources/output-discipline.md': '#',
+  '.agent-brain/shared/Projects/mistake-brain-skill.md': para('mistake-brain-skill', 29),
+  '.agent-brain/shared/Resources/independent-review-before-commit.md': para('independent-review-before-commit', 1),
+  '.agent-brain/shared/Resources/skill-deployment-pattern.md': para('skill-deployment-pattern', 3),
+  '.agent-brain/shared/Resources/output-discipline.md': para('output-discipline', 1, 'No per-task markdown files.'),
 })
 
 describe('in a session', () => {
@@ -292,7 +311,7 @@ describe('in a session', () => {
       await $.turn.start({ text: 'hi', turnId: 't1' } as never)
       const pane = await $.ui.mount({ ...PANE, surface } as never)
       let text = await texts(pane)
-      expect(text).toMatch(/🧠 33 lessons \| · 1 unrouted/)
+      expect(text).toMatch(/🧠 34 lessons \| · 1 unrouted/)
       // No rules yet, so no rules row; no summaries until a file changes.
       expect(text).not.toMatch(/Rules/)
       expect(text).toMatch(/● decision/)
@@ -337,7 +356,8 @@ describe('in a session', () => {
     const w = engine(on, files)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
-    w.write('.agent-brain/shared/MEMORY.md', MEMORY.replace('(29 lessons', '(30 lessons'))
+    // The route writes the lesson into its PARA file; the index isn't touched.
+    w.write('.agent-brain/shared/Projects/mistake-brain-skill.md', para('mistake-brain-skill', 30))
     await w.clock.advance(4_100)
     expect(await texts(band)).toMatch(/Filed into memory → Projects \| mistake-brain-skill\.md/)
     await band.unmount()
@@ -484,6 +504,18 @@ describe('in a session', () => {
     w.write('.agent-brain/shared/MEMORY.md', MEMORY.replace('(29 lessons', '(30 lessons'))
     await w.clock.advance(10_000)
     expect(w.pulses).toBe(0)
+  })
+
+  test('with no index at all, the lessons are still counted from the PARA files', async ($, on) => {
+    const files = project()
+    delete files['.agent-brain/shared/MEMORY.md']
+    engine(on, files)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const text = await texts(pane)
+    expect(text).toMatch(/🧠 34 lessons/)
+    expect(text).toMatch(/⚠ No index found/)
+    await pane.unmount()
   })
 
   test('the pane says which MEMORY.md it read, and when there is none or it misses files', async ($, on) => {
