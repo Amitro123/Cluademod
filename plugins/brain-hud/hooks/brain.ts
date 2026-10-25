@@ -87,14 +87,27 @@ export function withListing(folders: Record<Folder, Lesson[]>, onDisk: Partial<R
 export const lessonCount = (b: Brain) => FOLDERS.reduce((n, f) => n + b.folders[f].reduce((k, l) => k + l.lessons, 0), 0)
 export const unrouted = (b: Brain) => b.entries.filter(e => e.status === 'unrouted').length
 
-const keyOf = (e: Entry) => `${e.at} ${e.title}`
+// An entry's identity: its time and type, numbered when several share them. Not its title, so
+// rewording an entry doesn't read as a new one.
+function keysOf(entries: Entry[]): string[] {
+  const seen = new Map<string, number>()
+  return entries.map(e => {
+    const k = `${e.at} ${e.type}`
+    const n = seen.get(k) ?? 0
+    seen.set(k, n + 1)
+    return `${k} #${n}`
+  })
+}
 
 // What changed between two readings, as the one thing worth showing: a new entry first, then a
 // dream, a promoted rule, or a lesson routed into a folder.
 export function diffBrain(a: Brain | null, b: Brain): Omit<Pulse, 'at'> | null {
   if (!a) return null
-  const known = new Set(a.entries.map(keyOf))
-  const fresh = b.entries.find(e => !known.has(keyOf(e)))
+  // Entries are newest first, so the numbering runs from the oldest to stay put as new ones arrive.
+  const ka = keysOf([...a.entries].reverse()).reverse()
+  const kb = keysOf([...b.entries].reverse()).reverse()
+  const known = new Set(ka)
+  const fresh = b.entries.find((_, i) => !known.has(kb[i]!))
   if (fresh) return { kind: fresh.type, title: fresh.title }
   if (b.lastDream && b.lastDream !== a.lastDream) return { kind: 'dream', title: `the memory was reorganized (${b.lastDream})` }
   const rule = b.rules.find(r => !a.rules.includes(r))
@@ -104,21 +117,12 @@ export function diffBrain(a: Brain | null, b: Brain): Omit<Pulse, 'at'> | null {
     const grown = b.folders[folder].find(l => !before.has(l.file) || l.lessons > before.get(l.file)!)
     if (grown) return { kind: 'route', title: grown.file, folder, file: grown.file }
   }
-  const was = new Map(a.entries.map(e => [keyOf(e), e.status]))
-  const routed = b.entries.find(e => e.status !== 'unrouted' && was.get(keyOf(e)) === 'unrouted')
+  const was = new Map(a.entries.map((e, i) => [ka[i]!, e.status]))
+  const routed = b.entries.find((e, i) => e.status !== 'unrouted' && was.get(kb[i]!) === 'unrouted')
   if (routed) return { kind: 'route', title: routed.title }
   return null
 }
 
-// followups' Start prompt names each item as `- id <id>: <title>[ (bug)]…`.
-export function parseStartPrompt(text: string): { id: string; title: string; isBug: boolean }[] {
-  const out: { id: string; title: string; isBug: boolean }[] = []
-  for (const line of text.split('\n')) {
-    const m = /^- id (\S+): (.+?)( \(bug\))?(?: — .*?)?(?: \[where: .*\])?$/.exec(line.trim())
-    if (m) out.push({ id: m[1]!, title: m[2]!.trim().slice(0, 160), isBug: Boolean(m[3]) })
-  }
-  return out
-}
 
 // What the person is asked to have Claude log: through the skill, so the entry keeps its format.
 export function logPrompt(type: EntryType, title: string, detail: string): string {

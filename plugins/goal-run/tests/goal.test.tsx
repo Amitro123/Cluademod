@@ -351,6 +351,18 @@ describe('work started from the followups to-do list', () => {
     await pane.unmount()
   })
 
+  test('when the to-do item closes the last task, the done result says the goal is reached', async ($, on) => {
+    const w = await halfway($, on)
+    await $.prompt.submit(fromTodo)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    await band.press({ key: 'side-add' })
+    await band.unmount()
+    await $.tool.call({ tool: UPDATE, id: 't2', status: 'done' } as never)
+    const r = await $.tool.call({ tool: 'mcp__followups__done', id: 'fu-1' } as never)
+    expect((r.context ?? []).join('\n')).toMatch(/That closed the last task of the session goal "Ship it"\. The goal is reached\./)
+    expect(w.toasts).toContain('Goal reached: Ship it')
+  })
+
   test('an item followups closed before the answer joins the goal as done', async ($, on) => {
     await halfway($, on)
     await $.prompt.submit(fromTodo)
