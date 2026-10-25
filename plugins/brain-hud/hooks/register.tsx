@@ -404,11 +404,12 @@ export const register: Register = on => {
     const fresh = (title: string) => (p && (p.title === title || p.file === title) ? '✦ ' : '')
     const waiting = unrouted(b)
     // Where the index came from, said whenever it explains what the graph shows.
-    const unindexed = FOLDERS.reduce((n, f) => n + b.folders[f].filter(l => !l.isIndexed).length, 0)
+    const missing = FOLDERS.flatMap(f => b.folders[f].filter(l => !l.isIndexed).map(l => l.file))
+    const unindexed = missing.length
     const problem = b.index === null
       ? `No index found: neither ${MEMORY_PATHS.join(' nor ')} exists, so no lessons are counted.`
       : unindexed
-        ? `${unindexed} PARA file${unindexed === 1 ? ' is' : 's are'} not in ${b.index}.`
+        ? `${unindexed} PARA file${unindexed === 1 ? ' is' : 's are'} not in ${b.index}: ${missing.slice(0, 3).join(', ')}${unindexed > 3 ? ', …' : ''}`
         : ''
 
     return (

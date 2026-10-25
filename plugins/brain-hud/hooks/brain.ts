@@ -34,6 +34,9 @@ export function parseMistakes(text: string): Entry[] {
   return out
 }
 
+// The file an index line names: a path, a `path` in backticks, or a markdown link [name](path).
+const fileOf = (ref: string) => (/\]\(([^)]+)\)/.exec(ref)?.[1] ?? ref).replace(/[`*]/g, '').replace(/^.*[\\/]/, '')
+
 const empty = (): Record<Folder, Lesson[]> => ({ Projects: [], Areas: [], Resources: [], Archives: [] })
 
 // MEMORY.md: `- [Project] Projects/x.md — summary (N lessons, last updated YYYY-MM-DD)` per file
@@ -58,7 +61,7 @@ export function parseMemory(text: string): Omit<Brain, 'entries'> {
       if (!m) continue
       const tail = /\s*\((\d+) lessons?(?:,\s*last updated (\d{4}-\d{2}-\d{2}))?\)\s*$/.exec(m[2]!)
       folders[section as Folder].push({
-        file: m[1]!.replace(/^.*\//, ''),
+        file: fileOf(m[1]!),
         summary: (tail ? m[2]!.slice(0, tail.index) : m[2]!).trim(),
         lessons: tail ? Number(tail[1]) : 0,
         updated: tail?.[2] ?? '',
@@ -108,7 +111,8 @@ export function withListing(folders: Record<Folder, Lesson[]>, onDisk: Partial<R
     const named = new Set(folders[f].map(l => l.file))
     const extra = [...disk.values()]
       .filter(d => !named.has(d.file))
-      .map(d => ({ file: d.file, summary: d.summary, lessons: Math.max(0, d.lessons), updated: d.updated, isIndexed: false }))
+      // Archives are only counted in MEMORY.md, never listed: one there isn't missing from it.
+      .map(d => ({ file: d.file, summary: d.summary, lessons: Math.max(0, d.lessons), updated: d.updated, isIndexed: f === 'Archives' }))
     out[f] = [...folders[f].map(counted), ...extra]
   }
   return out

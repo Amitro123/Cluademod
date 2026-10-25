@@ -11,8 +11,6 @@ export const GRAPH = { width: 640, height: 400 }
 const FOLDERS: Folder[] = ['Projects', 'Areas', 'Resources', 'Archives']
 const HUB_ANGLE: Record<Folder, number> = { Projects: -140, Areas: -40, Resources: 40, Archives: 140 }
 const HUB_R = 104
-const FILE_R = 76
-const SPREAD = 32
 // What a large memory is cut to, so nothing runs off the canvas or piles up: files per folder (the
 // ones with the most lessons, and the one just written to), dots per file, dots in the inbox.
 const MAX_FILES = 7
@@ -20,13 +18,16 @@ const MAX_RINGS = 3
 const PER_RING = 18
 const MAX_INBOX = 30
 
-// Where file j of n sits around its folder's hub, and the angle it hangs at; the fan never wraps.
+// Where file j of n sits: in a column on its folder's outer side (Projects and Archives left, Areas
+// and Resources right), spread evenly down that folder's half of the canvas, its label facing out.
+// A column keeps every label on its own row, however many files a folder holds (up to MAX_FILES).
+const COLUMN_X = 150
 function filePos(cx: number, cy: number, folder: Folder, j: number, n: number) {
-  const [hx, hy] = at(cx, cy, HUB_ANGLE[folder], HUB_R)
-  const step = Math.min(SPREAD, 300 / Math.max(1, n - 1))
-  const deg = HUB_ANGLE[folder] + (n > 1 ? (j - (n - 1) / 2) * step : 0)
-  const [x, y] = at(hx, hy, deg, FILE_R)
-  return { x, y, deg }
+  const right = folder === 'Areas' || folder === 'Resources'
+  const top = folder === 'Projects' || folder === 'Areas'
+  const [lo, hi] = top ? [14, cy - 12] : [cy + 14, GRAPH.height - 26]
+  const y = n === 1 ? (top ? hi - 20 : lo + 20) : lo + ((hi - lo) * (j + 0.5)) / n
+  return { x: right ? cx + COLUMN_X : cx - COLUMN_X, y, deg: right ? 0 : 180 }
 }
 const HUB_COLOR: Record<Folder, string> = { Projects: '#a78bfa', Areas: '#38bdf8', Resources: '#34d399', Archives: '#94a3b8' }
 const TYPE_COLOR: Record<EntryType, string> = { mistake: '#f87171', success: '#4ade80', decision: '#60a5fa', handoff: '#fbbf24' }
@@ -93,7 +94,7 @@ export function graphSvg(b: Brain, opts: { theme: Theme; hot?: string; fresh?: n
     // Files fan out beyond the hub, away from the centre.
     files.forEach((l, j) => {
       const { x: fx, y: fy, deg } = filePos(cx, cy, folder, j, files.length)
-      const fr = 5 + Math.sqrt(Math.max(1, l.lessons)) * 1.6
+      const fr = 4 + Math.sqrt(Math.max(1, l.lessons)) * 1.4
       const hot = opts.hot === l.file
       edges += `<line x1="${f1(hx)}" y1="${f1(hy)}" x2="${f1(fx)}" y2="${f1(fy)}" stroke="${color}" stroke-opacity="0.35" stroke-width="1"/>`
       // Its entries: a ring of dots, linked by short spokes.
@@ -135,7 +136,7 @@ export function graphSvg(b: Brain, opts: { theme: Theme; hot?: string; fresh?: n
     if (i === opts.fresh) nodes += `<circle cx="${f1(ix - (Math.min(10, inbox.length) - 1) * 4.5 + col * 9)}" cy="${f1(iy + row * 9)}" r="10" fill="${TYPE_COLOR[e.type]}" fill-opacity="0.35" filter="url(#glow)"/>`
     nodes += `<circle cx="${f1(ix - (Math.min(10, inbox.length) - 1) * 4.5 + col * 9)}" cy="${f1(iy + row * 9)}" r="3" fill="${TYPE_COLOR[e.type]}" stroke="${TYPE_COLOR[e.type]}" stroke-opacity="0.35" stroke-width="3"/>`
   })
-  labels += `<text x="${ix}" y="${iy - 10}" font-size="9" fill="${P.dim}" text-anchor="middle">inbox · ${inbox.length} to route</text>`
+  labels += `<text x="${ix}" y="${iy - 10}" font-size="9" fill="${P.dim}" text-anchor="middle">inbox · ${inbox.length} to route${elsewhere ? ` · ${elsewhere} routed outside the folders` : ''}</text>`
   if (inbox.length > MAX_INBOX) labels += `<text x="${f1(ix + 52)}" y="${iy + 21}" font-size="9" fill="${P.dim}">+${inbox.length - MAX_INBOX}</text>`
 
   // Rules promoted from the memory, above the centre.
@@ -151,7 +152,6 @@ export function graphSvg(b: Brain, opts: { theme: Theme; hot?: string; fresh?: n
   nodes += `<circle cx="${cx}" cy="${cy}" r="14" fill="${P.bg}" stroke="${P.core}" stroke-width="2"/>`
   nodes += `<circle cx="${cx}" cy="${cy}" r="5" fill="${P.core}"/>`
   labels += `<text x="${cx}" y="${cy + 30}" font-size="10" font-weight="700" fill="${P.label}" text-anchor="middle">MEMORY.md</text>`
-  if (elsewhere) labels += `<text x="${cx}" y="${cy + 42}" font-size="8.5" fill="${P.dim}" text-anchor="middle">${elsewhere} routed outside the folders</text>`
 
   // A new entry travelling from the inbox to its file.
   if (opts.travelling) {

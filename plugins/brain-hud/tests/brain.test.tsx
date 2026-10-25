@@ -81,6 +81,16 @@ describe('reading the memory', () => {
     ])
   })
 
+  test('index lines may name their file as a markdown link or in backticks', () => {
+    const m = parseMemory('## Areas\n- [Area] [loop-guard.md](Areas/loop-guard.md) — loop notes (3 lessons, last updated 2026-10-25)\n- [Area] `Areas/model-router.md` — routing\n')
+    expect(m.folders.Areas.map(l => [l.file, l.summary, l.lessons])).toEqual([['loop-guard.md', 'loop notes', 3], ['model-router.md', 'routing', 0]])
+  })
+
+  test('an Archives file is not missing from the index, which only counts archives', () => {
+    const f = withListing(parseMemory(MEMORY).folders, { Archives: [{ file: 'old.md', lessons: 1, updated: '', summary: '' }] })
+    expect(f.Archives).toEqual([{ file: 'old.md', summary: '', lessons: 1, updated: '', isIndexed: true }])
+  })
+
   test("followups' Start prompt: ids, titles and bugs", () => {
     expect(parseStartPrompt('Work on:\n- id k1-a: Fix the upload (bug) — fails 1 in 5 [where: up.ts:4]\n- id k2-b: Update the docs')).toEqual([
       { id: 'k1-a', title: 'Fix the upload', isBug: true },
@@ -187,6 +197,24 @@ describe('the graph', () => {
     const svg = graphSvg(b, { theme: 'dark' })
     expect(svg).toContain('inbox · 1 to route')
     expect(svg).toContain('1 routed outside the folders')
+  })
+
+  test("a folder's files stand in a column on its outer side, one label row each", () => {
+    const files = Array.from({ length: 7 }, (_, k) => ({ file: `res-${k}.md`, summary: '', lessons: 1, updated: '', isIndexed: true }))
+    const b: Brain = { ...parseMemory(MEMORY), folders: { Projects: [], Areas: files.map(l => ({ ...l, file: `a-${l.file}` })), Resources: files, Archives: [] }, entries: [] }
+    const svg = graphSvg(b, { theme: 'dark' })
+    const rows = (prefix: string) => [...svg.matchAll(new RegExp(`<text x="([\\d.]+)" y="([\\d.]+)"[^>]*>${prefix}res-\\d<`, 'g'))].map(m => [Number(m[1]), Number(m[2])] as [number, number])
+    for (const [prefix, below] of [['a-', false], ['', true]] as const) {
+      const r = rows(prefix)
+      expect(r).toHaveLength(7)
+      // Same x (a column, to the right of the centre), rows at least a label apart, all on the canvas.
+      expect(new Set(r.map(([x]) => x)).size).toBe(1)
+      expect(r[0]![0]).toBeGreaterThan(GRAPH.width / 2)
+      const ys = r.map(([, y]) => y).sort((p, q) => p - q)
+      for (let k = 1; k < ys.length; k++) expect(ys[k]! - ys[k - 1]!).toBeGreaterThanOrEqual(20)
+      expect(ys[0]!).toBeGreaterThan(below ? GRAPH.height / 2 - 20 : 0)
+      expect(ys.at(-1)!).toBeLessThan(below ? GRAPH.height : GRAPH.height / 2)
+    }
   })
 
   test('a dark and a light palette', () => {
@@ -526,7 +554,7 @@ describe('in a session', () => {
     let text = await texts(pane)
     expect(text).toMatch(/index: \.agent-brain\/shared\/MEMORY\.md/)
     // output-discipline.md is on disk but not in the index.
-    expect(text).toMatch(/⚠ 1 PARA file is not in \.agent-brain\/shared\/MEMORY\.md\./)
+    expect(text).toMatch(/⚠ 1 PARA file is not in \.agent-brain\/shared\/MEMORY\.md: output-discipline\.md/)
     await pane.unmount()
     delete files['.agent-brain/shared/MEMORY.md']
     await $.command.run({ command: 'brain' } as never)
