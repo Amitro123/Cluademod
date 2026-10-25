@@ -216,8 +216,9 @@ describe('in a session', () => {
       await $.turn.start({ text: 'hi', turnId: 't1' } as never)
       const pane = await $.ui.mount({ ...PANE, surface } as never)
       let text = await texts(pane)
-      expect(text).toMatch(/🧠 Brain · 33 lessons/)
-      expect(text).toMatch(/2 in the inbox \(1 unrouted\) · no rules promoted yet · last dream 2026-09-18/)
+      expect(text).toMatch(/🧠 33 lessons \| · 1 unrouted/)
+      // No rules yet, so no rules row; no summaries until a file changes.
+      expect(text).not.toMatch(/Rules/)
       expect(text).toMatch(/● decision/)
       expect(text).toMatch(/Added an end-to-end test/)
       // Folders open on a press, and a file the index misses is marked.
@@ -225,6 +226,7 @@ describe('in a session', () => {
       text = await texts(pane)
       expect(text).toMatch(/skill-deployment-pattern\.md/)
       expect(text).toMatch(/output-discipline\.md \| not in MEMORY\.md/)
+      expect(text).not.toMatch(/one adapter per host/)
       if (surface === 'desktop') expect(await pane.find({ type: 'Svg' } as never)).toBeDefined()
       await pane.unmount()
     })
@@ -258,6 +260,11 @@ describe('in a session', () => {
     await w.clock.advance(4_100)
     expect(await texts(band)).toMatch(/Filed into memory → Projects \| mistake-brain-skill\.md/)
     await band.unmount()
+    // The pane gives the summary of the file that just changed, and only that one.
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    await pane.press({ key: 'f-Projects' })
+    expect(await texts(pane)).toMatch(/✦ mistake-brain-skill\.md .*bugs and decisions while building the skill/)
+    await pane.unmount()
   })
 
   test('a follow-up Claude finished is offered to memory; a bug as a mistake first', async ($, on) => {
@@ -268,7 +275,11 @@ describe('in a session', () => {
     await $.tool.call({ tool: 'mcp__followups__done', id: 'k1-a', note: 'added a retry' } as never)
     const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
     expect(await texts(band)).toMatch(/Worth remembering\? Fix the upload/)
-    expect((await buttons(band)).slice(0, 3)).toEqual(['log-mistake', 'log-success', 'log-decision'])
+    // One line: the suggested type, "…" for the others, Not now.
+    expect(await texts(band)).not.toMatch(/Claude logs it/)
+    expect(await buttons(band)).toEqual(['log-mistake', 'log-more', 'log-skip'])
+    await band.press({ key: 'log-more' })
+    expect(await buttons(band)).toEqual(['log-mistake', 'log-success', 'log-decision', 'log-skip'])
     // Numbered hotkeys: followups' band takes a and s, goal-run's g, k, c and n.
     const keys = (await band.findAll({ type: 'Button' } as never)).map(b => (b as { props?: { hotkey?: string } }).props?.hotkey)
     expect(keys.slice(0, 3)).toEqual(['1', '2', '3'])
@@ -286,6 +297,8 @@ describe('in a session', () => {
     await $.tool.call({ tool: 'mcp__goal-run__update', id: 't2', status: 'done' } as never)
     const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
     expect(await texts(band)).toMatch(/Worth remembering\? Reached the goal: Ship the CSV export/)
+    expect(await buttons(band)).toEqual(['log-success', 'log-more', 'log-skip'])
+    await band.press({ key: 'log-more' })
     expect((await buttons(band)).slice(0, 2)).toEqual(['log-success', 'log-handoff'])
     await band.press({ key: 'log-skip' })
     expect(await texts(band)).toBe('')

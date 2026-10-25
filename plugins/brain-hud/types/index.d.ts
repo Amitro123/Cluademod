@@ -35,6 +35,8 @@ declare module 'claude-code' {
       goalText: string
       // Whether the pane already opened by itself this session.
       paneShown: boolean
+      // The offer whose other types "…" opened.
+      more: string
     }
   }
 }
