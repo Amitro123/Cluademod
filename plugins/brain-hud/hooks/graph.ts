@@ -3,7 +3,7 @@
 // Entries not routed yet float in an inbox cluster with no link. A fixed radial layout, so the
 // graph never jumps between refreshes.
 
-import type { Brain, Entry, EntryType, Folder } from '../types'
+import type { Brain, Entry, EntryType, Folder, Lesson } from '../types'
 
 export type Theme = 'dark' | 'light'
 export const GRAPH = { width: 640, height: 400 }
@@ -13,11 +13,18 @@ const HUB_ANGLE: Record<Folder, number> = { Projects: -140, Areas: -40, Resource
 const HUB_R = 104
 const FILE_R = 76
 const SPREAD = 32
+// What a large memory is cut to, so nothing runs off the canvas or piles up: files per folder (the
+// ones with the most lessons, and the one just written to), dots per file, dots in the inbox.
+const MAX_FILES = 7
+const MAX_RINGS = 3
+const PER_RING = 18
+const MAX_INBOX = 30
 
-// Where file j of n sits around its folder's hub, and the angle it hangs at.
+// Where file j of n sits around its folder's hub, and the angle it hangs at; the fan never wraps.
 function filePos(cx: number, cy: number, folder: Folder, j: number, n: number) {
   const [hx, hy] = at(cx, cy, HUB_ANGLE[folder], HUB_R)
-  const deg = HUB_ANGLE[folder] + (n > 1 ? (j - (n - 1) / 2) * SPREAD : 0)
+  const step = Math.min(SPREAD, 300 / Math.max(1, n - 1))
+  const deg = HUB_ANGLE[folder] + (n > 1 ? (j - (n - 1) / 2) * step : 0)
   const [x, y] = at(hx, hy, deg, FILE_R)
   return { x, y, deg }
 }
@@ -34,6 +41,19 @@ const at = (x: number, y: number, deg: number, r: number) => [x + Math.cos(rad(d
 const f1 = (n: number) => n.toFixed(1)
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
 const short = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
+
+// The files a folder shows, in the index's order: the most lessons first past MAX_FILES, and the
+// file just written to always.
+export function shownFiles(files: Lesson[], hot?: string): Lesson[] {
+  if (files.length <= MAX_FILES) return files
+  const keep = new Set([...files].sort((a, b) => b.lessons - a.lessons).slice(0, MAX_FILES).map(l => l.file))
+  if (hot && files.some(l => l.file === hot) && !keep.has(hot)) {
+    const least = [...files].filter(l => keep.has(l.file)).sort((a, b) => a.lessons - b.lessons)[0]!
+    keep.delete(least.file)
+    keep.add(hot)
+  }
+  return files.filter(l => keep.has(l.file))
+}
 
 // Where an entry was routed: its folder and file name, from "Project: .agent-brain/…/Projects/x.md".
 export function routeOf(e: Entry): { folder: Folder; file: string } | null {
@@ -63,7 +83,8 @@ export function graphSvg(b: Brain, opts: { theme: Theme; hot?: string; fresh?: n
   for (const folder of FOLDERS) {
     const [hx, hy] = at(cx, cy, HUB_ANGLE[folder], HUB_R)
     const color = HUB_COLOR[folder]
-    const files = b.folders[folder]
+    const all = b.folders[folder]
+    const files = shownFiles(all, opts.hot)
     edges += `<line x1="${cx}" y1="${cy}" x2="${f1(hx)}" y2="${f1(hy)}" stroke="${color}" stroke-opacity="0.45" stroke-width="1.6"/>`
     // Files fan out beyond the hub, away from the centre.
     files.forEach((l, j) => {
@@ -73,11 +94,11 @@ export function graphSvg(b: Brain, opts: { theme: Theme; hot?: string; fresh?: n
       edges += `<line x1="${f1(hx)}" y1="${f1(hy)}" x2="${f1(fx)}" y2="${f1(fy)}" stroke="${color}" stroke-opacity="0.35" stroke-width="1"/>`
       // Its entries: a ring of dots, linked by short spokes.
       const mine = routed.get(`${folder}/${l.file}`) ?? []
-      mine.forEach(({ e, i }, k) => {
-        const perRing = 18
-        const ring = Math.floor(k / perRing)
-        const n = Math.min(perRing, mine.length - ring * perRing)
-        const [ex, ey] = at(fx, fy, (360 / n) * (k % perRing) + ring * 10, fr + 10 + ring * 8)
+      const dots = mine.slice(0, PER_RING * MAX_RINGS)
+      dots.forEach(({ e, i }, k) => {
+        const ring = Math.floor(k / PER_RING)
+        const n = Math.min(PER_RING, dots.length - ring * PER_RING)
+        const [ex, ey] = at(fx, fy, (360 / n) * (k % PER_RING) + ring * 10, fr + 10 + ring * 8)
         edges += `<line x1="${f1(fx)}" y1="${f1(fy)}" x2="${f1(ex)}" y2="${f1(ey)}" stroke="${P.edge}" stroke-opacity="0.18" stroke-width="0.6"/>`
         if (i === opts.fresh) nodes += `<circle cx="${f1(ex)}" cy="${f1(ey)}" r="8" fill="${TYPE_COLOR[e.type]}" fill-opacity="0.35" filter="url(#glow)"/>`
         nodes += `<circle cx="${f1(ex)}" cy="${f1(ey)}" r="2.4" fill="${TYPE_COLOR[e.type]}"/>`
@@ -85,7 +106,7 @@ export function graphSvg(b: Brain, opts: { theme: Theme; hot?: string; fresh?: n
       if (hot) nodes += `<circle cx="${f1(fx)}" cy="${f1(fy)}" r="${f1(fr + 7)}" fill="${color}" fill-opacity="0.25" filter="url(#glow)"/>`
       nodes += `<circle cx="${f1(fx)}" cy="${f1(fy)}" r="${f1(fr)}" fill="${color}" fill-opacity="${hot ? 1 : 0.85}" stroke="${P.bg}" stroke-width="1.5"/>`
       // The label hangs on the far side of the file, along the angle it sits at.
-      const rings = Math.ceil(mine.length / 18)
+      const rings = Math.ceil(dots.length / PER_RING)
       const gap = fr + (rings ? 14 + rings * 8 : 8)
       const [lx, ly] = at(fx, fy, deg, gap)
       const c = Math.cos(rad(deg))
@@ -98,19 +119,20 @@ export function graphSvg(b: Brain, opts: { theme: Theme; hot?: string; fresh?: n
     nodes += `<circle cx="${f1(hx)}" cy="${f1(hy)}" r="11" fill="${P.bg}" stroke="${color}" stroke-width="2"/>`
     nodes += `<circle cx="${f1(hx)}" cy="${f1(hy)}" r="4" fill="${color}"/>`
     const up = Math.sin(rad(HUB_ANGLE[folder])) < 0
-    labels += `<text x="${f1(hx)}" y="${f1(hy + (up ? -17 : 24))}" font-size="10" font-weight="700" fill="${color}" text-anchor="middle">${folder}${files.length ? '' : ' · empty'}</text>`
+    labels += `<text x="${f1(hx)}" y="${f1(hy + (up ? -17 : 24))}" font-size="10" font-weight="700" fill="${color}" text-anchor="middle">${folder}${all.length ? (all.length > files.length ? ` · +${all.length - files.length} more` : '') : ' · empty'}</text>`
   }
 
   // The inbox: entries waiting to be routed, unlinked, below the centre.
   const ix = cx
   const iy = h - 34
-  inbox.forEach(({ e, i }, k) => {
+  inbox.slice(0, MAX_INBOX).forEach(({ e, i }, k) => {
     const col = k % 10
     const row = Math.floor(k / 10)
     if (i === opts.fresh) nodes += `<circle cx="${f1(ix - (Math.min(10, inbox.length) - 1) * 4.5 + col * 9)}" cy="${f1(iy + row * 9)}" r="10" fill="${TYPE_COLOR[e.type]}" fill-opacity="0.35" filter="url(#glow)"/>`
     nodes += `<circle cx="${f1(ix - (Math.min(10, inbox.length) - 1) * 4.5 + col * 9)}" cy="${f1(iy + row * 9)}" r="3" fill="${TYPE_COLOR[e.type]}" stroke="${TYPE_COLOR[e.type]}" stroke-opacity="0.35" stroke-width="3"/>`
   })
   labels += `<text x="${ix}" y="${iy - 10}" font-size="9" fill="${P.dim}" text-anchor="middle">inbox · ${inbox.length} to route</text>`
+  if (inbox.length > MAX_INBOX) labels += `<text x="${f1(ix + 52)}" y="${iy + 21}" font-size="9" fill="${P.dim}">+${inbox.length - MAX_INBOX}</text>`
 
   // Rules promoted from the memory, above the centre.
   b.rules.slice(0, 3).forEach((r, k) => {
@@ -131,7 +153,7 @@ export function graphSvg(b: Brain, opts: { theme: Theme; hot?: string; fresh?: n
     const e = b.entries[opts.travelling.entry]
     const r = e && routeOf(e)
     if (e && r) {
-      const files = b.folders[r.folder]
+      const files = shownFiles(b.folders[r.folder], opts.hot)
       const j = Math.max(0, files.findIndex(l => l.file === r.file))
       const { x: fx, y: fy } = filePos(cx, cy, r.folder, j, files.length)
       const t = opts.travelling.t

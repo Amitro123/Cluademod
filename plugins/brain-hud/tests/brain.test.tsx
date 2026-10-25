@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { claudeCells, sceneSvg } from '../hooks/art'
-import { graphSvg, routeOf } from '../hooks/graph'
+import { GRAPH, graphSvg, routeOf, shownFiles } from '../hooks/graph'
 import { diffBrain, logPrompt, parseMemory, parseMistakes, withListing } from '../hooks/brain'
 import type { Brain } from '../types'
 // The wording followups and goal-run write, from the copy of shared/texts.ts they use too.
@@ -137,6 +137,35 @@ describe('the graph', () => {
     expect(lit).toContain('stroke-dasharray="3 3"')
   })
 
+  test('a large memory stays on the canvas: files, dots and the inbox are capped', () => {
+    const files = Array.from({ length: 20 }, (_, k) => ({ file: `f${k}.md`, summary: '', lessons: k + 1, updated: '', isIndexed: true }))
+    const big: Brain = {
+      ...parseMemory(MEMORY),
+      folders: { Projects: files, Areas: [], Resources: [], Archives: [] },
+      entries: [
+        ...Array.from({ length: 60 }, (_, k) => ({ at: `2026-10-0${k % 9 + 1} 10:00`, title: `waiting ${k}`, type: 'decision' as const, status: 'unrouted', route: 'unrouted' })),
+        ...Array.from({ length: 100 }, (_, k) => ({ at: '2026-09-01 10:00', title: `lesson ${k}`, type: 'mistake' as const, status: 'routed', route: 'Project: .agent-brain/shared/Projects/f19.md' })),
+      ],
+    }
+    // The file just written to shows even with few lessons.
+    const svg = graphSvg(big, { theme: 'dark', hot: 'f0.md' })
+    for (const m of svg.matchAll(/<circle cx="([\d.-]+)" cy="([\d.-]+)"/g)) {
+      expect(Number(m[1])).toBeGreaterThanOrEqual(0)
+      expect(Number(m[1])).toBeLessThanOrEqual(GRAPH.width)
+      expect(Number(m[2])).toBeGreaterThanOrEqual(0)
+      expect(Number(m[2])).toBeLessThanOrEqual(GRAPH.height)
+    }
+    const shown = shownFiles(files, 'f0.md')
+    expect(shown).toHaveLength(7)
+    expect(shown.map(l => l.file)).toContain('f0.md')
+    expect(svg).toContain('Projects · +13 more')
+    expect(svg).toContain('inbox · 60 to route')
+    expect(svg).toContain('>+30<')
+    // 30 inbox dots and 3 rings of 18 around the busiest file.
+    expect(svg.match(/r="3" fill/g)).toHaveLength(30)
+    expect(svg.match(/r="2\.4"/g)).toHaveLength(54)
+  })
+
   test('a dark and a light palette', () => {
     expect(graphSvg(brain(), { theme: 'dark' })).toContain('fill="#0b0e14"')
     expect(graphSvg(brain(), { theme: 'light' })).toContain('fill="#fbfaf7"')
@@ -176,10 +205,11 @@ const buttons = async (ui: { findAll: (q: never) => Promise<unknown[]> }) =>
 // The engine beneath: a project in memory (files by path under /repo, each write bumps its time),
 // a clock, and the side calls the mod makes.
 function engine(on: On, files: Record<string, string>, { commands = ['followup'] as string[], failSubmit = false, closesGoal = '' } = {}) {
-  const w = { sent: [] as string[], ran: [] as string[], opened: [] as string[], times: {} as Record<string, number>, pulses: 0 }
+  const w = { sent: [] as string[], ran: [] as string[], opened: [] as string[], times: {} as Record<string, number>, pulses: 0, offers: 0 }
   on('state.set', (_, e, next) => {
     const { key, value } = e as { key?: string; value?: unknown }
     if (key === 'pulse' && value) w.pulses++
+    if (key === 'offers') w.offers = (value as unknown[]).length
     return next(e)
   })
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 24, 9) })
@@ -219,6 +249,7 @@ function engine(on: On, files: Record<string, string>, { commands = ['followup']
   })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }) as never)
+  on('classic.PostToolUse', () => ({}) as never)
   on('tool.call', (_, e) => {
     if (e.tool === 'mcp__followups__done') return { result: doneResult('Fix the upload', 'added a retry'), ...(closesGoal ? { context: [goalClosedNote(closesGoal)] } : {}) } as never
     if (e.tool === 'mcp__goal-run__update') return { result: `t2 is done. 2/2 tasks done (100%). ${GOAL_REACHED}` } as never
@@ -319,12 +350,14 @@ describe('in a session', () => {
     expect(await texts(band)).toMatch(/Worth remembering\? Fix the upload/)
     // One line: the suggested type, "…" for the others, Not now.
     expect(await texts(band)).not.toMatch(/Claude logs it/)
+    // Letter hotkeys, clear of followups' a, s and goal-run's g, k, c, n; never a digit, which an
+    // empty composer passes to the band (a prompt starting "1." would log to memory).
+    const keys = async () => (await band.findAll({ type: 'Button' } as never)).map(b => (b as { props?: { hotkey?: string } }).props?.hotkey)
     expect(await buttons(band)).toEqual(['log-mistake', 'log-more', 'log-skip'])
+    expect(await keys()).toEqual(['l', 'm', undefined])
     await band.press({ key: 'log-more' })
     expect(await buttons(band)).toEqual(['log-mistake', 'log-success', 'log-decision', 'log-skip'])
-    // Numbered hotkeys: followups' band takes a and s, goal-run's g, k, c and n.
-    const keys = (await band.findAll({ type: 'Button' } as never)).map(b => (b as { props?: { hotkey?: string } }).props?.hotkey)
-    expect(keys.slice(0, 3)).toEqual(['1', '2', '3'])
+    expect(await keys()).toEqual(['l', undefined, undefined, undefined])
     await band.press({ key: 'log-mistake' })
     expect(w.sent.at(-1)).toMatch(/\/mistake-brain log, as Type: mistake/)
     expect(w.sent.at(-1)).toContain('Fix the upload')
@@ -342,6 +375,36 @@ describe('in a session', () => {
     expect(await buttons(band)).toEqual(['log-success', 'log-more', 'log-skip'])
     await band.press({ key: 'log-more' })
     expect((await buttons(band)).slice(0, 2)).toEqual(['log-success', 'log-handoff'])
+    await band.press({ key: 'log-skip' })
+    expect(await texts(band)).toBe('')
+    await band.unmount()
+  })
+
+  test("with brain-hud beneath the owners, the PostToolUse event still brings the offers", async ($, on) => {
+    engine(on, project())
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const post = (tool_name: string, tool_input: object, text: string) =>
+      $.classic.PostToolUse({ tool_name, tool_input, tool_response: [{ type: 'text', text }], tool_use_id: 'u' } as never)
+    await $.prompt.submit({ text: `Start this item from my to-do list:\n${startLine({ id: 'k9', title: 'Fix the login', kind: 'bug' })}`, origin: { kind: 'plugin', name: 'followups' } } as never)
+    await post('mcp__followups__done', { id: 'k9' }, doneResult('Fix the login', ''))
+    await post('mcp__goal-run__plan', { goal: 'Harden auth', tasks: [] }, 'Approved')
+    await post('mcp__goal-run__update', { id: 't3', status: 'done' }, `t3 is done. 3/3 tasks done (100%). ${GOAL_REACHED}`)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(band)).toMatch(/Worth remembering\? Fix the login/)
+    expect(await buttons(band)).toEqual(['log-mistake', 'log-more', 'log-skip'])
+    await band.press({ key: 'log-skip' })
+    expect(await texts(band)).toMatch(/Worth remembering\? Reached the goal: Harden auth/)
+    await band.unmount()
+  })
+
+  test('the tool.call hook and the PostToolUse event for one call make one offer', async ($, on) => {
+    const w = engine(on, project())
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.tool.call({ tool: 'mcp__followups__done', id: 'k1-a' } as never)
+    await $.classic.PostToolUse({ tool_name: 'mcp__followups__done', tool_input: { id: 'k1-a' }, tool_response: doneResult('Fix the upload', 'added a retry'), tool_use_id: 'u' } as never)
+    expect(w.offers).toBe(1)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(band)).toMatch(/Worth remembering\? Fix the upload/)
     await band.press({ key: 'log-skip' })
     expect(await texts(band)).toBe('')
     await band.unmount()
@@ -419,6 +482,19 @@ describe('in a session', () => {
     on('config.list', () => ({ value: [{ key: 'theme', value: 'light-daltonized' }] }) as never)
     engine(on, project())
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+    const svg = String(((await pane.find({ type: 'Svg' } as never)) as { props?: { source?: string } }).props?.source)
+    expect(svg).toContain('fill="#fbfaf7"')
+    await pane.unmount()
+  })
+
+  test('a theme changed in /config mid-session reaches the graph from the next prompt', async ($, on) => {
+    let value = 'dark'
+    on('config.list', () => ({ value: [{ key: 'theme', value }] }) as never)
+    engine(on, project())
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    value = 'light'
+    await $.turn.start({ text: 'hi', turnId: 't1' } as never)
     const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
     const svg = String(((await pane.find({ type: 'Svg' } as never)) as { props?: { source?: string } }).props?.source)
     expect(svg).toContain('fill="#fbfaf7"')

@@ -5,6 +5,7 @@ import type { On } from 'claude-code'
 import { runnerX, trackText } from '../hooks/art'
 import { addSide, insertTask, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan, stepTokens } from '../hooks/register'
 import type { Goal } from '../types'
+import { doneResult } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 const UPDATE = 'mcp__goal-run__update'
@@ -348,6 +349,24 @@ describe('work started from the followups to-do list', () => {
     text = await texts(pane)
     expect(text).toMatch(/2\/3 tasks/)
     expect(text).toMatch(/67%/)
+    await pane.unmount()
+  })
+
+  test('with goal-run beneath followups, the PostToolUse event still closes the task (and twice is harmless)', async ($, on) => {
+    on('classic.PostToolUse', () => ({}) as never)
+    const w = await halfway($, on)
+    await $.prompt.submit(fromTodo)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    await band.press({ key: 'side-add' })
+    await band.unmount()
+    await $.tool.call({ tool: UPDATE, id: 't2', status: 'done' } as never)
+    // followups answered the tool above goal-run, so only the classic event reaches it.
+    const post = { tool_name: 'mcp__followups__done', tool_input: { id: 'fu-1' }, tool_response: [{ type: 'text', text: doneResult('Rotate the dev key', '') }], tool_use_id: 'u1' }
+    await $.classic.PostToolUse(post as never)
+    await $.classic.PostToolUse(post as never)
+    expect(w.toasts.filter(t => t === 'Goal reached: Ship it')).toHaveLength(1)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/3\/3 tasks/)
     await pane.unmount()
   })
 
