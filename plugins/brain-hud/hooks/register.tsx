@@ -2,7 +2,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Brain, EntryType, Folder, Offer, Pulse, PulseKind } from '../types'
-import { brainMapSvg, faceText, KIND_COLOR, MAP, SCENE, sceneSvg } from './art'
+import { faceText, KIND_COLOR, SCENE, sceneSvg } from './art'
+import { GRAPH, graphSvg, routeOf } from './graph'
+import type { Theme } from './graph'
 import { diffBrain, FOLDERS, lessonCount, logPrompt, parseMemory, parseMistakes, unrouted, withListing } from './brain'
 import { GOAL_REACHED, parseDoneResult, parseGoalClosedNote, parseGoalPrompt, parseStartPrompt } from './texts'
 
@@ -15,6 +17,8 @@ const canFollow = atom({ plugin: 'brain-hud', key: 'canFollow' } as const, false
 const started = atom({ plugin: 'brain-hud', key: 'started' } as const, [] as { id: string; title: string; isBug: boolean }[])
 const goalText = atom({ plugin: 'brain-hud', key: 'goalText' } as const, '')
 const paneShown = atom({ plugin: 'brain-hud', key: 'paneShown' } as const, false)
+const more = atom({ plugin: 'brain-hud', key: 'more' } as const, '')
+const theme = atom({ plugin: 'brain-hud', key: 'theme' } as const, 'dark' as Theme)
 
 const PANE = 'brain-hud'
 const PANE_TITLE = 'Brain'
@@ -25,7 +29,7 @@ const PARA_ROOT = '.agent-brain/shared'
 const POLL_MS = 4_000
 const PULSE_MS = 6_000
 const FRAME_MS = 160
-const INBOX_SHOWN = 8
+const INBOX_SHOWN = 3
 const ACCENT = '#c96f97'
 
 const FOLLOWUPS_DONE = 'mcp__followups__done'
@@ -158,6 +162,13 @@ async function checkFollow($: EngineInterface) {
   if (names.includes('followup')) await update($, canFollow, () => true)
 }
 
+// The graph's palette follows the theme set in /config; dark when it can't be read.
+async function readTheme($: EngineInterface) {
+  const row = (await $.config.list().catch(() => [])).find(r => r.key === 'theme')
+  const value = String((row as { value?: unknown } | undefined)?.value ?? '')
+  await update($, theme, () => (/light/i.test(value) ? 'light' : 'dark'))
+}
+
 async function toggle($: EngineInterface, name: string) {
   await update($, open, l => (l.includes(name) ? l.filter(x => x !== name) : [...l, name]))
 }
@@ -168,6 +179,7 @@ export const register: Register = on => {
     anim?.cancel()
     anim = null
     await $.command.register({ name: 'brain', description: "Show the agent's project memory (mistake-brain)" })
+    await readTheme($)
     await refresh($)
     timers.push($.clock.every(POLL_MS, async () => {
       if ((await stamp($)) !== mtimes) await refresh($)
@@ -263,6 +275,8 @@ export const register: Register = on => {
     const t = await read($, frame)
     const below = await next(e)
     const o = pending[0]
+    // The suggested type alone, until "…" asks for the others.
+    const showAll = Boolean(o) && (await read($, more)) === o!.key
     return (
       <Box flexDirection="column">
         {p ? (
@@ -281,11 +295,11 @@ export const register: Register = on => {
         {o ? (
           <Box flexDirection="column" paddingX={1}>
             <Text bold color={ACCENT} wrap="truncate-end">{`🧠 Worth remembering? ${o.title}`}</Text>
-            <Text dimColor wrap="truncate-end">{o.from === 'followups' ? 'Finished from the to-do list. Claude logs it to MISTAKES.md with mistake-brain.' : 'Claude logs it to MISTAKES.md with mistake-brain.'}</Text>
             <Box flexDirection="row" gap={1}>
-              {o.types.map((type, i) => (
+              {(showAll ? o.types : o.types.slice(0, 1)).map((type, i) => (
                 <Button key={`log-${type}`} label={`Log as ${type}`} hotkey={String(i + 1)} variant={i === 0 ? 'primary' : undefined} onPress={() => logIt($, o, type)} />
               ))}
+              {showAll ? null : <Button key="log-more" label="…" onPress={() => update($, more, () => o.key)} />}
               <Button key="log-skip" label="Not now" onPress={() => update($, offers, l => l.filter(x => x.key !== o.key))} />
             </Box>
           </Box>
@@ -314,18 +328,28 @@ export const register: Register = on => {
     const follow = await read($, canFollow)
     const isOpen = (name: string) => opened.includes(name)
     const arrow = (name: string) => (isOpen(name) ? '▾' : '▸')
-    const counts = Object.fromEntries(FOLDERS.map(f => [f, b.folders[f].length])) as Record<Folder, number>
-    if (b.archives > counts.Archives) counts.Archives = b.archives
+    // What the graph lights up: the file a lesson just went into, and the entry just logged or
+    // routed, travelling from the inbox to its file for the first two seconds of a route.
+    const t = p ? (await read($, frame)) - p.at : 0
+    const freshAt = p ? b.entries.findIndex(en => en.title === p.title) : -1
+    const travelling = p?.kind === 'route' && freshAt >= 0 && routeOf(b.entries[freshAt]!) && t < 2_000 ? { entry: freshAt, t: Math.max(0.05, t / 2_000) } : undefined
     const fresh = (title: string) => (p && (p.title === title || p.file === title) ? '✦ ' : '')
     const waiting = unrouted(b)
 
     return (
       <Box flexDirection="column" gap={1}>
-        <Box flexDirection="column">
-          <Text bold color={ACCENT}>{`🧠 Brain · ${lessons(lessonCount(b))}`}</Text>
-          <Text dimColor>{`${b.entries.length} in the inbox (${waiting} unrouted) · ${b.rules.length ? `${b.rules.length} rules` : 'no rules promoted yet'} · ${b.lastDream ? `last dream ${b.lastDream}` : 'no dream yet'}`}</Text>
+        <Box flexDirection="row" gap={1}>
+          <Text bold color={ACCENT}>{`🧠 ${lessons(lessonCount(b))}`}</Text>
+          <Text dimColor>{`· ${waiting} unrouted`}</Text>
         </Box>
-        {Svg ? <Svg source={brainMapSvg(counts, waiting, p?.folder)} alt={`Memory: ${FOLDERS.map(f => `${f} ${counts[f]}`).join(', ')}; ${waiting} unrouted`} width={MAP.width} height={MAP.height} /> : null}
+        {Svg ? (
+          <Svg
+            source={graphSvg(b, { theme: await read($, theme), ...(p?.file ? { hot: p.file } : {}), ...(freshAt >= 0 ? { fresh: freshAt } : {}), ...(travelling ? { travelling } : {}) })}
+            alt={`Memory graph: MEMORY.md, ${FOLDERS.map(f => `${f} ${b.folders[f].length} files`).join(', ')}; ${b.entries.length} entries, ${waiting} still to route`}
+            width={GRAPH.width}
+            height={GRAPH.height}
+          />
+        ) : null}
         <Box flexDirection="column">
           <Button key="f-Inbox" label={`${arrow('Inbox')} 📥 Inbox · MISTAKES.md (${b.entries.length})`} plain onPress={() => toggle($, 'Inbox')} />
           {isOpen('Inbox')
@@ -359,14 +383,14 @@ export const register: Register = on => {
                           <Text color={p?.file === l.file ? '#d4a017' : undefined} bold={p?.file === l.file}>{`${fresh(l.file)}${l.file}`}</Text>
                           <Text dimColor>{l.isIndexed ? [l.lessons ? lessons(l.lessons) : '', l.updated].filter(Boolean).join(' · ') : 'not in MEMORY.md'}</Text>
                         </Box>
-                        {l.summary ? <Text dimColor wrap="truncate-end">{`      ${clip(l.summary, 110)}`}</Text> : null}
+                        {l.summary && p?.file === l.file ? <Text dimColor wrap="truncate-end">{`      ${clip(l.summary, 110)}`}</Text> : null}
                       </Box>
                     ))
                   : null}
               </Box>
             )
           })}
-          <Text dimColor>{`  ⚖ Rules · ${b.rules.length ? b.rules.map(r => clip(r, 50)).join(' · ') : 'none promoted yet'}`}</Text>
+          {b.rules.length ? <Text dimColor>{`  ⚖ Rules · ${b.rules.map(r => clip(r, 50)).join(' · ')}`}</Text> : null}
         </Box>
       </Box>
     )

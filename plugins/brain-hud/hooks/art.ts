@@ -1,7 +1,7 @@
 // The pixel art: Claude with a brain on its head, reacting to what just happened to the memory, as
 // one SVG string; the terminal's text version; and the brain map for the pane's header.
 
-import type { Folder, PulseKind } from '../types'
+import type { PulseKind } from '../types'
 
 const BODY = '#d97757'
 const EYE = '#1d1f2b'
@@ -125,27 +125,3 @@ const FACE: Record<PulseKind, string> = {
   dream: '🧠 (-_-) z',
 }
 export const faceText = (kind: PulseKind) => FACE[kind]
-
-export const MAP = { width: 280, height: 96 }
-
-// The brain map: four lobes, one per PARA folder, each brighter the more lessons it holds, and the
-// inbox as a stack of notes beside it. `hot` lights the folder something just went into.
-export function brainMapSvg(counts: Record<Folder, number>, inbox: number, hot?: Folder): string {
-  const { width: w, height: h } = MAP
-  const max = Math.max(1, ...Object.values(counts))
-  const lobes: [Folder, number, number][] = [['Projects', 52, 28], ['Areas', 136, 28], ['Resources', 52, 68], ['Archives', 136, 68]]
-  let s = `<ellipse cx="94" cy="48" rx="92" ry="46" fill="${BRAIN}" fill-opacity="0.25"/>`
-  for (const [f, cx, cy] of lobes) {
-    const n = counts[f]
-    const op = n ? 0.35 + 0.65 * (n / max) : 0.15
-    s += `<ellipse cx="${cx}" cy="${cy}" rx="40" ry="17" fill="${f === hot ? '#ffd166' : BRAIN}" fill-opacity="${op.toFixed(2)}" stroke="${FOLD}" stroke-width="1.2"/>`
-    s += `<text x="${cx}" y="${cy - 1}" font-size="9" text-anchor="middle" fill="${EYE}">${f}</text>`
-    s += `<text x="${cx}" y="${cy + 10}" font-size="9" font-weight="700" text-anchor="middle" fill="${EYE}">${n}</text>`
-  }
-  // The inbox: one note per unrouted entry, up to 5.
-  const notes = Math.min(5, inbox)
-  for (let i = 0; i < Math.max(1, notes); i++) s += rect(214 + i * 3, 34 - i * 3, 34, 26, i < notes ? '#fff7d6' : 'none', ` stroke="#8b8fa3" stroke-width="1"${i < notes ? '' : ' stroke-dasharray="3 2"'}`)
-  s += `<text x="${231 + Math.max(0, notes - 1) * 3}" y="${51 - Math.max(0, notes - 1) * 3}" font-size="9" text-anchor="middle" fill="${EYE}">${inbox}</text>`
-  s += `<text x="231" y="78" font-size="9" text-anchor="middle" fill="#8b8fa3">inbox</text>`
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${s}</svg>`
-}

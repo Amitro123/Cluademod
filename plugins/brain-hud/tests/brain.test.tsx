@@ -3,6 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { claudeCells, sceneSvg } from '../hooks/art'
+import { graphSvg, routeOf } from '../hooks/graph'
 import { diffBrain, logPrompt, parseMemory, parseMistakes, withListing } from '../hooks/brain'
 import type { Brain } from '../types'
 // The wording followups and goal-run write, from the copy of shared/texts.ts they use too.
@@ -103,6 +104,42 @@ describe('what changed', () => {
     const text = logPrompt('mistake', 'Fix the upload', 'retried without backoff')
     expect(text).toMatch(/\/mistake-brain log, as Type: mistake/)
     expect(text).toContain('Fix the upload')
+  })
+})
+
+describe('the graph', () => {
+  const routed = (title: string, file: string, type: 'mistake' | 'success' = 'mistake') =>
+    entry('2026-10-01 10:00', title, type, 'routed').replace(/- \*\*PARA route:\*\* .*/, `- **PARA route:** Project: .agent-brain/claude/Projects/${file}`)
+  const brain = (): Brain => ({
+    ...parseMemory(MEMORY),
+    entries: parseMistakes(MISTAKES_HEAD + entry('2026-10-24 09:00', 'Waiting one', 'handoff') + routed('Old one', 'mistake-brain-skill.md') + routed('Another', 'mistake-brain-skill.md', 'success')),
+  })
+
+  test("an entry's route names its folder and file, the pre-shared .agent-brain/claude/ path too", () => {
+    expect(routeOf(brain().entries[1]!)).toEqual({ folder: 'Projects', file: 'mistake-brain-skill.md' })
+    expect(routeOf(brain().entries[0]!)).toBeNull()
+  })
+
+  test('MEMORY.md at the centre, the four folders, a dot per routed entry, the rest in the inbox', () => {
+    const svg = graphSvg(brain(), { theme: 'dark' })
+    expect(svg).toContain('>MEMORY.md<')
+    for (const f of ['Projects', 'Areas · empty', 'Resources', 'Archives · empty']) expect(svg).toContain(`>${f}<`)
+    expect(svg).toContain('>mistake-brain-skill<')
+    expect(svg.match(/r="2\.4"/g)).toHaveLength(2)
+    expect(svg).toContain('inbox · 1 to route')
+  })
+
+  test('the file just written to and the entry just logged glow; a routed entry travels from the inbox', () => {
+    const plain = graphSvg(brain(), { theme: 'dark' })
+    const lit = graphSvg(brain(), { theme: 'dark', hot: 'mistake-brain-skill.md', fresh: 0, travelling: { entry: 1, t: 0.5 } })
+    expect(plain).not.toContain('filter="url(#glow)" /><circle cx')
+    expect((lit.match(/url\(#glow\)/g) ?? []).length).toBeGreaterThan((plain.match(/url\(#glow\)/g) ?? []).length + 2)
+    expect(lit).toContain('stroke-dasharray="3 3"')
+  })
+
+  test('a dark and a light palette', () => {
+    expect(graphSvg(brain(), { theme: 'dark' })).toContain('fill="#0b0e14"')
+    expect(graphSvg(brain(), { theme: 'light' })).toContain('fill="#fbfaf7"')
   })
 })
 
@@ -216,8 +253,9 @@ describe('in a session', () => {
       await $.turn.start({ text: 'hi', turnId: 't1' } as never)
       const pane = await $.ui.mount({ ...PANE, surface } as never)
       let text = await texts(pane)
-      expect(text).toMatch(/🧠 Brain · 33 lessons/)
-      expect(text).toMatch(/2 in the inbox \(1 unrouted\) · no rules promoted yet · last dream 2026-09-18/)
+      expect(text).toMatch(/🧠 33 lessons \| · 1 unrouted/)
+      // No rules yet, so no rules row; no summaries until a file changes.
+      expect(text).not.toMatch(/Rules/)
       expect(text).toMatch(/● decision/)
       expect(text).toMatch(/Added an end-to-end test/)
       // Folders open on a press, and a file the index misses is marked.
@@ -225,7 +263,13 @@ describe('in a session', () => {
       text = await texts(pane)
       expect(text).toMatch(/skill-deployment-pattern\.md/)
       expect(text).toMatch(/output-discipline\.md \| not in MEMORY\.md/)
-      if (surface === 'desktop') expect(await pane.find({ type: 'Svg' } as never)).toBeDefined()
+      expect(text).not.toMatch(/one adapter per host/)
+      if (surface === 'desktop') {
+        const svg = String(((await pane.find({ type: 'Svg' } as never)) as { props?: { source?: string } }).props?.source)
+        expect(svg).toContain('>MEMORY.md<')
+        // No theme in /config here: dark.
+        expect(svg).toContain('fill="#0b0e14"')
+      }
       await pane.unmount()
     })
   }
@@ -258,6 +302,11 @@ describe('in a session', () => {
     await w.clock.advance(4_100)
     expect(await texts(band)).toMatch(/Filed into memory → Projects \| mistake-brain-skill\.md/)
     await band.unmount()
+    // The pane gives the summary of the file that just changed, and only that one.
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    await pane.press({ key: 'f-Projects' })
+    expect(await texts(pane)).toMatch(/✦ mistake-brain-skill\.md .*bugs and decisions while building the skill/)
+    await pane.unmount()
   })
 
   test('a follow-up Claude finished is offered to memory; a bug as a mistake first', async ($, on) => {
@@ -268,7 +317,11 @@ describe('in a session', () => {
     await $.tool.call({ tool: 'mcp__followups__done', id: 'k1-a', note: 'added a retry' } as never)
     const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
     expect(await texts(band)).toMatch(/Worth remembering\? Fix the upload/)
-    expect((await buttons(band)).slice(0, 3)).toEqual(['log-mistake', 'log-success', 'log-decision'])
+    // One line: the suggested type, "…" for the others, Not now.
+    expect(await texts(band)).not.toMatch(/Claude logs it/)
+    expect(await buttons(band)).toEqual(['log-mistake', 'log-more', 'log-skip'])
+    await band.press({ key: 'log-more' })
+    expect(await buttons(band)).toEqual(['log-mistake', 'log-success', 'log-decision', 'log-skip'])
     // Numbered hotkeys: followups' band takes a and s, goal-run's g, k, c and n.
     const keys = (await band.findAll({ type: 'Button' } as never)).map(b => (b as { props?: { hotkey?: string } }).props?.hotkey)
     expect(keys.slice(0, 3)).toEqual(['1', '2', '3'])
@@ -286,6 +339,8 @@ describe('in a session', () => {
     await $.tool.call({ tool: 'mcp__goal-run__update', id: 't2', status: 'done' } as never)
     const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
     expect(await texts(band)).toMatch(/Worth remembering\? Reached the goal: Ship the CSV export/)
+    expect(await buttons(band)).toEqual(['log-success', 'log-more', 'log-skip'])
+    await band.press({ key: 'log-more' })
     expect((await buttons(band)).slice(0, 2)).toEqual(['log-success', 'log-handoff'])
     await band.press({ key: 'log-skip' })
     expect(await texts(band)).toBe('')
@@ -358,6 +413,16 @@ describe('in a session', () => {
     w.write('.agent-brain/shared/MEMORY.md', MEMORY.replace('(29 lessons', '(30 lessons'))
     await w.clock.advance(10_000)
     expect(w.pulses).toBe(0)
+  })
+
+  test('the graph follows a light theme set in /config', async ($, on) => {
+    on('config.list', () => ({ value: [{ key: 'theme', value: 'light-daltonized' }] }) as never)
+    engine(on, project())
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+    const svg = String(((await pane.find({ type: 'Svg' } as never)) as { props?: { source?: string } }).props?.source)
+    expect(svg).toContain('fill="#fbfaf7"')
+    await pane.unmount()
   })
 
   test("a handoff's next step goes to followups' to-do list", async ($, on) => {
