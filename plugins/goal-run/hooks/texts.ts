@@ -54,10 +54,14 @@ export const FACTORY_PLAN_APPROVED_ARG = 'plan-approved'
 export const PLAN_APPROVED_FOR_FACTORY = "Approved. The factory's builder does the work: don't start the tasks yourself, and don't propose another plan."
 export const planChangesForFactory = (said: string) => `The person wants changes: ${said}\nThe factory's spec-writer revises the spec; don't propose a plan yourself.`
 export const PLAN_WAITING_FOR_FACTORY = "The person hasn't answered; the plan waits for approval in the Goal pane, and the factory waits with it."
+// The person has a goal of their own: goal-run keeps it, and the factory asks for approval itself.
+export const PLAN_KEPT_FOR_FACTORY = "The person has a session goal of their own, so the factory's plan is not set as the goal. The factory asks the person to approve it in its own band; don't propose a plan or start the tasks."
 
-export function parsePlanOutcome(text: string): { approved: true } | { changes: string } | null {
-  if (text.startsWith('Approved.')) return { approved: true }
-  const m = /^The person wants changes(?:: ([\s\S]*?)\n| to the plan)/.exec(text)
-  return m ? { changes: (m[1] ?? '').trim() } : null
+// Only the factory's own wording counts: a regular plan's "Approved. …" or "The person wants changes
+// to the plan" is the main loop's, not the factory's.
+export function parsePlanOutcome(text: string): { approved: true } | { changes: string } | { kept: true } | null {
+  if (text.startsWith(PLAN_APPROVED_FOR_FACTORY)) return { approved: true }
+  if (text.startsWith(PLAN_KEPT_FOR_FACTORY)) return { kept: true }
+  const m = /^The person wants changes: ([\s\S]*?)\nThe factory's spec-writer revises the spec/.exec(text)
+  return m ? { changes: m[1]!.trim() } : null
 }
-

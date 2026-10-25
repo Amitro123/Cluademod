@@ -39,7 +39,7 @@
     {
       "name": "factory",
       "source": "./plugins/factory",
-      "description": "A software factory: spec, your approval of its plan, build on a branch, checks, parallel reviews and an approver before Claude opens the PR"
+      "description": "A software factory: spec, your approval of its plan, build on a branch, checks, parallel reviews and an approver agent, then your Open PR"
     }
   ]
 }

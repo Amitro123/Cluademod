@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import { runnerX, trackText } from '../hooks/art'
 import { addSide, insertTask, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan, stepTokens } from '../hooks/register'
 import type { Goal } from '../types'
-import { doneResult, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY } from '../hooks/texts'
+import { doneResult, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 const UPDATE = 'mcp__goal-run__update'
@@ -652,7 +652,48 @@ describe('a plan from a factory run', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks } as never)
     expect(parsePlanOutcome(String(r.result))).toEqual({ changes: 'Split the middleware task' })
+    expect(parsePlanOutcome(planChangesForFactory(''))).toEqual({ changes: '' })
     expect(String(r.result)).toMatch(/spec-writer revises the spec; don't propose a plan yourself/)
+  })
+
+  test("the person's own goal stays: the factory's plan is refused, and asks in its own band", async ($, on) => {
+    const w = engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship the CSV export' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['Write the exporter', 'Add tests'] } as never)
+    await $.tool.call({ tool: UPDATE, id: 't1', status: 'done' } as never)
+    const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks } as never)
+    expect(String(r.result)).toBe(PLAN_KEPT_FOR_FACTORY)
+    expect(parsePlanOutcome(String(r.result))).toEqual({ kept: true })
+    expect(w.asked).toHaveLength(1)
+    const g = w.saved['goal:/repo'] as Goal
+    expect(g.text).toBe('Ship the CSV export')
+    expect(g.source).toBeUndefined()
+    expect(g.tasks.map(t => t.status)).toEqual(['done', 'pending'])
+  })
+
+  test("a regular plan's answers are not the factory's", async ($, on) => {
+    engine(on, { answers: ['Approve, run through', 'Change it'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    const approved = await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
+    expect(String(approved.result)).toMatch(/^Approved\./)
+    expect(parsePlanOutcome(String(approved.result))).toBeNull()
+    const changed = await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
+    expect(String(changed.result)).toMatch(/^The person wants changes to the plan/)
+    expect(parsePlanOutcome(String(changed.result))).toBeNull()
+  })
+
+  test("a factory plan starts fresh: a finished goal's done tasks aren't carried in", async ($, on) => {
+    const w = engine(on, { answers: ['Approve, run through', 'Approve, start building'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One'] } as never)
+    await $.tool.call({ tool: UPDATE, id: 't1', status: 'done' } as never)
+    await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks } as never)
+    const g = w.saved['goal:/repo'] as Goal
+    expect(g.text).toBe('Rate limiter')
+    expect(g.tasks.map(t => [t.id, t.title])).toEqual([['t1', 'Token bucket core'], ['t2', 'Middleware with Retry-After']])
   })
 
   test("approved later in the Goal pane, it's passed on with /factory plan-approved", async ($, on) => {

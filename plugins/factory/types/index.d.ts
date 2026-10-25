@@ -7,9 +7,20 @@ export type Finding = { severity: Severity; where: string; text: string }
 // A task of the spec's breakdown: what goes to goal-run's plan.
 export type SpecTask = { title: string; priority: 'high' | 'medium' | 'low'; dependsOn: number[] }
 export type Check = { cmd: string; ok: boolean; tail: string }
-export type Review = { role: Reviewer; state: StepState; findings: Finding[]; tokens: number; round: number }
+// agentId: the reviewer's agent this round (null until started), so a late answer from an earlier one is ignored.
+export type Review = { role: Reviewer; state: StepState; findings: Finding[]; tokens: number; round: number; agentId: string | null }
 // Where the run is: each phase waits on one thing (an agent, the checks, the person).
-export type Phase = 'spec' | 'plan' | 'build' | 'checks' | 'review' | 'approve' | 'needs-human' | 'done' | 'stopped'
+// 'ready': the approver said APPROVE; the PR waits for the person's Open PR.
+export type Phase = 'spec' | 'plan' | 'build' | 'checks' | 'review' | 'approve' | 'ready' | 'needs-human' | 'done' | 'stopped'
+// Why a run is at needs-human: what stopped it decides what the person can do (Approve only after an
+// ESCALATE; Retry for the rest).
+export type Blocked =
+  | { on: 'escalate' }
+  | { on: 'spec' }
+  | { on: 'builder' }
+  | { on: 'checks' }
+  | { on: 'setup' }
+  | { on: 'start'; role: Role }
 
 export type Run = {
   feature: string
@@ -32,6 +43,12 @@ export type Run = {
   agents: Record<string, Role>
   // What the person or the approver said last: the reason a run waits on them.
   note: string
+  blocked: Blocked | null
+  // Who approves the plan: goal-run's dialog, or the factory's own band (no goal-run, or the person
+  // has a goal of their own).
+  gate: 'goal-run' | 'factory'
+  // The dependencies were installed in the worktree (the setup command ran).
+  setupDone: boolean
 }
 
 declare module 'claude-code' {

@@ -87,6 +87,16 @@ export function detectChecks(files: string[], packageJson: string | null): strin
   return out
 }
 
+// A fresh worktree has no installed dependencies: with no `setup` set, the lockfile says how to
+// install them. Nothing when they're there already (or the project isn't one of these).
+export function detectSetup(files: string[]): string[] | null {
+  if (!files.includes('package.json') || files.includes('node_modules')) return null
+  if (files.includes('pnpm-lock.yaml')) return ['pnpm', 'install', '--frozen-lockfile']
+  if (files.includes('yarn.lock')) return ['yarn', 'install', '--frozen-lockfile']
+  if (files.includes('package-lock.json')) return ['npm', 'ci']
+  return ['npm', 'install']
+}
+
 // The last lines of a failing command's output: enough for the builder, short for the pane.
 export const tailOf = (text: string, lines = 30) => text.trim().split('\n').slice(-lines).join('\n')
 
@@ -129,7 +139,7 @@ export function buildPrompt(run: Run, findings: Finding[], failed: Check[]): str
 export function reviewPrompt(run: Run, role: Reviewer, stat: string): string {
   return [
     `Review the change for: ${run.feature}`,
-    `The spec is ${run.specFile}. The change is the diff from ${run.base.slice(0, 12)} on branch ${run.branch}, in the repository you are started in (git diff ${run.base.slice(0, 12)}).`,
+    `The spec is ${run.specFile}. The change is the commits on branch ${run.branch} since ${run.base.slice(0, 12)}, in the repository you are started in (git diff ${run.base.slice(0, 12)}..HEAD): exactly what will be pushed.`,
     stat ? `Files changed:\n${stat}` : '',
     `Look only at what a ${role} review covers. Don't change any file.`,
     'End your answer with exactly:',
@@ -179,8 +189,11 @@ export function prPrompt(run: Run, reason: string): string {
 
 // ---------- a run ----------
 
-export function newRun(feature: string, at: number, base: string, root: string): Run {
-  const slug = slugOf(feature)
+// The worktrees sit next to the repository, in <repo>.factory/, so nothing in the main checkout
+// (test runners, linters, indexers) scans a second copy of the code.
+export const worktreeOf = (root: string, slug: string) => `${root.replace(/[\\/]+$/, '')}.factory/${slug}`
+
+export function newRun(feature: string, at: number, base: string, root: string, slug = slugOf(feature)): Run {
   const step = (): { state: StepState; tokens: number } => ({ state: 'wait', tokens: 0 })
   return {
     feature: feature.trim(),
@@ -191,18 +204,23 @@ export function newRun(feature: string, at: number, base: string, root: string):
     startedAt: at,
     base,
     branch: `factory/${slug}`,
-    worktree: `${root.replace(/[\\/]$/, '')}/.factory/${slug}`,
+    worktree: worktreeOf(root, slug),
     specFile: `docs/specs/${slug}.md`,
     tasks: [],
     steps: { spec: { state: 'run', tokens: 0 }, builder: step(), checks: step(), approver: step() },
     checks: [],
-    reviews: REVIEWERS.map(role => ({ role, state: 'wait' as StepState, findings: [], tokens: 0, round: 0 })),
+    reviews: REVIEWERS.map(role => ({ role, state: 'wait' as StepState, findings: [], tokens: 0, round: 0, agentId: null })),
     agents: {},
     note: 'writing the spec',
+    blocked: null,
+    gate: 'goal-run',
+    setupDone: false,
   }
 }
 
 export const isLive = (p: Phase) => p !== 'done' && p !== 'stopped'
+// Waiting for the person, not for an agent or a command.
+export const waitsOnPerson = (p: Phase) => p === 'plan' || p === 'ready' || p === 'needs-human'
 export const tokensOf = (run: Run) => Object.values(run.steps).reduce((n, s) => n + s.tokens, 0) + run.reviews.reduce((n, r) => n + r.tokens, 0)
 export const tok = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n}`)
 
