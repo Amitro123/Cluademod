@@ -18,6 +18,15 @@ export function parseStartPrompt(text: string): StartItem[] {
   return out
 }
 
+// A tool's answer as text, however it arrives: a string, MCP content blocks, or `{ content }`
+// (what a classic PostToolUse hook gets as tool_response).
+export function toolText(response: unknown): string {
+  if (typeof response === 'string') return response
+  const blocks = Array.isArray(response) ? response : (response as { content?: unknown } | null)?.content
+  if (Array.isArray(blocks)) return blocks.map(b => String((b as { text?: unknown })?.text ?? '')).join('\n')
+  return response == null ? '' : JSON.stringify(response)
+}
+
 // followups: what its done tool answers.
 export const doneResult = (title: string, note: string) => `Marked "${title}" done${note ? ` (${note})` : ''}.`
 

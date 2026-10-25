@@ -6,7 +6,7 @@ import { faceText, KIND_COLOR, SCENE, sceneSvg } from './art'
 import { GRAPH, graphSvg, routeOf } from './graph'
 import type { Theme } from './graph'
 import { diffBrain, FOLDERS, lessonCount, logPrompt, parseMemory, parseMistakes, unrouted, withListing } from './brain'
-import { GOAL_REACHED, parseDoneResult, parseGoalClosedNote, parseGoalPrompt, parseStartPrompt } from './texts'
+import { GOAL_REACHED, parseDoneResult, parseGoalClosedNote, parseGoalPrompt, parseStartPrompt, toolText } from './texts'
 
 const brain = atom({ plugin: 'brain-hud', key: 'brain' } as const, null as Brain | null)
 const pulse = atom({ plugin: 'brain-hud', key: 'pulse' } as const, null as Pulse | null)
@@ -144,6 +144,26 @@ async function logIt($: EngineInterface, o: Offer, type: EntryType) {
   })
 }
 
+// A follow-up Claude finished may be worth remembering: a bug as a mistake, else a success.
+async function followupDone($: EngineInterface, rawId: unknown, result: string) {
+  const m = parseDoneResult(result)
+  if (!m) return
+  const id = String(rawId ?? '')
+  const item = (await read($, started)).find(x => x.id === id)
+  const types: EntryType[] = item?.isBug ? ['mistake', 'success', 'decision'] : ['success', 'decision', 'mistake']
+  await offer($, { key: `fu:${id || m.title}`, from: 'followups', title: m.title, detail: m.note, types })
+}
+
+async function goalPlanned($: EngineInterface, rawGoal: unknown) {
+  const text = String(rawGoal ?? '').trim()
+  if (text) await update($, goalText, () => text)
+}
+
+// A reached goal: a success to repeat, a handoff for what comes next, or the decisions it took.
+async function goalUpdated($: EngineInterface, result: string) {
+  if (result.includes(GOAL_REACHED)) await offerGoal($, (await read($, goalText)) || 'the session goal')
+}
+
 // One reached-goal offer at a time, whichever signal comes first.
 async function offerGoal($: EngineInterface, text: string) {
   await offer($, { key: 'goal', from: 'goal-run', title: `Reached the goal: ${text}`, detail: '', types: ['success', 'handoff', 'decision'] })
@@ -195,6 +215,7 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'brain' }, async ($) => {
+    await readTheme($)
     await refresh($)
     await $.ui.open({ id: PANE, title: PANE_TITLE })
     return { text: (await read($, brain)) ? 'Opened the Brain pane.' : 'No mistake-brain memory in this project yet: /mistake-brain init sets one up.' }
@@ -202,6 +223,8 @@ export const register: Register = on => {
 
   on('turn.start', async ($, e, next) => {
     await checkFollow($)
+    // A theme changed in /config mid-session reaches the graph from the next prompt on.
+    await readTheme($)
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -230,15 +253,13 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // A follow-up Claude finished may be worth remembering: a bug as a mistake, else a success.
+  // The other mods' tools are answered by their owners' tool.call hooks, which don't call next: a
+  // hook here on those tools runs only while brain-hud sits above the owner, an order the engine
+  // doesn't promise. So each one is also read from the classic PostToolUse event, which sees every
+  // call whatever the order; an offer is made once, whichever comes first.
   on('tool.call', { tool: FOLLOWUPS_DONE }, async ($, e, next) => {
     const r = await next(e)
-    const m = parseDoneResult(String(r.result ?? ''))
-    if (!m) return r
-    const id = String((e as unknown as { id?: unknown }).id ?? '')
-    const item = (await read($, started)).find(x => x.id === id)
-    const types: EntryType[] = item?.isBug ? ['mistake', 'success', 'decision'] : ['success', 'decision', 'mistake']
-    await offer($, { key: `fu:${id || m.title}`, from: 'followups', title: m.title, detail: m.note, types })
+    await followupDone($, (e as unknown as { id?: unknown }).id, String(r.result ?? ''))
     // goal-run notes on the same result when this item closed the goal's last task (seen when
     // goal-run's hook runs beneath this one).
     for (const c of r.context ?? []) {
@@ -250,16 +271,23 @@ export const register: Register = on => {
 
   on('tool.call', { tool: GOAL_PLAN }, async ($, e, next) => {
     const r = await next(e)
-    const text = String((e as unknown as { goal?: unknown }).goal ?? '').trim()
-    if (text) await update($, goalText, () => text)
+    await goalPlanned($, (e as unknown as { goal?: unknown }).goal)
     return r
   }).catch(($, e, next) => next(e))
 
-  // A reached goal: a success to repeat, a handoff for what comes next, or the decisions it took.
   on('tool.call', { tool: GOAL_UPDATE }, async ($, e, next) => {
     const r = await next(e)
-    if (!String(r.result ?? '').includes(GOAL_REACHED)) return r
-    await offerGoal($, (await read($, goalText)) || 'the session goal')
+    await goalUpdated($, String(r.result ?? ''))
+    return r
+  }).catch(($, e, next) => next(e))
+
+  on('classic.PostToolUse', async ($, e, next) => {
+    const r = await next(e)
+    const input = (e.tool_input ?? {}) as { id?: unknown; goal?: unknown }
+    const text = toolText(e.tool_response)
+    if (e.tool_name === FOLLOWUPS_DONE) await followupDone($, input.id, text)
+    else if (e.tool_name === GOAL_PLAN) await goalPlanned($, input.goal)
+    else if (e.tool_name === GOAL_UPDATE) await goalUpdated($, text)
     return r
   }).catch(($, e, next) => next(e))
 
@@ -297,9 +325,9 @@ export const register: Register = on => {
             <Text bold color={ACCENT} wrap="truncate-end">{`🧠 Worth remembering? ${o.title}`}</Text>
             <Box flexDirection="row" gap={1}>
               {(showAll ? o.types : o.types.slice(0, 1)).map((type, i) => (
-                <Button key={`log-${type}`} label={`Log as ${type}`} hotkey={String(i + 1)} variant={i === 0 ? 'primary' : undefined} onPress={() => logIt($, o, type)} />
+                <Button key={`log-${type}`} label={`Log as ${type}`} {...(i === 0 ? { hotkey: 'l' } : {})} variant={i === 0 ? 'primary' : undefined} onPress={() => logIt($, o, type)} />
               ))}
-              {showAll ? null : <Button key="log-more" label="…" onPress={() => update($, more, () => o.key)} />}
+              {showAll ? null : <Button key="log-more" label="…" hotkey="m" onPress={() => update($, more, () => o.key)} />}
               <Button key="log-skip" label="Not now" onPress={() => update($, offers, l => l.filter(x => x.key !== o.key))} />
             </Box>
           </Box>

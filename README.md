@@ -239,9 +239,10 @@ The [mistake-brain](https://github.com/Keshet-Broadcasting/agent-brain-org) skil
     - What just changed is marked ✦.
 - **With the other mods.**
   - **followups:** when Claude finishes a to-do item you started (its `done` tool), the band asks *Worth remembering?* in one line: **Log as** the suggested type (a bug as a mistake, anything else as a success), **…** for the other types, and **Not now**. A press asks Claude to log it with `/mistake-brain log`, so the entry keeps the skill's format.
-  - **goal-run:** a reached goal is offered as a success or a handoff, named as you set it. That includes a goal a to-do item closed: goal-run says so on followups' `done` result.
-  - The offer's buttons have hotkeys `1`, `2`, `3`, so they don't clash with followups' (`a`, `s`) or goal-run's (`g`, `k`, `c`, `n`) in the same band.
+  - **goal-run:** a reached goal is offered as a success or a handoff, named as you set it. A goal a to-do item closed is offered too when goal-run's note on followups' `done` result reaches brain-hud; that depends on the order the mods load in (see below).
+  - The offer's hotkeys are `l` (log as the suggested type) and `m` (the other types), clear of followups' (`a`, `s`) and goal-run's (`g`, `k`, `c`, `n`) in the same band. No digits: Claude Code passes a digit typed into an empty prompt box to the band, so a prompt starting with `1.` would have logged to memory.
   - A **handoff** entry in the pane has **+ to-do**, which adds it to followups' list with `/followup`.
+  - **How they hear each other.** followups and goal-run answer their own tools (`done`, `plan`, `update`) and stop there, so another mod's hook on those tools runs only when that mod sits above the owner, and Claude Code doesn't promise an order among installed mods. brain-hud and goal-run therefore also read each of those calls from the `PostToolUse` event, which every mod sees whatever the order; an offer, or a task closed, happens once whichever arrives first. Not yet checked in a live session with all the mods installed: with `claude --debug`, a line `<event> bypassed by <plugin>` for these tools would mean a hook was skipped.
 - In a project with no `MISTAKES.md` and no `.agent-brain/` the mod stays quiet; the pane says that `/mistake-brain init` sets one up.
 
 ### The memory graph
