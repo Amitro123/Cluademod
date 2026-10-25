@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
-import { GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseStartPrompt } from './texts'
+import { GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, toolText } from './texts'
 // The goal-run tests import the start-prompt parser from here, as before it was shared.
 export { parseStartPrompt }
 
@@ -263,6 +263,28 @@ async function approve($: EngineInterface, pace: Pace) {
 // The to-do items a followups Start prompt names, from its lines "- id <id>: <title>[ (bug)][ — detail][ [where: …]]".
 
 const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ')
+
+// Closes the goal task a done to-do item became, and notes it for a side job still waiting to be
+// added. Returns the goal's text when that closed the goal, else ''.
+async function closeFromTodo($: EngineInterface, ref: string): Promise<string> {
+  const g = await read($, goal)
+  const task = g?.tasks.find(t => t.followupId && (t.followupId === ref || norm(t.title) === norm(ref)))
+  let reached = ''
+  if (g && task && task.status !== 'done') {
+    await setGoal($, cur => (cur ? withStatus(cur, task.id, 'done') : cur))
+    const now = await read($, goal)
+    if (now?.status === 'done') {
+      $.ui.toast(goalReachedToast(now.text))
+      reached = now.text
+    }
+  }
+  await update($, side, cur => {
+    if (!cur) return cur
+    const item = cur.items.find(it => it.id === ref || norm(it.title) === norm(ref))
+    return item && !cur.doneIds.includes(item.id) ? { ...cur, doneIds: [...cur.doneIds, item.id] } : cur
+  })
+  return reached
+}
 
 // One task moved to a status, the goal's active task and done-ness kept in step.
 export function withStatus(g: Goal, id: string, status: TaskStatus): Goal {
@@ -549,29 +571,23 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   // A to-do item followups marks done closes the goal task it became (or will become, if added later).
+  // This hook runs only while goal-run sits above followups, whose own hook answers the tool; the
+  // PostToolUse hook below sees the call whatever the order. Closing twice changes nothing.
   on('tool.call', { tool: TODO_DONE_TOOL }, async ($, e, next) => {
     const r = await next(e)
-    if (('deny' in r && r.deny) || !String(r.result ?? '').startsWith('Marked')) return r
-    const ref = String((e as unknown as { id?: unknown }).id ?? '').trim()
-    const g = await read($, goal)
-    const task = g?.tasks.find(t => t.followupId && (t.followupId === ref || norm(t.title) === norm(ref)))
-    let reached = ''
-    if (g && task && task.status !== 'done') {
-      await setGoal($, cur => (cur ? withStatus(cur, task.id, 'done') : cur))
-      const now = await read($, goal)
-      if (now?.status === 'done') {
-        $.ui.toast(goalReachedToast(now.text))
-        reached = now.text
-      }
-    }
-    await update($, side, cur => {
-      if (!cur) return cur
-      const item = cur.items.find(it => it.id === ref || norm(it.title) === norm(ref))
-      return item ? { ...cur, doneIds: [...cur.doneIds, item.id] } : cur
-    })
+    if (('deny' in r && r.deny) || !parseDoneResult(String(r.result ?? ''))) return r
+    const reached = await closeFromTodo($, String((e as unknown as { id?: unknown }).id ?? '').trim())
     // Claude (and brain-hud) learn the goal is reached on this path too.
     if (!reached || 'deny' in r) return r
     return { ...r, context: [...(r.context ?? []), goalClosedNote(reached)] }
+  }).catch(($, e, next) => next(e))
+
+  on('classic.PostToolUse', async ($, e, next) => {
+    const r = await next(e)
+    if (e.tool_name === TODO_DONE_TOOL && parseDoneResult(toolText(e.tool_response))) {
+      await closeFromTodo($, String((e.tool_input as { id?: unknown } | null)?.id ?? '').trim())
+    }
+    return r
   }).catch(($, e, next) => next(e))
 
   // Running through: a turn that ends with pending tasks left is sent on once, to the next one. Claude
