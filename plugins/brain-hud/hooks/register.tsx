@@ -5,7 +5,8 @@ import type { Brain, EntryType, Folder, Offer, Pulse, PulseKind } from '../types
 import { faceText, KIND_COLOR, SCENE, sceneSvg } from './art'
 import { GRAPH, graphSvg, routeOf } from './graph'
 import type { Theme } from './graph'
-import { diffBrain, FOLDERS, lessonCount, logPrompt, parseMemory, parseMistakes, unrouted, withListing } from './brain'
+import { diffBrain, FOLDERS, lessonCount, logPrompt, paraStats, parseMemory, parseMistakes, unrouted, withListing } from './brain'
+import type { ParaFile } from './brain'
 import { GOAL_REACHED, parseDoneResult, parseGoalClosedNote, parseGoalPrompt, parseStartPrompt, toolText } from './texts'
 
 const brain = atom({ plugin: 'brain-hud', key: 'brain' } as const, null as Brain | null)
@@ -82,10 +83,16 @@ async function scan($: EngineInterface): Promise<Brain | null> {
   }
   if (mistakes === null && memory === null) return null
   const parsed = parseMemory(memory ?? '')
-  const onDisk: Partial<Record<Folder, string[]>> = {}
+  // Each PARA file is read too, so its lessons are counted from the file itself.
+  const onDisk: Partial<Record<Folder, ParaFile[]>> = {}
   for (const f of FOLDERS) {
     const list = await $.fs.list(await rootPath($, `${PARA_ROOT}/${f}`)).catch(() => [])
-    onDisk[f] = list.filter(x => x.kind === 'file' && x.name.endsWith('.md')).map(x => x.name)
+    const files: ParaFile[] = []
+    for (const x of list.filter(x => x.kind === 'file' && x.name.endsWith('.md'))) {
+      const text = await readOr($, `${PARA_ROOT}/${f}/${x.name}`)
+      files.push(text === null ? { file: x.name, lessons: -1, updated: '', summary: '' } : paraStats(x.name, text))
+    }
+    onDisk[f] = files
   }
   return { ...parsed, folders: withListing(parsed.folders, onDisk), entries: parseMistakes(mistakes ?? ''), index }
 }
@@ -95,6 +102,11 @@ async function stamp($: EngineInterface): Promise<string> {
   for (const p of [MISTAKES, ...MEMORY_PATHS]) {
     const st = await $.fs.stat(await rootPath($, p)).catch(() => null)
     parts.push(st ? `${st.mtimeMs}:${st.size}` : '-')
+  }
+  // The PARA files too: a lesson can land there with no change to the index.
+  for (const f of FOLDERS) {
+    const list = await $.fs.list(await rootPath($, `${PARA_ROOT}/${f}`)).catch(() => [])
+    parts.push(list.map(x => `${x.name}:${x.mtimeMs}:${x.size}`).sort().join(','))
   }
   return parts.join('|')
 }
@@ -392,11 +404,12 @@ export const register: Register = on => {
     const fresh = (title: string) => (p && (p.title === title || p.file === title) ? '✦ ' : '')
     const waiting = unrouted(b)
     // Where the index came from, said whenever it explains what the graph shows.
-    const unindexed = FOLDERS.reduce((n, f) => n + b.folders[f].filter(l => !l.isIndexed).length, 0)
+    const missing = FOLDERS.flatMap(f => b.folders[f].filter(l => !l.isIndexed).map(l => l.file))
+    const unindexed = missing.length
     const problem = b.index === null
       ? `No index found: neither ${MEMORY_PATHS.join(' nor ')} exists, so no lessons are counted.`
       : unindexed
-        ? `${unindexed} PARA file${unindexed === 1 ? ' is' : 's are'} not in ${b.index}${lessonCount(b) ? '' : ', and it lists no lessons'}.`
+        ? `${unindexed} PARA file${unindexed === 1 ? ' is' : 's are'} not in ${b.index}: ${missing.slice(0, 3).join(', ')}${unindexed > 3 ? ', …' : ''}`
         : ''
 
     return (
