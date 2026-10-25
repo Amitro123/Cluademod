@@ -65,8 +65,8 @@ export function diagramSvg(run: Run, frame: number, theme: Theme = 'light'): str
   const bx = cx - bw / 2
   s += box(bx, 10, bw, 44, ROLES.spec.label, ROLES.spec.model, run.steps.spec.state, run.steps.spec.tokens ? `${tok(run.steps.spec.tokens)} tokens · ${run.tasks.length} tasks` : 'writing the spec')
   s += arrow(54, 72)
-  s += box(bx, 72, bw, 40, 'plan approval', 'you', st.planState, st.planState === 'run' ? 'waiting for you (Goal pane or here)' : '')
-  s += arrow(112, 130)
+  s += box(bx, 72, bw, 44, 'plan approval', 'you', st.planState, st.planState === 'run' ? 'waiting for you (Goal pane or here)' : '')
+  s += arrow(116, 130)
   s += box(bx, 130, bw, 44, buildRound(run) > 1 ? `builder · round ${buildRound(run)}` : 'builder', ROLES.builder.model, run.steps.builder.state, run.steps.builder.tokens ? `${tok(run.steps.builder.tokens)} tokens` : '')
   s += arrow(174, 192)
   s += box(bx, 192, bw, 44, run.checkRound > 1 ? `checks · pass ${run.checkRound}` : 'checks', 'no model', run.steps.checks.state, checksLine(run))

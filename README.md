@@ -262,6 +262,10 @@ Tests: `claude plugin test plugins/brain-hud`.
 
 ## factory: a software factory
 
+![factory: the Factory pane mid-run, with the reviewers' verdicts and the builder on round 2; the band above the prompt; the same pipeline in the terminal](assets/factory.png)
+
+<sub>The diagram and the terminal lines are the mod's own output (`art.ts`) for a sample run; the windows around them are mock-ups.</sub>
+
 A feature goes in and a reviewed PR comes out. Each step is a sub-agent with its own role and model, and the mod runs the order as code, so no step is skipped: the reviews always happen, every reviewer is waited for, and the round limit holds. It's aimed at backend work, so it runs no UI checks.
 
 ```text
@@ -287,6 +291,10 @@ A feature goes in and a reviewed PR comes out. Each step is a sub-agent with its
 3. **Build and checks.** The builder implements the tasks in the worktree, marks them in goal-run as it goes, and commits. Then the checks run with no model: the `checks` option, or what the project has (`npm test` and its `lint` and `typecheck` scripts, `pytest`, `go test`, `cargo test`). A failure goes back to the builder with its output, twice at most; reviewers only ever see a green build.
 4. **Reviews.** The security and code reviewers read the spec and the diff in parallel. Each ends with `VERDICT: PASS` or `VERDICT: CHANGES` and findings tagged `blocker`, `major` or `minor`. A missing verdict counts as changes, and so does a PASS that lists a blocker. With changes and rounds left (`maxRounds`, 2 by default), a fresh builder gets the findings, and only the reviewers who asked for changes look again.
 5. **The approver** reads the spec, the diff and the verdicts. **APPROVE** sends the main Claude a prompt to push the branch and open a PR, with the spec in it and the minor findings listed under "Not fixed". **ESCALATE**, or an agent that fails, stops the run at *needs-human* with the reason.
+
+![A run in four diagrams: the plan waiting for approval; both reviewers at once; code asks for changes and the builder goes to round 2; both PASS, the approver says APPROVE and the PR opens](assets/factory-flow.png)
+
+<sub>The pane's diagram at four points of one run, in the light theme.</sub>
 
 ### What you see
 
