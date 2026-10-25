@@ -4,7 +4,7 @@
     "name": "Amit Rosen",
     "url": "https://github.com/Amitro123"
   },
-  "description": "Claude Code mods: a pixel spark HUD, a task/sub-agent HUD, a follow-ups tracker, an RTL toggle and a session goal runner",
+  "description": "Claude Code mods: a pixel spark HUD, a task/sub-agent HUD, a follow-ups tracker, an RTL toggle, a session goal runner and an agent-memory view",
   "plugins": [
     {
       "name": "clawd-hud",
@@ -30,6 +30,11 @@
       "name": "goal-run",
       "source": "./plugins/goal-run",
       "description": "Set a session goal, approve Claude's plan, and watch a pixel Claude in running shoes run it to 100%, with each task's token cost"
+    },
+    {
+      "name": "brain-hud",
+      "source": "./plugins/brain-hud",
+      "description": "A pixel Claude with a brain reacts to each MISTAKES.md entry, and a pane draws the mistake-brain memory as a tree"
     }
   ]
 }

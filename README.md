@@ -1,6 +1,6 @@
 # claudemod: mods for Claude Code
 
-Five mods, each installed on its own. They also work side by side: each draws its part of the band above the prompt, and the others' parts stay.
+Six mods, each installed on its own. They also work side by side: each draws its part of the band above the prompt, and the others' parts stay.
 
 | Mod | What it does |
 |---|---|
@@ -9,6 +9,7 @@ Five mods, each installed on its own. They also work side by side: each draws it
 | [followups](#followups-dont-lose-what-claude-notices) | Claude flags what it notices, asks whether to track it, and keeps a to-do you can export |
 | [rtl-toggle](#rtl-toggle-hebrew-and-english-on-one-line) | Fixes the reading order of lines that mix English and Hebrew |
 | [goal-run](#goal-run-a-goal-for-the-session) | Asks for a goal when a session starts, has Claude plan it, and runs a pixel Claude to 100% as the tasks get done |
+| [brain-hud](#brain-hud-the-agents-memory-made-visible) | A pixel Claude with a brain reacts to each entry Claude logs to `MISTAKES.md`, and a pane draws the project's memory as a tree |
 
 Add the marketplace once, then install the ones you want:
 
@@ -203,6 +204,44 @@ Tests: `claude plugin test plugins/rtl-toggle`.
 - `askOnStart` (`on` / `off`) turns the start-of-session question off.
 
 Tests: `claude plugin test plugins/goal-run`.
+
+## brain-hud: the agent's memory, made visible
+
+![brain-hud: a scene above the prompt for each kind of memory event, offers from followups and goal-run, and the Brain pane with the brain map and the memory tree](assets/brain-hud.png)
+
+<sub>The scenes and the brain map are the mod's own SVG output; the windows around them are mock-ups. The data is agent-brain-org's own memory, with one new lesson just routed into Projects (✦).</sub>
+
+The [mistake-brain](https://github.com/Keshet-Broadcasting/agent-brain-org) skill gives an agent a memory that lasts between sessions. Claude logs what happened to `MISTAKES.md` (a mistake, a success, a decision or a handoff). It routes those entries into PARA folders under `.agent-brain/shared/` (Projects, Areas, Resources, Archives), promotes a lesson that repeats into a rule, and now and then reorganizes the memory ("dream"). brain-hud shows that memory as it grows. It only reads: logging, routing and promoting stay with the skill.
+
+```text
+/plugin install brain-hud@claudemod
+```
+
+- **A pixel Claude with a brain**, above the prompt, plays a short scene whenever the memory changes:
+
+| Event | Scene |
+|---|---|
+| a `mistake` entry | a spark off the brain, then a plaster on it |
+| a `success` entry | the brain glows green, with a star |
+| a `decision` entry | a signpost, the chosen arm lit |
+| a `handoff` entry | a note passed on |
+| an entry routed into a folder | notes fly from the brain into the folder |
+| a rule promoted | a stamp comes down on a rule sheet |
+| a dream | Claude asleep, Zs rising |
+
+  In the terminal the scene is a text face, e.g. `🧠ϟ(>_<)` for a mistake. A write through Claude's Edit or Write shows at once; a change from anywhere else (the skill's own hooks, a script) is picked up within a few seconds.
+- **A Brain pane** (opens on the first change, or with `/brain`) draws the memory as a tree. The header counts the lessons and the inbox, says how many entries are still unrouted, how many rules have been promoted, and when the last dream was. On desktop a brain map shows four lobes, one per PARA folder, brighter the more lessons it holds, with the inbox as a stack of notes beside it. Below it:
+  - **📥 Inbox**: the newest `MISTAKES.md` entries, colored by type, with their status.
+  - **📁 Projects, Areas, Resources** and **🗄 Archives**: each PARA file with its lesson count, date and summary from `MEMORY.md`. A file on disk that `MEMORY.md` doesn't name shows as *not in MEMORY.md*, the gap the skill's dream fixes.
+  - **⚖ Rules**: what has been promoted.
+  - What just changed is marked ✦, and its lobe lights up on the map.
+- **With the other mods.**
+  - **followups:** when Claude finishes a to-do item you started (its `done` tool), the band asks *Worth remembering?* with **Log as mistake**, **Log as success** or **Log as decision**. A bug is offered as a mistake first. A press asks Claude to log it with `/mistake-brain log`, so the entry keeps the skill's format.
+  - **goal-run:** a reached goal is offered as a success or a handoff.
+  - A **handoff** entry in the pane has **+ to-do**, which adds it to followups' list with `/followup`.
+- In a project with no `MISTAKES.md` and no `.agent-brain/` the mod stays quiet; the pane says that `/mistake-brain init` sets one up.
+
+Tests: `claude plugin test plugins/brain-hud`.
 
 ## Developing
 
