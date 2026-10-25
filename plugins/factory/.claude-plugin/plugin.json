@@ -1,0 +1,24 @@
+{
+  "name": "factory",
+  "version": "0.1.0",
+  "description": "A software factory: /factory <feature> writes a spec, has you approve its plan (in goal-run when it's installed), builds it on a branch, runs the checks and parallel reviews, and asks an approver before Claude opens the PR. Its pane draws where the run is",
+  "author": { "name": "Amit Rosen", "url": "https://github.com/Amitro123" },
+  "repository": "https://github.com/Amitro123/claudemod",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "checks": {
+      "type": "string",
+      "title": "Check commands",
+      "description": "Commands the factory runs after each build, separated by ; (no shell), e.g. npm test; npm run lint. Empty detects them from package.json, pyproject.toml, go.mod or Cargo.toml",
+      "default": ""
+    },
+    "maxRounds": {
+      "type": "string",
+      "title": "Review rounds",
+      "description": "How many times reviewers may send the builder back before the approver decides",
+      "default": "2",
+      "options": ["1", "2", "3"]
+    }
+  }
+}

@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const MODS = ['followups', 'goal-run', 'brain-hud']
+const MODS = ['followups', 'goal-run', 'brain-hud', 'factory']
 const source = readFileSync(join(root, 'shared/texts.ts'), 'utf8')
 const copy = `// GENERATED from shared/texts.ts by tools/sync-texts.mjs: edit that file, not this one.\n${source}`
 const check = process.argv.includes('--check')
