@@ -33,6 +33,8 @@ declare module 'claude-code' {
       // Follow-ups started from the to-do list (id → title, bug or not), and the goal being run.
       started: { id: string; title: string; isBug: boolean }[]
       goalText: string
+      // Whether the pane already opened by itself this session.
+      paneShown: boolean
     }
   }
 }

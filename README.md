@@ -230,14 +230,15 @@ The [mistake-brain](https://github.com/Keshet-Broadcasting/agent-brain-org) skil
 | a dream | Claude asleep, Zs rising |
 
   In the terminal the scene is a text face, e.g. `🧠ϟ(>_<)` for a mistake. A write through Claude's Edit or Write shows at once; a change from anywhere else (the skill's own hooks, a script) is picked up within a few seconds.
-- **A Brain pane** (opens on the first change, or with `/brain`) draws the memory as a tree. The header counts the lessons and the inbox, says how many entries are still unrouted, how many rules have been promoted, and when the last dream was. On desktop a brain map shows four lobes, one per PARA folder, brighter the more lessons it holds, with the inbox as a stack of notes beside it. Below it:
+- **A Brain pane** (opens by itself on the first change of a session, and any time with `/brain`) draws the memory as a tree. The header counts the lessons and the inbox, says how many entries are still unrouted, how many rules have been promoted, and when the last dream was. On desktop a brain map shows four lobes, one per PARA folder, brighter the more lessons it holds, with the inbox as a stack of notes beside it. Below it:
   - **📥 Inbox**: the newest `MISTAKES.md` entries, colored by type, with their status.
   - **📁 Projects, Areas, Resources** and **🗄 Archives**: each PARA file with its lesson count, date and summary from `MEMORY.md`. A file on disk that `MEMORY.md` doesn't name shows as *not in MEMORY.md*, the gap the skill's dream fixes.
   - **⚖ Rules**: what has been promoted.
   - What just changed is marked ✦, and its lobe lights up on the map.
 - **With the other mods.**
   - **followups:** when Claude finishes a to-do item you started (its `done` tool), the band asks *Worth remembering?* with **Log as mistake**, **Log as success** or **Log as decision**. A bug is offered as a mistake first. A press asks Claude to log it with `/mistake-brain log`, so the entry keeps the skill's format.
-  - **goal-run:** a reached goal is offered as a success or a handoff.
+  - **goal-run:** a reached goal is offered as a success or a handoff, named as you set it. That includes a goal a to-do item closed: goal-run says so on followups' `done` result.
+  - The offer's buttons have hotkeys `1`, `2`, `3`, so they don't clash with followups' (`a`, `s`) or goal-run's (`g`, `k`, `c`, `n`) in the same band.
   - A **handoff** entry in the pane has **+ to-do**, which adds it to followups' list with `/followup`.
 - In a project with no `MISTAKES.md` and no `.agent-brain/` the mod stays quiet; the pane says that `/mistake-brain init` sets one up.
 
@@ -253,6 +254,8 @@ tsc -p plugins/<mod>
 ```
 
 Run each mod's tests with `claude plugin test plugins/<mod>`; they don't need the types folder.
+
+The wording one mod writes and another reads (followups' Start prompt and `done` result, goal-run's goal prompt and reached-goal texts) lives in `shared/texts.ts`, together with its parsers. A mod can import nothing outside its folder, so followups, goal-run and brain-hud each keep a generated copy in `hooks/texts.ts`. Edit `shared/texts.ts`, then run `node tools/sync-texts.mjs`. CI runs it with `--check` and fails on a stale copy.
 
 ## License
 

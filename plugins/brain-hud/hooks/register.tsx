@@ -3,7 +3,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Brain, EntryType, Folder, Offer, Pulse, PulseKind } from '../types'
 import { brainMapSvg, faceText, KIND_COLOR, MAP, SCENE, sceneSvg } from './art'
-import { diffBrain, FOLDERS, lessonCount, logPrompt, parseMemory, parseMistakes, parseStartPrompt, unrouted, withListing } from './brain'
+import { diffBrain, FOLDERS, lessonCount, logPrompt, parseMemory, parseMistakes, unrouted, withListing } from './brain'
+import { GOAL_REACHED, parseDoneResult, parseGoalClosedNote, parseGoalPrompt, parseStartPrompt } from './texts'
 
 const brain = atom({ plugin: 'brain-hud', key: 'brain' } as const, null as Brain | null)
 const pulse = atom({ plugin: 'brain-hud', key: 'pulse' } as const, null as Pulse | null)
@@ -13,6 +14,7 @@ const open = atom({ plugin: 'brain-hud', key: 'open' } as const, ['Inbox'] as st
 const canFollow = atom({ plugin: 'brain-hud', key: 'canFollow' } as const, false)
 const started = atom({ plugin: 'brain-hud', key: 'started' } as const, [] as { id: string; title: string; isBug: boolean }[])
 const goalText = atom({ plugin: 'brain-hud', key: 'goalText' } as const, '')
+const paneShown = atom({ plugin: 'brain-hud', key: 'paneShown' } as const, false)
 
 const PANE = 'brain-hud'
 const PANE_TITLE = 'Brain'
@@ -45,6 +47,8 @@ let anim: { cancel: () => void } | null = null
 // The files' last modification times: a change made outside a tool call (the skill's own hooks,
 // a script) is caught by the poll. A reload reads them again once, which shows nothing new.
 let mtimes = ''
+// Refreshes run one at a time, so an Edit and the poll that see the same change show it once.
+let refreshing: Promise<void> = Promise.resolve()
 
 const lessons = (n: number) => `${n} ${n === 1 ? 'lesson' : 'lessons'}`
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
@@ -85,7 +89,12 @@ async function stamp($: EngineInterface): Promise<string> {
 }
 
 // Reads the memory again and shows what changed, if anything did.
-async function refresh($: EngineInterface) {
+function refresh($: EngineInterface): Promise<void> {
+  refreshing = refreshing.then(() => reread($), () => reread($))
+  return refreshing
+}
+
+async function reread($: EngineInterface) {
   mtimes = await stamp($)
   const before = await read($, brain)
   const after = await scan($)
@@ -98,7 +107,11 @@ async function show($: EngineInterface, ev: Omit<Pulse, 'at'>) {
   const t = await $.clock.now()
   await update($, pulse, () => ({ ...ev, at: t }))
   await update($, frame, () => t)
-  void $.ui.open({ id: PANE, title: PANE_TITLE })
+  // The pane opens by itself once a session; after that the band alone shows a change.
+  if (!(await read($, paneShown))) {
+    await update($, paneShown, () => true)
+    void $.ui.open({ id: PANE, title: PANE_TITLE })
+  }
   anim?.cancel()
   anim = $.clock.every(FRAME_MS, async () => {
     const now = await $.clock.now()
@@ -120,9 +133,16 @@ async function offer($: EngineInterface, o: Offer) {
 
 async function logIt($: EngineInterface, o: Offer, type: EntryType) {
   await update($, offers, list => list.filter(x => x.key !== o.key))
-  await $.prompt.submit({ text: logPrompt(type, o.title, o.detail) }).catch(() => {
-    $.ui.toast('Could not ask Claude to log it; try /mistake-brain log')
+  // Not awaited: the prompt waits for the session to be idle, and the press shouldn't.
+  void $.prompt.submit({ text: logPrompt(type, o.title, o.detail) }).catch(async () => {
+    await update($, offers, list => (list.some(x => x.key === o.key) ? list : [o, ...list]))
+    $.ui.toast('Could not ask Claude to log it; try again, or /mistake-brain log')
   })
+}
+
+// One reached-goal offer at a time, whichever signal comes first.
+async function offerGoal($: EngineInterface, text: string) {
+  await offer($, { key: 'goal', from: 'goal-run', title: `Reached the goal: ${text}`, detail: '', types: ['success', 'handoff', 'decision'] })
 }
 
 async function toFollowup($: EngineInterface, title: string) {
@@ -145,6 +165,8 @@ async function toggle($: EngineInterface, name: string) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     for (const timer of timers.splice(0)) timer.cancel()
+    anim?.cancel()
+    anim = null
     await $.command.register({ name: 'brain', description: "Show the agent's project memory (mistake-brain)" })
     await refresh($)
     timers.push($.clock.every(POLL_MS, async () => {
@@ -152,6 +174,13 @@ export const register: Register = on => {
     }))
     return next(e)
   })
+
+  on('session.end', async ($, e, next) => {
+    for (const timer of timers.splice(0)) timer.cancel()
+    anim?.cancel()
+    anim = null
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'brain' }, async ($) => {
     await refresh($)
@@ -175,11 +204,16 @@ export const register: Register = on => {
 
   // ---------- the other mods ----------
 
-  // followups' Start names the items it hands Claude; remembered so their "done" can be offered.
+  // followups' Start names the items it hands Claude, remembered so their "done" can be offered;
+  // goal-run's start prompt names the goal.
   on('prompt.submit', async ($, e, next) => {
     if (e.origin.kind === 'plugin' && e.origin.name === 'followups') {
-      const items = parseStartPrompt(e.text)
+      const items = parseStartPrompt(e.text).map(i => ({ id: i.id, title: i.title, isBug: Boolean(i.isBug) }))
       if (items.length) await update($, started, l => [...l.filter(x => !items.some(i => i.id === x.id)), ...items].slice(-20))
+    }
+    if (e.origin.kind === 'plugin' && e.origin.name === 'goal-run') {
+      const goal = parseGoalPrompt(e.text)
+      if (goal) await update($, goalText, () => goal)
     }
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -187,12 +221,18 @@ export const register: Register = on => {
   // A follow-up Claude finished may be worth remembering: a bug as a mistake, else a success.
   on('tool.call', { tool: FOLLOWUPS_DONE }, async ($, e, next) => {
     const r = await next(e)
-    const m = /^Marked "(.+)" done(?: \((.*)\))?\.$/.exec(String(r.result ?? ''))
+    const m = parseDoneResult(String(r.result ?? ''))
     if (!m) return r
     const id = String((e as unknown as { id?: unknown }).id ?? '')
     const item = (await read($, started)).find(x => x.id === id)
     const types: EntryType[] = item?.isBug ? ['mistake', 'success', 'decision'] : ['success', 'decision', 'mistake']
-    await offer($, { key: `fu:${id || m[1]}`, from: 'followups', title: m[1]!, detail: m[2] ?? '', types })
+    await offer($, { key: `fu:${id || m.title}`, from: 'followups', title: m.title, detail: m.note, types })
+    // goal-run notes on the same result when this item closed the goal's last task (seen when
+    // goal-run's hook runs beneath this one).
+    for (const c of r.context ?? []) {
+      const goal = parseGoalClosedNote(c)
+      if (goal) await offerGoal($, goal)
+    }
     return r
   }).catch(($, e, next) => next(e))
 
@@ -206,11 +246,11 @@ export const register: Register = on => {
   // A reached goal: a success to repeat, a handoff for what comes next, or the decisions it took.
   on('tool.call', { tool: GOAL_UPDATE }, async ($, e, next) => {
     const r = await next(e)
-    if (!/The goal is reached/.test(String(r.result ?? ''))) return r
-    const text = (await read($, goalText)) || 'the session goal'
-    await offer($, { key: `goal:${text}`, from: 'goal-run', title: `Reached the goal: ${text}`, detail: '', types: ['success', 'handoff', 'decision'] })
+    if (!String(r.result ?? '').includes(GOAL_REACHED)) return r
+    await offerGoal($, (await read($, goalText)) || 'the session goal')
     return r
   }).catch(($, e, next) => next(e))
+
 
   // ---------- the band ----------
 
@@ -244,7 +284,7 @@ export const register: Register = on => {
             <Text dimColor wrap="truncate-end">{o.from === 'followups' ? 'Finished from the to-do list. Claude logs it to MISTAKES.md with mistake-brain.' : 'Claude logs it to MISTAKES.md with mistake-brain.'}</Text>
             <Box flexDirection="row" gap={1}>
               {o.types.map((type, i) => (
-                <Button key={`log-${type}`} label={`Log as ${type}`} hotkey={type[0]} variant={i === 0 ? 'primary' : undefined} onPress={() => logIt($, o, type)} />
+                <Button key={`log-${type}`} label={`Log as ${type}`} hotkey={String(i + 1)} variant={i === 0 ? 'primary' : undefined} onPress={() => logIt($, o, type)} />
               ))}
               <Button key="log-skip" label="Not now" onPress={() => update($, offers, l => l.filter(x => x.key !== o.key))} />
             </Box>

@@ -3,8 +3,10 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { claudeCells, sceneSvg } from '../hooks/art'
-import { diffBrain, logPrompt, parseMemory, parseMistakes, parseStartPrompt, withListing } from '../hooks/brain'
+import { diffBrain, logPrompt, parseMemory, parseMistakes, withListing } from '../hooks/brain'
 import type { Brain } from '../types'
+// The wording followups and goal-run write, from the copy of shared/texts.ts they use too.
+import { doneResult, GOAL_REACHED, goalClosedNote, goalPrompt, parseStartPrompt, startLine } from '../hooks/texts'
 
 // Shaped like agent-brain-org's own files.
 const entry = (at: string, title: string, type: string | null, status = 'unrouted') =>
@@ -66,7 +68,7 @@ describe('reading the memory', () => {
   test("followups' Start prompt: ids, titles and bugs", () => {
     expect(parseStartPrompt('Work on:\n- id k1-a: Fix the upload (bug) — fails 1 in 5 [where: up.ts:4]\n- id k2-b: Update the docs')).toEqual([
       { id: 'k1-a', title: 'Fix the upload', isBug: true },
-      { id: 'k2-b', title: 'Update the docs', isBug: false },
+      { id: 'k2-b', title: 'Update the docs' },
     ])
   })
 })
@@ -85,6 +87,11 @@ describe('what changed', () => {
     const grown = base()
     grown.folders.Projects = [{ ...grown.folders.Projects[0]!, lessons: 30 }]
     expect(diffBrain(base(), grown)).toEqual({ kind: 'route', title: 'mistake-brain-skill.md', folder: 'Projects', file: 'mistake-brain-skill.md' })
+  })
+
+  test('an entry whose title was edited is not a new one', () => {
+    const retitled = { ...base(), entries: base().entries.map(e => ({ ...e, title: `${e.title} (reworded)` })) }
+    expect(diffBrain(base(), retitled)).toBeNull()
   })
 
   test('nothing new, nothing shown; the first reading shows nothing either', () => {
@@ -131,8 +138,13 @@ const buttons = async (ui: { findAll: (q: never) => Promise<unknown[]> }) =>
 
 // The engine beneath: a project in memory (files by path under /repo, each write bumps its time),
 // a clock, and the side calls the mod makes.
-function engine(on: On, files: Record<string, string>, { commands = ['followup'] as string[] } = {}) {
-  const w = { sent: [] as string[], ran: [] as string[], opened: [] as string[], times: {} as Record<string, number> }
+function engine(on: On, files: Record<string, string>, { commands = ['followup'] as string[], failSubmit = false, closesGoal = '' } = {}) {
+  const w = { sent: [] as string[], ran: [] as string[], opened: [] as string[], times: {} as Record<string, number>, pulses: 0 }
+  on('state.set', (_, e, next) => {
+    const { key, value } = e as { key?: string; value?: unknown }
+    if (key === 'pulse' && value) w.pulses++
+    return next(e)
+  })
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 24, 9) })
   const rel = (p: string) => p.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '').replace(/^\/repo\//, '')
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -164,13 +176,15 @@ function engine(on: On, files: Record<string, string>, { commands = ['followup']
   })
   on('ui.toast', () => ({ value: undefined }) as never)
   on('prompt.submit', (_, e) => {
+    if (failSubmit) throw new Error('not now')
     w.sent.push(e.text)
     return { text: e.text } as never
   })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }) as never)
   on('tool.call', (_, e) => {
-    if (e.tool === 'mcp__followups__done') return { result: 'Marked "Fix the upload" done (added a retry).' } as never
-    if (e.tool === 'mcp__goal-run__update') return { result: 't2 is done. 2/2 tasks done (100%). The goal is reached.' } as never
+    if (e.tool === 'mcp__followups__done') return { result: doneResult('Fix the upload', 'added a retry'), ...(closesGoal ? { context: [goalClosedNote(closesGoal)] } : {}) } as never
+    if (e.tool === 'mcp__goal-run__update') return { result: `t2 is done. 2/2 tasks done (100%). ${GOAL_REACHED}` } as never
     return { result: {} } as never
   })
   on('ui.render', ($, e) => {
@@ -181,7 +195,8 @@ function engine(on: On, files: Record<string, string>, { commands = ['followup']
     files[path] = text
     w.times[path] = (w.times[path] ?? 1) + 1
   }
-  return { ...w, clock, write }
+  // The same object, so counters read after the fact are the live ones.
+  return Object.assign(w, { clock, write })
 }
 
 const project = () => ({
@@ -248,11 +263,15 @@ describe('in a session', () => {
   test('a follow-up Claude finished is offered to memory; a bug as a mistake first', async ($, on) => {
     const w = engine(on, project())
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
-    await $.prompt.submit({ text: 'Work on these:\n- id k1-a: Fix the upload (bug) — fails', origin: { kind: 'plugin', name: 'followups' } } as never)
+    const line = startLine({ id: 'k1-a', title: 'Fix the upload', kind: 'bug', detail: 'fails 1 in 5', where: 'up.ts:4' })
+    await $.prompt.submit({ text: `Start this item from my to-do list:\n${line}`, origin: { kind: 'plugin', name: 'followups' } } as never)
     await $.tool.call({ tool: 'mcp__followups__done', id: 'k1-a', note: 'added a retry' } as never)
     const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
     expect(await texts(band)).toMatch(/Worth remembering\? Fix the upload/)
     expect((await buttons(band)).slice(0, 3)).toEqual(['log-mistake', 'log-success', 'log-decision'])
+    // Numbered hotkeys: followups' band takes a and s, goal-run's g, k, c and n.
+    const keys = (await band.findAll({ type: 'Button' } as never)).map(b => (b as { props?: { hotkey?: string } }).props?.hotkey)
+    expect(keys.slice(0, 3)).toEqual(['1', '2', '3'])
     await band.press({ key: 'log-mistake' })
     expect(w.sent.at(-1)).toMatch(/\/mistake-brain log, as Type: mistake/)
     expect(w.sent.at(-1)).toContain('Fix the upload')
@@ -271,6 +290,74 @@ describe('in a session', () => {
     await band.press({ key: 'log-skip' })
     expect(await texts(band)).toBe('')
     await band.unmount()
+  })
+
+  test('the goal is named from goal-run\'s own start prompt when the plan leaves it out', async ($, on) => {
+    engine(on, project())
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.prompt.submit({ text: `${goalPrompt('Ship the CSV export')}\n\nBreak it into tasks.`, origin: { kind: 'plugin', name: 'goal-run' } } as never)
+    await $.tool.call({ tool: 'mcp__goal-run__plan', tasks: [] } as never)
+    await $.tool.call({ tool: 'mcp__goal-run__update', id: 't2', status: 'done' } as never)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(band)).toMatch(/Reached the goal: Ship the CSV export/)
+    await band.unmount()
+  })
+
+  test("a goal a to-do item closed is offered from goal-run's note on the done result, once", async ($, on) => {
+    engine(on, project(), { closesGoal: 'Rotate the keys' })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.tool.call({ tool: 'mcp__followups__done', id: 'k1-a' } as never)
+    await $.tool.call({ tool: 'mcp__goal-run__update', id: 't2', status: 'done' } as never)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    // The follow-up's own offer shows first; the goal's waits behind it, and only once.
+    expect(await texts(band)).toMatch(/Worth remembering\? Fix the upload/)
+    await band.press({ key: 'log-skip' })
+    expect(await texts(band)).toMatch(/Worth remembering\? Reached the goal: Rotate the keys/)
+    await band.press({ key: 'log-skip' })
+    expect(await texts(band)).toBe('')
+    await band.unmount()
+  })
+
+  test('if the log prompt cannot be sent, the offer comes back', async ($, on) => {
+    engine(on, project(), { failSubmit: true })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.tool.call({ tool: 'mcp__followups__done', id: 'k1-a' } as never)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    await band.press({ key: 'log-success' })
+    expect(await texts(band)).toMatch(/Worth remembering\? Fix the upload/)
+    await band.unmount()
+  })
+
+  test('the pane opens by itself once a session; later changes play in the band only', async ($, on) => {
+    const files = project()
+    const w = engine(on, files)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    for (const [at, title] of [['2026-10-24 09:01', 'First'], ['2026-10-24 09:02', 'Second']] as const) {
+      w.write('MISTAKES.md', files['MISTAKES.md']!.replace('line -->\n\n', `line -->\n\n${entry(at, title, 'success')}`))
+      await $.tool.call({ tool: 'Edit', file_path: '/repo/MISTAKES.md', old_string: 'a', new_string: 'b' } as never)
+    }
+    expect(w.pulses).toBe(2)
+    expect(w.opened.filter(id => id === 'brain-hud')).toHaveLength(1)
+  })
+
+  test('two refreshes at the same moment (Edits, the poll) play the change once', async ($, on) => {
+    const files = project()
+    const w = engine(on, files)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await w.clock.advance(3_900)
+    w.write('MISTAKES.md', files['MISTAKES.md']!.replace('line -->\n\n', `line -->\n\n${entry('2026-10-24 09:01', 'Once', 'decision')}`))
+    const edit = () => $.tool.call({ tool: 'Edit', file_path: '/repo/MISTAKES.md', old_string: 'a', new_string: 'b' } as never)
+    await Promise.all([edit(), edit(), w.clock.advance(200)])
+    expect(w.pulses).toBe(1)
+  })
+
+  test('after the session ends, the memory is no longer polled', async ($, on) => {
+    const w = engine(on, project())
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.session.end({ reason: 'other', sessionId: 's1' } as never)
+    w.write('.agent-brain/shared/MEMORY.md', MEMORY.replace('(29 lessons', '(30 lessons'))
+    await w.clock.advance(10_000)
+    expect(w.pulses).toBe(0)
   })
 
   test("a handoff's next step goes to followups' to-do list", async ($, on) => {
