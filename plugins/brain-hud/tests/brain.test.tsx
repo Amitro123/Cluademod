@@ -166,6 +166,14 @@ describe('the graph', () => {
     expect(svg.match(/r="2\.4"/g)).toHaveLength(54)
   })
 
+  test('the inbox holds only unrouted entries; ones routed where the graph has no node are counted apart', () => {
+    const b = brain()
+    b.entries = [...b.entries, { at: '2026-10-02 10:00', title: 'Became a rule', type: 'mistake', status: 'promoted', route: 'Rule: .claude/rules/db.md' }]
+    const svg = graphSvg(b, { theme: 'dark' })
+    expect(svg).toContain('inbox · 1 to route')
+    expect(svg).toContain('1 routed outside the folders')
+  })
+
   test('a dark and a light palette', () => {
     expect(graphSvg(brain(), { theme: 'dark' })).toContain('fill="#0b0e14"')
     expect(graphSvg(brain(), { theme: 'light' })).toContain('fill="#fbfaf7"')
@@ -476,6 +484,46 @@ describe('in a session', () => {
     w.write('.agent-brain/shared/MEMORY.md', MEMORY.replace('(29 lessons', '(30 lessons'))
     await w.clock.advance(10_000)
     expect(w.pulses).toBe(0)
+  })
+
+  test('the pane says which MEMORY.md it read, and when there is none or it misses files', async ($, on) => {
+    const files = project()
+    engine(on, files)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    let pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    let text = await texts(pane)
+    expect(text).toMatch(/index: \.agent-brain\/shared\/MEMORY\.md/)
+    // output-discipline.md is on disk but not in the index.
+    expect(text).toMatch(/⚠ 1 PARA file is not in \.agent-brain\/shared\/MEMORY\.md\./)
+    await pane.unmount()
+    delete files['.agent-brain/shared/MEMORY.md']
+    await $.command.run({ command: 'brain' } as never)
+    pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    text = await texts(pane)
+    expect(text).toMatch(/⚠ No index found: neither \.agent-brain\/shared\/MEMORY\.md nor \.claude\/agent-memory\/claude\/MEMORY\.md exists/)
+    expect(text).toMatch(/index: none found/)
+    await pane.unmount()
+  })
+
+  test('3 or more entries to route: the band offers to route them, or waits for more after Later', async ($, on) => {
+    const files = project()
+    const w = engine(on, files)
+    const waiting = ['A', 'B'].map((t, k) => entry(`2026-10-24 0${k}:00`, `Waiting ${t}`, 'decision')).join('')
+    files['MISTAKES.md'] = files['MISTAKES.md']!.replace('line -->\n\n', `line -->\n\n${waiting}`)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(band)).toMatch(/🧠 3 entries to route/)
+    await band.press({ key: 'route-later' })
+    expect(await texts(band)).toBe('')
+    // A fourth brings it back; Route now runs the skill's command.
+    w.write('MISTAKES.md', files['MISTAKES.md']!.replace('line -->\n\n', `line -->\n\n${entry('2026-10-24 05:00', 'Waiting C', 'mistake')}`))
+    await w.clock.advance(4_100)
+    await w.clock.advance(7_000)
+    expect(await texts(band)).toMatch(/🧠 4 entries to route/)
+    await band.press({ key: 'route-now' })
+    expect(w.ran).toContain('mistake-brain route')
+    expect(await texts(band)).toBe('')
+    await band.unmount()
   })
 
   test('the graph follows a light theme set in /config', async ($, on) => {

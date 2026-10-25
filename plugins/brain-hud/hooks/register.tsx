@@ -19,6 +19,7 @@ const goalText = atom({ plugin: 'brain-hud', key: 'goalText' } as const, '')
 const paneShown = atom({ plugin: 'brain-hud', key: 'paneShown' } as const, false)
 const more = atom({ plugin: 'brain-hud', key: 'more' } as const, '')
 const theme = atom({ plugin: 'brain-hud', key: 'theme' } as const, 'dark' as Theme)
+const routeLater = atom({ plugin: 'brain-hud', key: 'routeLater' } as const, 0)
 
 const PANE = 'brain-hud'
 const PANE_TITLE = 'Brain'
@@ -30,6 +31,8 @@ const POLL_MS = 4_000
 const PULSE_MS = 6_000
 const FRAME_MS = 160
 const INBOX_SHOWN = 3
+// Unrouted entries from which the band suggests routing them.
+const ROUTE_AT = 3
 const ACCENT = '#c96f97'
 
 const FOLLOWUPS_DONE = 'mcp__followups__done'
@@ -69,18 +72,22 @@ async function readOr($: EngineInterface, rel: string): Promise<string | null> {
 async function scan($: EngineInterface): Promise<Brain | null> {
   const mistakes = await readOr($, MISTAKES)
   let memory: string | null = null
+  let index: string | null = null
   for (const p of MEMORY_PATHS) {
     memory = await readOr($, p)
-    if (memory !== null) break
+    if (memory !== null) {
+      index = p
+      break
+    }
   }
   if (mistakes === null && memory === null) return null
-  const index = parseMemory(memory ?? '')
+  const parsed = parseMemory(memory ?? '')
   const onDisk: Partial<Record<Folder, string[]>> = {}
   for (const f of FOLDERS) {
     const list = await $.fs.list(await rootPath($, `${PARA_ROOT}/${f}`)).catch(() => [])
     onDisk[f] = list.filter(x => x.kind === 'file' && x.name.endsWith('.md')).map(x => x.name)
   }
-  return { ...index, folders: withListing(index.folders, onDisk), entries: parseMistakes(mistakes ?? '') }
+  return { ...parsed, folders: withListing(parsed.folders, onDisk), entries: parseMistakes(mistakes ?? ''), index }
 }
 
 async function stamp($: EngineInterface): Promise<string> {
@@ -162,6 +169,17 @@ async function goalPlanned($: EngineInterface, rawGoal: unknown) {
 // A reached goal: a success to repeat, a handoff for what comes next, or the decisions it took.
 async function goalUpdated($: EngineInterface, result: string) {
   if (result.includes(GOAL_REACHED)) await offerGoal($, (await read($, goalText)) || 'the session goal')
+}
+
+// Routing is the skill's: run it as /mistake-brain route, or ask Claude to where that command isn't
+// there to run. The reminder then waits until more entries come in.
+async function routeNow($: EngineInterface, count: number) {
+  await update($, routeLater, () => count)
+  void $.command.run({ command: 'mistake-brain', args: 'route' }).catch(() =>
+    $.prompt.submit({ text: 'Route the unrouted MISTAKES.md entries with /mistake-brain route.' }).catch(() => {
+      $.ui.toast('Could not start routing; run /mistake-brain route')
+    }),
+  )
 }
 
 // One reached-goal offer at a time, whichever signal comes first.
@@ -297,7 +315,10 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const p = await read($, pulse)
     const pending = await read($, offers)
-    if (e.props.hasSurvey || (!p && !pending.length)) return next(e)
+    const b = await read($, brain)
+    const toRoute = b ? unrouted(b) : 0
+    const remind = toRoute >= ROUTE_AT && toRoute > (await read($, routeLater))
+    if (e.props.hasSurvey || (!p && !pending.length && !remind)) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const Svg = e.surface === 'terminal' ? null : $.ui.resolve(e as typeof e & { surface: 'desktop' }).Svg
     const t = await read($, frame)
@@ -332,6 +353,13 @@ export const register: Register = on => {
             </Box>
           </Box>
         ) : null}
+        {remind && !o ? (
+          <Box flexDirection="row" gap={1} paddingX={1} alignItems="center">
+            <Text bold color={ACCENT}>{`🧠 ${toRoute} entries to route`}</Text>
+            <Button key="route-now" label="Route now" hotkey="r" variant="primary" onPress={() => routeNow($, toRoute)} />
+            <Button key="route-later" label="Later" onPress={() => update($, routeLater, () => toRoute)} />
+          </Box>
+        ) : null}
         {below}
       </Box>
     )
@@ -363,6 +391,13 @@ export const register: Register = on => {
     const travelling = p?.kind === 'route' && freshAt >= 0 && routeOf(b.entries[freshAt]!) && t < 2_000 ? { entry: freshAt, t: Math.max(0.05, t / 2_000) } : undefined
     const fresh = (title: string) => (p && (p.title === title || p.file === title) ? '✦ ' : '')
     const waiting = unrouted(b)
+    // Where the index came from, said whenever it explains what the graph shows.
+    const unindexed = FOLDERS.reduce((n, f) => n + b.folders[f].filter(l => !l.isIndexed).length, 0)
+    const problem = b.index === null
+      ? `No index found: neither ${MEMORY_PATHS.join(' nor ')} exists, so no lessons are counted.`
+      : unindexed
+        ? `${unindexed} PARA file${unindexed === 1 ? ' is' : 's are'} not in ${b.index}${lessonCount(b) ? '' : ', and it lists no lessons'}.`
+        : ''
 
     return (
       <Box flexDirection="column" gap={1}>
@@ -370,6 +405,7 @@ export const register: Register = on => {
           <Text bold color={ACCENT}>{`🧠 ${lessons(lessonCount(b))}`}</Text>
           <Text dimColor>{`· ${waiting} unrouted`}</Text>
         </Box>
+        {problem ? <Text color="#d97706" wrap="truncate-end">{`⚠ ${problem}`}</Text> : null}
         {Svg ? (
           <Svg
             source={graphSvg(b, { theme: await read($, theme), ...(p?.file ? { hot: p.file } : {}), ...(freshAt >= 0 ? { fresh: freshAt } : {}), ...(travelling ? { travelling } : {}) })}
@@ -419,6 +455,7 @@ export const register: Register = on => {
             )
           })}
           {b.rules.length ? <Text dimColor>{`  ⚖ Rules · ${b.rules.map(r => clip(r, 50)).join(' · ')}`}</Text> : null}
+          <Text dimColor wrap="truncate-end">{`  index: ${b.index ?? 'none found'}`}</Text>
         </Box>
       </Box>
     )
