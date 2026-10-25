@@ -73,9 +73,13 @@ export function graphSvg(b: Brain, opts: { theme: Theme; hot?: string; fresh?: n
   // The files each folder holds, with the entries routed to them.
   const routed = new Map<string, { e: Entry; i: number }[]>()
   const inbox: { e: Entry; i: number }[] = []
+  // Routed somewhere the graph has no node for (a rule, a path it can't read): counted, not drawn as
+  // waiting, so the inbox matches the unrouted count.
+  let elsewhere = 0
   b.entries.forEach((e, i) => {
-    const r = e.status === 'unrouted' ? null : routeOf(e)
-    if (!r) return inbox.push({ e, i })
+    if (e.status === 'unrouted') return inbox.push({ e, i })
+    const r = routeOf(e)
+    if (!r) return elsewhere++
     const k = `${r.folder}/${r.file}`
     routed.set(k, [...(routed.get(k) ?? []), { e, i }])
   })
@@ -147,6 +151,7 @@ export function graphSvg(b: Brain, opts: { theme: Theme; hot?: string; fresh?: n
   nodes += `<circle cx="${cx}" cy="${cy}" r="14" fill="${P.bg}" stroke="${P.core}" stroke-width="2"/>`
   nodes += `<circle cx="${cx}" cy="${cy}" r="5" fill="${P.core}"/>`
   labels += `<text x="${cx}" y="${cy + 30}" font-size="10" font-weight="700" fill="${P.label}" text-anchor="middle">MEMORY.md</text>`
+  if (elsewhere) labels += `<text x="${cx}" y="${cy + 42}" font-size="8.5" fill="${P.dim}" text-anchor="middle">${elsewhere} routed outside the folders</text>`
 
   // A new entry travelling from the inbox to its file.
   if (opts.travelling) {

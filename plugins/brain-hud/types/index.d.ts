@@ -12,6 +12,8 @@ export type Brain = {
   archives: number
   rules: string[]
   lastDream: string | null
+  // The MEMORY.md the index was read from, or null when none was found.
+  index?: string | null
 }
 // What just happened to the memory: a new entry of a kind, or a step of the skill's pipeline.
 export type PulseKind = EntryType | 'route' | 'promote' | 'dream'
@@ -39,6 +41,8 @@ declare module 'claude-code' {
       more: string
       // The graph's palette, from the theme in /config.
       theme: 'dark' | 'light'
+      // The unrouted count the person said "Later" to: the reminder waits until there are more.
+      routeLater: number
     }
   }
 }
