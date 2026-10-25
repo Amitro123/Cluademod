@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Flag, Item, Status } from '../types'
+import { doneResult, startLine } from './texts'
 
 // ---------- state ----------
 
@@ -316,11 +317,9 @@ async function keep($: EngineInterface, flags: Flag[]) {
 
 // The message that starts an item: names it, carries the id, and says how to report back.
 export function startPrompt(list: Item[]): string {
-  const one = (i: Item) =>
-    `- id ${i.id}: ${i.title}${i.kind === 'bug' ? ' (bug)' : ''}${i.detail ? ` — ${i.detail}` : ''}${i.where ? ` [where: ${i.where}]` : ''}`
   return [
     list.length === 1 ? 'Start this item from my to-do list:' : `Start these ${list.length} items from my to-do list, one after the other:`,
-    ...list.map(one),
+    ...list.map(startLine),
     `Do the work. When an item is finished, call ${DONE_TOOL} with its id (and a short note). Don't call it for anything else.`,
   ].join('\n')
 }
@@ -488,7 +487,7 @@ export const register: Register = (on, options) => {
     await setStatus($, new Set([item.id]), 'done')
     const note = clip(String(input.note ?? '').trim(), 200)
     $.ui.toast(`Done: ${item.title}`)
-    return { result: `Marked "${item.title}" done${note ? ` (${note})` : ''}.` }
+    return { result: doneResult(item.title, note) }
   })
 
   // After a main-loop answer, look it over for loose ends Claude didn't flag. Run from a timer so

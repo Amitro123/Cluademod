@@ -4,6 +4,9 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
+import { GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseStartPrompt } from './texts'
+// The goal-run tests import the start-prompt parser from here, as before it was shared.
+export { parseStartPrompt }
 
 // ---------- state ----------
 
@@ -248,7 +251,7 @@ async function startGoal($: EngineInterface, text: string) {
   await setGoal($, () => g)
   void $.ui.open({ id: PANE, title: PANE_TITLE })
   void $.prompt.submit({
-    text: `My goal for this session: ${g.text}\n\nBreak it into 3 to 8 concrete tasks and propose them with ${PLAN_TOOL}. Don't start the work until I approve the plan.`,
+    text: `${goalPrompt(g.text)}\n\nBreak it into 3 to 8 concrete tasks and propose them with ${PLAN_TOOL}. Don't start the work until I approve the plan.`,
   }).catch(() => {})
 }
 
@@ -258,14 +261,6 @@ async function approve($: EngineInterface, pace: Pace) {
 }
 
 // The to-do items a followups Start prompt names, from its lines "- id <id>: <title>[ (bug)][ — detail][ [where: …]]".
-export function parseStartPrompt(text: string): { id: string; title: string; isBug?: boolean }[] {
-  const out: { id: string; title: string; isBug?: boolean }[] = []
-  for (const line of text.split('\n')) {
-    const m = /^- id (\S+): (.+?)( \(bug\))?(?: — .*?)?(?: \[where: .*\])?$/.exec(line.trim())
-    if (m) out.push({ id: m[1]!, title: clip(m[2]!.trim(), 120), ...(m[3] ? { isBug: true } : {}) })
-  }
-  return out
-}
 
 const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ')
 
@@ -460,10 +455,10 @@ export const register: Register = (on, options) => {
     const status = input.status
     await setGoal($, cur => (cur ? withStatus(cur, id, status) : cur))
     const now = (await read($, goal))!
-    if (now.status === 'done') $.ui.toast(`Goal reached: ${now.text}`)
+    if (now.status === 'done') $.ui.toast(goalReachedToast(now.text))
     const where = `${id} is ${status.replace('_', ' ')}. ${now.tasks.filter(t => t.status === 'done').length}/${now.tasks.length} tasks done (${percentOf(now)}%).`
     const next = now.tasks.find(t => t.status === 'pending')
-    if (now.status === 'done') return { result: `${where} The goal is reached.` }
+    if (now.status === 'done') return { result: `${where} ${GOAL_REACHED}` }
     if (status !== 'done' || !next) return { result: where }
     if (paceOf(now) === 'run') return { result: `${where} Go straight on to ${next.id}: ${next.title}.` }
     // Asked between tasks: the person decides whether the next one starts now.
@@ -560,17 +555,23 @@ export const register: Register = (on, options) => {
     const ref = String((e as unknown as { id?: unknown }).id ?? '').trim()
     const g = await read($, goal)
     const task = g?.tasks.find(t => t.followupId && (t.followupId === ref || norm(t.title) === norm(ref)))
+    let reached = ''
     if (g && task && task.status !== 'done') {
       await setGoal($, cur => (cur ? withStatus(cur, task.id, 'done') : cur))
       const now = await read($, goal)
-      if (now?.status === 'done') $.ui.toast(`Goal reached: ${now.text}`)
+      if (now?.status === 'done') {
+        $.ui.toast(goalReachedToast(now.text))
+        reached = now.text
+      }
     }
     await update($, side, cur => {
       if (!cur) return cur
       const item = cur.items.find(it => it.id === ref || norm(it.title) === norm(ref))
       return item ? { ...cur, doneIds: [...cur.doneIds, item.id] } : cur
     })
-    return r
+    // Claude (and brain-hud) learn the goal is reached on this path too.
+    if (!reached || 'deny' in r) return r
+    return { ...r, context: [...(r.context ?? []), goalClosedNote(reached)] }
   }).catch(($, e, next) => next(e))
 
   // Running through: a turn that ends with pending tasks left is sent on once, to the next one. Claude
