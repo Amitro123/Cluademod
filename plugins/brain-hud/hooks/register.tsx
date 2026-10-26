@@ -5,7 +5,7 @@ import type { Brain, EntryType, Folder, Offer, Pulse, PulseKind } from '../types
 import { faceText, KIND_COLOR, SCENE, sceneSvg } from './art'
 import { GRAPH, graphSvg, routeOf } from './graph'
 import type { Theme } from './graph'
-import { diffBrain, FOLDERS, lessonCount, logPrompt, paraStats, parseMemory, parseMistakes, unrouted, withListing } from './brain'
+import { diffBrain, FOLDERS, SKILL, lessonCount, logPrompt, paraStats, parseMemory, parseMistakes, unrouted, withListing } from './brain'
 import type { ParaFile } from './brain'
 import { GOAL_REACHED, parseDoneResult, parseGoalClosedNote, parseGoalPrompt, parseStartPrompt, toolText } from './texts'
 
@@ -161,7 +161,7 @@ async function logIt($: EngineInterface, o: Offer, type: EntryType) {
   // Not awaited: the prompt waits for the session to be idle, and the press shouldn't.
   void $.prompt.submit({ text: logPrompt(type, o.title, o.detail) }).catch(async () => {
     await update($, offers, list => (list.some(x => x.key === o.key) ? list : [o, ...list]))
-    $.ui.toast('Could not ask Claude to log it; try again, or /mistake-brain log')
+    $.ui.toast(`Could not ask Claude to log it; try again, or /${SKILL} log`)
   })
 }
 
@@ -185,13 +185,22 @@ async function goalUpdated($: EngineInterface, result: string) {
   if (result.includes(GOAL_REACHED)) await offerGoal($, (await read($, goalText)) || 'the session goal')
 }
 
-// Routing is the skill's: run it as /mistake-brain route, or ask Claude to where that command isn't
-// there to run. The reminder then waits until more entries come in.
+// Routing is the skill's: run it as /brain-hud:mistake-brain route, or ask Claude to where the
+// command can't be run from here. The reminder then waits until more entries come in.
 async function routeNow($: EngineInterface, count: number) {
   await update($, routeLater, () => count)
-  void $.command.run({ command: 'mistake-brain', args: 'route' }).catch(() =>
-    $.prompt.submit({ text: 'Route the unrouted MISTAKES.md entries with /mistake-brain route.' }).catch(() => {
-      $.ui.toast('Could not start routing; run /mistake-brain route')
+  runSkill($, 'route', 'Route the unrouted MISTAKES.md entries')
+}
+
+// Sets up the memory in a project that has none: the skill's init.
+function setUp($: EngineInterface) {
+  runSkill($, 'init', "Set up mistake-brain memory in this project")
+}
+
+function runSkill($: EngineInterface, sub: string, ask: string) {
+  void $.command.run({ command: SKILL, args: sub }).catch(() =>
+    $.prompt.submit({ text: `${ask} with /${SKILL} ${sub}.` }).catch(() => {
+      $.ui.toast(`Could not start it; run /${SKILL} ${sub}`)
     }),
   )
 }
@@ -250,7 +259,7 @@ export const register: Register = on => {
     await readTheme($)
     await refresh($)
     await $.ui.open({ id: PANE, title: PANE_TITLE })
-    return { text: (await read($, brain)) ? 'Opened the Brain pane.' : 'No mistake-brain memory in this project yet: /mistake-brain init sets one up.' }
+    return { text: (await read($, brain)) ? 'Opened the Brain pane.' : `No mistake-brain memory in this project yet: /${SKILL} init sets one up.` }
   })
 
   on('turn.start', async ($, e, next) => {
@@ -389,7 +398,10 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" gap={1}>
           <Text bold color={ACCENT}>🧠 Brain</Text>
-          <Text dimColor>No MISTAKES.md or .agent-brain/ memory in this project yet. /mistake-brain init sets one up.</Text>
+          <Text dimColor>{`No MISTAKES.md or .agent-brain/ memory in this project yet. /${SKILL} init sets one up: the inbox, the PARA folders and the index.`}</Text>
+          <Box flexDirection="row">
+            <Button key="init" label="Set up memory" variant="primary" onPress={() => setUp($)} />
+          </Box>
         </Box>
       )
     }

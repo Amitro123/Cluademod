@@ -9,7 +9,7 @@ import type { Brain } from '../types'
 // The wording followups and goal-run write, from the copy of shared/texts.ts they use too.
 import { doneResult, GOAL_REACHED, goalClosedNote, goalPrompt, parseStartPrompt, startLine } from '../hooks/texts'
 
-// Shaped like agent-brain-org's own files.
+// Shaped like a real project's files.
 const entry = (at: string, title: string, type: string | null, status = 'unrouted') =>
   [`## [${at}] ${title}`, ...(type ? [`- **Type:** ${type}`] : []), '- **What happened:** something.', `- **PARA route:** ${status === 'unrouted' ? 'unrouted' : 'Project: .agent-brain/shared/Projects/skill.md'}`, `- **Status:** ${status}`, ''].join('\n')
 
@@ -127,7 +127,7 @@ describe('what changed', () => {
 
   test('what Claude is asked to log goes through the skill, with the type', () => {
     const text = logPrompt('mistake', 'Fix the upload', 'retried without backoff')
-    expect(text).toMatch(/\/mistake-brain log, as Type: mistake/)
+    expect(text).toMatch(/\/brain-hud:mistake-brain log, as Type: mistake/)
     expect(text).toContain('Fix the upload')
   })
 })
@@ -415,7 +415,7 @@ describe('in a session', () => {
     expect(await buttons(band)).toEqual(['log-mistake', 'log-success', 'log-decision', 'log-skip'])
     expect(await keys()).toEqual(['l', undefined, undefined, undefined])
     await band.press({ key: 'log-mistake' })
-    expect(w.sent.at(-1)).toMatch(/\/mistake-brain log, as Type: mistake/)
+    expect(w.sent.at(-1)).toMatch(/\/brain-hud:mistake-brain log, as Type: mistake/)
     expect(w.sent.at(-1)).toContain('Fix the upload')
     expect(await texts(band)).not.toMatch(/Worth remembering/)
     await band.unmount()
@@ -581,7 +581,7 @@ describe('in a session', () => {
     await w.clock.advance(7_000)
     expect(await texts(band)).toMatch(/🧠 4 entries to route/)
     await band.press({ key: 'route-now' })
-    expect(w.ran).toContain('mistake-brain route')
+    expect(w.ran).toContain('brain-hud:mistake-brain route')
     expect(await texts(band)).toBe('')
     // The skill routes them; 3 new ones bring the reminder back, not only more than the 4 it saw.
     const routed = project()['MISTAKES.md']!
@@ -630,15 +630,17 @@ describe('in a session', () => {
     await pane.unmount()
   })
 
-  test('no memory in the project: nothing is offered, and the pane says how to start one', async ($, on) => {
-    engine(on, {})
+  test('no memory in the project: nothing is offered, and the pane sets one up with the skill', async ($, on) => {
+    const w = engine(on, {})
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     await $.tool.call({ tool: 'mcp__followups__done', id: 'x' } as never)
     const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
     expect(await texts(band)).toBe('')
     await band.unmount()
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
-    expect(await texts(pane)).toMatch(/\/mistake-brain init sets one up/)
+    expect(await texts(pane)).toMatch(/\/brain-hud:mistake-brain init sets one up/)
+    await pane.press({ key: 'init' })
+    expect(w.ran).toContain('brain-hud:mistake-brain init')
     await pane.unmount()
   })
 })
