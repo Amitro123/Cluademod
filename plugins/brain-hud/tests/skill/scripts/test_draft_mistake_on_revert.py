@@ -108,3 +108,22 @@ def test_git_clean_fd_variant_is_detected(tmp_path):
     mistakes = _inbox(tmp_path)
     _run(tmp_path, "git clean -fd")
     assert "[auto-draft]" in mistakes.read_text(encoding="utf-8")
+
+
+def test_unstaging_with_restore_is_not_a_revert():
+    assert not hook.matches_revert("git restore --staged src/a.py")
+    assert not hook.matches_revert("git restore -S src/a.py")
+    assert not hook.matches_revert("git add a.py && git restore --staged b.py")
+
+
+def test_restore_touching_the_worktree_is_a_revert():
+    assert hook.matches_revert("git restore src/a.py")
+    assert hook.matches_revert("git restore --source=HEAD~1 src/a.py")
+    assert hook.matches_revert("git restore --staged --worktree src/a.py")
+    assert hook.matches_revert("git restore --staged b.py; git restore a.py")
+
+
+def test_checkout_and_clean_still_count():
+    assert hook.matches_revert("git checkout -- app.py")
+    assert hook.matches_revert("git clean -fd")
+    assert not hook.matches_revert("echo 'git restore a.py'")

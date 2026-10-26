@@ -62,6 +62,50 @@ def detect_host() -> str:
     return host
 
 
+MARKER = "<!-- mistake-brain: new entries are inserted immediately below this line -->"
+
+
+def insert_entry(text: str, entry: str) -> str:
+    """Put an entry right below MISTAKES.md's marker, one blank line either side.
+
+    Only the seam is normalised: the rest of the file -- blank lines inside an
+    older entry's code block or quoted log included -- stays byte for byte.
+    """
+    head, sep, tail = text.partition(MARKER)
+    if not sep:
+        raise ValueError("MISTAKES.md has no marker")
+    tail = tail.lstrip("\n")
+    block = entry.strip("\n") + "\n"
+    return head + MARKER + "\n\n" + block + ("\n" + tail if tail else "")
+
+
+def project_root(payload: dict | None = None) -> Path:
+    """The project a hook acts on, the same for every hook.
+
+    ``CLAUDE_PROJECT_DIR`` first (where init puts MISTAKES.md), then the
+    payload's ``cwd``. Only when neither holds mistake-brain does git's top
+    level for that folder count (a session started in a subfolder).
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    start = Path(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or ".")
+    if is_brain_project(start):
+        return start
+    try:
+        import subprocess
+
+        done = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=start, capture_output=True, text=True, timeout=5,
+        )
+        if done.returncode == 0 and done.stdout.strip():
+            top = Path(done.stdout.strip())
+            if is_brain_project(top):
+                return top
+    except Exception:
+        pass
+    return start
+
+
 def is_brain_project(project_dir: Path) -> bool:
     """True when the project uses mistake-brain: it has the inbox or the lesson store.
 

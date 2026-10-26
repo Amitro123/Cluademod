@@ -29,11 +29,15 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
   const sent: string[] = []
   const toasts: string[] = []
+  const written: Record<string, string> = {}
+  // `hold`: that command waits until the test releases it, so the test can act meanwhile.
+  let release = () => {}
+  const held = new Promise<void>(r => (release = r))
   let failing = fails
   const worktreeErrs = [...worktree]
   mock.clock(on, { now: Date.UTC(2026, 9, 25, 9) })
@@ -53,9 +57,10 @@ function engine(on: On, { goalRun = true, fails = 0, files = ['package.json', 'n
   // The kit answers a mod's own spawn itself, without an agentId: the mod finds its agent in the list.
   on('agent.list', () => ({ value: spawned.map(s => ({ id: s.id, description: s.description, type: s.subagentType, status: 'running' })) }) as never)
   const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '' } }) as never
-  on('process.run', (_, e) => {
+  on('process.run', async (_, e) => {
     const cmd = e.argv.join(' ')
     ran.push(cmd)
+    if (cmd === hold) await held
     if (cmd === 'git rev-parse --show-toplevel') return ok('/repo\n')
     if (cmd === 'git rev-parse HEAD') return ok('abc123\n')
     if (cmd.startsWith('git worktree add')) {
@@ -63,7 +68,9 @@ function engine(on: On, { goalRun = true, fails = 0, files = ['package.json', 'n
       return err ? ({ value: { exitCode: 128, stdout: '', stderr: err } } as never) : ok()
     }
     if (cmd.startsWith('git diff --stat')) return ok(' src/mw.ts | 40 +++\n 1 file changed')
-    if (cmd === 'git status --porcelain') return ok(dirty ? ' M src/mw.ts\n' : '')
+    if (cmd === 'git status --porcelain') return ok(dirty ? ' M src/mw.ts\n?? src/limit/new.ts\n?? node_modules/\n?? .env\n?? certs/server.key\n' : '')
+    if (cmd === 'git diff --cached --quiet') return { value: { exitCode: dirty ? 1 : 0, stdout: '', stderr: '' } } as never
+    if (cmd === 'git rev-parse --git-path info/exclude') return ok('.git/info/exclude\n')
     if (cmd.startsWith('git commit') && commitFails) return { value: { exitCode: 1, stdout: '', stderr: 'Please tell me who you are.' } } as never
     if (cmd.startsWith('git ')) return ok()
     if (failing > 0) {
@@ -74,7 +81,12 @@ function engine(on: On, { goalRun = true, fails = 0, files = ['package.json', 'n
   })
   on('fs.read', (_, e) => {
     if (e.path.endsWith('package.json')) return { value: pkg } as never
+    if (e.path in written) return { value: written[e.path] } as never
     throw new Error('ENOENT')
+  })
+  on('fs.write', (_, e) => {
+    written[e.path] = e.text
+    return { value: undefined } as never
   })
   on('fs.list', () => ({ value: files.map(name => ({ name, kind: 'file' })) }) as never)
   on('config.list', () => ({ value: [{ key: 'theme', value: 'light' }] }) as never)
@@ -99,7 +111,7 @@ function engine(on: On, { goalRun = true, fails = 0, files = ['package.json', 'n
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
-  return { spawned, ran, sent, toasts }
+  return { spawned, ran, sent, toasts, written, release }
 }
 
 const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<unknown[]> }) =>
@@ -156,10 +168,10 @@ describe('a run from the feature to the PR', () => {
   test('spec, the plan in goal-run, build, checks, both reviews, the approver, then your Open PR', async ($, on) => {
     const w = engine(on)
     const started = await startRun($)
-    expect(started).toMatch(/Factory run started: Rate limiter\. Branch factory\/rate-limiter, worktree \/repo\.factory\/rate-limiter/)
+    expect(started).toMatch(/Factory run started: Rate limiter\. Branch factory\/rate-limiter, worktree \/repo\/\.factory\/rate-limiter/)
     // The worktree is next to the repository, not in it: nothing in the main checkout scans it.
-    expect(w.ran).toContain('git worktree add -b factory/rate-limiter /repo.factory/rate-limiter abc123')
-    expect(last(w)).toMatchObject({ subagentType: 'factory:spec-writer', description: 'factory · spec-writer', cwd: '/repo.factory/rate-limiter' })
+    expect(w.ran).toContain('git worktree add -b factory/rate-limiter /repo/.factory/rate-limiter abc123')
+    expect(last(w)).toMatchObject({ subagentType: 'factory:spec-writer', description: 'factory · spec-writer', cwd: '/repo/.factory/rate-limiter' })
     expect(last(w).prompt).toContain('Rate limiter')
 
     // The spec's tasks go to goal-run's plan, through the main Claude.
@@ -252,14 +264,36 @@ describe('a run from the feature to the PR', () => {
     expect(last(w).prompt).toContain('Retry-After')
   })
 
-  test('work the builder left uncommitted is committed before the checks: the PR has what was reviewed', async ($, on) => {
+  test('work the builder left uncommitted is committed before the checks, without dependencies or credentials', async ($, on) => {
     const w = engine(on, { dirty: true })
     await toReviews($)
     const at = (c: string) => w.ran.indexOf(c)
-    expect(at('git add -A')).toBeGreaterThan(-1)
-    expect(at('git commit -m factory: Rate limiter')).toBeGreaterThan(at('git add -A'))
+    expect(at('git add -u')).toBeGreaterThan(-1)
+    expect(w.ran).toContain('git add -- src/limit/new.ts')
+    expect(w.ran.some(c => /add .*(node_modules|\.env|server\.key)/.test(c))).toBe(false)
+    expect(w.ran).not.toContain('git add -A')
+    expect(at('git commit -m factory: Rate limiter')).toBeGreaterThan(at('git add -- src/limit/new.ts'))
     expect(at('npm test')).toBeGreaterThan(at('git commit -m factory: Rate limiter'))
     expect(last(w).subagentType).toBe('factory:code-reviewer')
+    // The person and the PR prompt hear what was left out.
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/Left out of the commits: node_modules\/, \.env, certs\/server\.key/)
+    await pane.unmount()
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    await answer($, 'a5', 'DECISION: APPROVE\nREASON: ok')
+    await command($, 'approve')
+    expect(w.sent.at(-1)).toMatch(/left these new files out of its commits.*node_modules\//)
+  })
+
+  test('the worktree folder is kept out of git through the exclude file git names', async ($, on) => {
+    const w = engine(on)
+    await startRun($)
+    expect(w.ran).toContain('git rev-parse --git-path info/exclude')
+    expect(w.written['/repo/.git/info/exclude']).toBe('.factory/\n')
+    await command($, 'stop')
+    await command($, 'Second feature')
+    expect(w.written['/repo/.git/info/exclude']).toBe('.factory/\n')
   })
 
   test("a commit that fails stops the run, for the person to look at", async ($, on) => {
@@ -272,12 +306,12 @@ describe('a run from the feature to the PR', () => {
 
 describe('the worktree', () => {
   test('a taken name gets a number, counted from the feature', async ($, on) => {
-    const w = engine(on, { worktree: ["fatal: a branch named 'factory/rate-limiter' already exists", "fatal: '/repo.factory/rate-limiter-2' already exists"] })
+    const w = engine(on, { worktree: ["fatal: a branch named 'factory/rate-limiter' already exists", "fatal: '/repo/.factory/rate-limiter-2' already exists"] })
     const started = await startRun($)
     expect(w.ran.filter(c => c.startsWith('git worktree add'))).toEqual([
-      'git worktree add -b factory/rate-limiter /repo.factory/rate-limiter abc123',
-      'git worktree add -b factory/rate-limiter-2 /repo.factory/rate-limiter-2 abc123',
-      'git worktree add -b factory/rate-limiter-3 /repo.factory/rate-limiter-3 abc123',
+      'git worktree add -b factory/rate-limiter /repo/.factory/rate-limiter abc123',
+      'git worktree add -b factory/rate-limiter-2 /repo/.factory/rate-limiter-2 abc123',
+      'git worktree add -b factory/rate-limiter-3 /repo/.factory/rate-limiter-3 abc123',
     ])
     expect(started).toMatch(/Branch factory\/rate-limiter-3/)
     expect(last(w).prompt).toContain('docs/specs/rate-limiter-3.md')
@@ -447,13 +481,37 @@ describe('the person decides', () => {
     const w = engine(on)
     await startRun($)
     expect(await command($, 'stop')).toMatch(/Stopped\. The branch factory\/rate-limiter/)
-    const edit = { tool: 'Edit', file_path: '/repo.factory/rate-limiter/a.ts', old_string: 'a', new_string: 'b' }
+    const edit = { tool: 'Edit', file_path: '/repo/.factory/rate-limiter/a.ts', old_string: 'a', new_string: 'b' }
     expect(String((await $.tool.call({ ...edit, agentId: 'a1' } as never)).deny)).toMatch(/factory run was stopped/)
     expect((await $.tool.call(edit as never)).result).toBe('edited')
     expect((await $.tool.call({ ...edit, agentId: 'other' } as never)).result).toBe('edited')
     await answer($, 'a1', SPEC_ANSWER)
     expect(w.sent).toEqual([])
     expect(await bandText($)).not.toMatch(/🏭/)
+  })
+
+  test('a Stop during the checks ends them: the commands left are not run', async ($, on) => {
+    const w = engine(on, { hold: 'npm test', pkg: '{"scripts":{"test":"x","lint":"y","typecheck":"z"}}' })
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    await command($, 'approve')
+    await answer($, 'a2', 'built')
+    expect(w.ran.at(-1)).toBe('npm test')
+    await command($, 'stop')
+    w.release()
+    await settled()
+    expect(w.ran.filter(c => c.startsWith('npm'))).toEqual(['npm test'])
+    expect(w.spawned.some(s => s.subagentType.endsWith('reviewer'))).toBe(false)
+  })
+
+  test("a stopped run's agents stay refused after a new run starts", async ($, on) => {
+    engine(on)
+    await startRun($)
+    await command($, 'stop')
+    await command($, 'Second feature')
+    const edit = { tool: 'Edit', file_path: '/repo/.factory/rate-limiter/a.ts', old_string: 'a', new_string: 'b' }
+    expect(String((await $.tool.call({ ...edit, agentId: 'a1' } as never)).deny)).toMatch(/factory run was stopped/)
+    expect((await $.tool.call({ ...edit, agentId: 'a2' } as never)).result).toBe('edited')
   })
 
   test('a second run waits for the first', async ($, on) => {

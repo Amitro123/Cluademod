@@ -49,6 +49,8 @@ export type Run = {
   gate: 'goal-run' | 'factory'
   // The dependencies were installed in the worktree (the setup command ran).
   setupDone: boolean
+  // New files the factory left out of its commits: dependencies, build output, credentials.
+  skipped?: string[]
 }
 
 declare module 'claude-code' {
@@ -57,6 +59,7 @@ declare module 'claude-code' {
       run: Run | null
       frame: number
       theme: 'dark' | 'light'
+      stoppedAgents: string[]
     }
   }
 }

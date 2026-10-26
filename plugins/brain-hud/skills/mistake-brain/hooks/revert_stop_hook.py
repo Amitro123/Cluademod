@@ -7,7 +7,12 @@ instead of once per bash command — ~90% latency reduction for heavy bash sessi
 
 Detection (two mechanisms, state-based):
   1. HEAD moved to a new commit whose subject starts with "Revert" → git revert
-  2. Reflog tip changed to a "reset: moving to ..." entry → git reset --hard
+  2. A new "reset: moving to ..." reflog entry that moved HEAD *back* (the new
+     HEAD is an ancestor of the old one) and left nothing uncommitted → a hard
+     reset that dropped commits. Not a mistake: an unstage (`git reset`, HEAD
+     unchanged), or `git reset --soft`/`--mixed` HEAD~N (the work is still
+     there, staged or in the worktree). The reflog doesn't say which mode
+     ran; "nothing left uncommitted" is how a hard reset is told apart.
 
 State file: .claude/mb-head-state.txt
   Line 1: HEAD SHA seen at end of previous turn
@@ -32,7 +37,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-MARKER = "<!-- mistake-brain: new entries are inserted immediately below this line -->"
+_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+import host_layout  # noqa: E402
+
+MARKER = host_layout.MARKER
 _STATE_FILE = ".claude/mb-head-state.txt"
 
 
@@ -109,10 +119,32 @@ def _detect(
         old_reflog_count is not None
         and new_reflog_count > old_reflog_count
         and new_reflog.startswith("reset:")
+        and _dropped_commits(project_dir, old_head, new_head)
     ):
         return "reset", new_reflog
 
     return None, None
+
+
+def _dropped_commits(project_dir: Path, old_head: str, new_head: str) -> bool:
+    """True when HEAD went back to an ancestor and nothing is left uncommitted:
+    a hard reset that threw commits away. HEAD unchanged (an unstage) or work
+    still staged or in the worktree (--soft, --mixed) is not one."""
+    if new_head == old_head:
+        return False
+    try:
+        back = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", new_head, old_head],
+            cwd=project_dir, capture_output=True, timeout=5,
+        )
+        if back.returncode != 0:
+            return False
+        clean = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD"], cwd=project_dir, capture_output=True, timeout=5,
+        )
+        return clean.returncode == 0
+    except Exception:
+        return False
 
 
 def _draft_entry(project_dir: Path, event_type: str, description: str) -> bool:
@@ -137,9 +169,7 @@ def _draft_entry(project_dir: Path, event_type: str, description: str) -> bool:
         f"- **PARA route:** unrouted\n"
         f"- **Status:** unrouted\n"
     )
-    text = text.replace(MARKER, MARKER + "\n\n" + entry, 1)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    mistakes_path.write_text(text, encoding="utf-8")
+    mistakes_path.write_text(host_layout.insert_entry(text, entry), encoding="utf-8")
     return True
 
 
@@ -162,9 +192,7 @@ def main() -> int:
     except Exception:
         payload = {}
 
-    project_dir = Path(
-        os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or "."
-    )
+    project_dir = host_layout.project_root(payload)
     # The plugin runs this in every project: outside a mistake-brain one it
     # does nothing, and writes no state file.
     if not (project_dir / "MISTAKES.md").is_file():

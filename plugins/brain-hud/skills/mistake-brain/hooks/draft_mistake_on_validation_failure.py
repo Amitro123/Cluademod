@@ -60,7 +60,13 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+import host_layout  # noqa: E402
+
 PENDING_FILE = ".claude/mb-pending-candidates.json"
+MAX_CANDIDATES = 20
 
 VALIDATION_PATTERNS = [
     re.compile(r"\bwiki_lint(?:\.py)?\b"),
@@ -163,19 +169,17 @@ def main() -> int:
     if pattern is None:
         return 0
 
-    # -- Fail-closed project root resolution ----------------------------------
-    start_str = os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or "."
-    start = Path(start_str)
-    project_root = _resolve_git_root(start)
-    # The plugin runs this in every project: without a git root, or in a
-    # project that doesn't use mistake-brain, it stays silent.
-    if project_root is None:
-        return 0
-    mistakes_path = project_root / "MISTAKES.md"
-    if not mistakes_path.exists():
+    # -- The project: the same resolution as every other hook -------------------
+    # The plugin runs this in every project: outside a mistake-brain one it is
+    # silent and writes nothing.
+    project_root = host_layout.project_root(payload)
+    if not (project_root / "MISTAKES.md").is_file():
         return 0
 
-    # -- Write pending candidate -----------------------------------------------
+    # -- One candidate per command ---------------------------------------------
+    # Red runs are normal while working: the same command failing again updates
+    # its candidate (count, latest error) instead of adding one, the file keeps
+    # the newest MAX_CANDIDATES, and only the first capture gets the full note.
     pending_path = project_root / PENDING_FILE
     candidates = _load_candidates(pending_path)
 
@@ -183,16 +187,30 @@ def main() -> int:
     safe_command = command.strip().replace("\n", " ")[:300]
     error_summary = error.split("\n")[0][:120]
 
-    candidate = {
+    same = next((c for c in candidates if c.get("command") == safe_command), None)
+    if same is not None:
+        candidates.remove(same)
+        same.update(
+            error_summary=error_summary,
+            last_at=now_str,
+            count=int(same.get("count", 1)) + 1,
+        )
+        candidates.append(same)
+        _save_candidates(pending_path, candidates[-MAX_CANDIDATES:])
+        _emit(f"[mistake-brain] still failing: {safe_command[:80]} (×{same['count']}); candidate updated in {PENDING_FILE}.")
+        return 0
+
+    candidates.append({
         "id": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "captured_at": now_str,
+        "last_at": now_str,
+        "count": 1,
         "command": safe_command,
         "error_summary": error_summary,
         "pattern_matched": pattern,
         "project_root": str(project_root),
-    }
-    candidates.append(candidate)
-    _save_candidates(pending_path, candidates)
+    })
+    _save_candidates(pending_path, candidates[-MAX_CANDIDATES:])
 
     _emit(
         f"[mistake-brain] Validation failure captured as a CANDIDATE "
