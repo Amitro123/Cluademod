@@ -59,6 +59,7 @@ declare module 'claude-code' {
       goal: Goal | null
       heldAt: number
       superseded: boolean
+      seen: string
       asking: Asking
       side: Side | null
       tick: number

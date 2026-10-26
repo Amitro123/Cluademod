@@ -15,6 +15,9 @@ const goal = atom({ plugin: 'goal-run', key: 'goal' } as const, null as Goal | n
 const heldAt = atom({ plugin: 'goal-run', key: 'heldAt' } as const, 0)
 // Set once this session was told its goal is no longer the one saved.
 const superseded = atom({ plugin: 'goal-run', key: 'superseded' } as const, false)
+// The goal as this session last loaded or saved it (JSON), to tell what changed in another session
+// from what changed here.
+const seen = atom({ plugin: 'goal-run', key: 'seen' } as const, '')
 const asking = atom({ plugin: 'goal-run', key: 'asking' } as const, null as Asking)
 const tick = atom({ plugin: 'goal-run', key: 'tick' } as const, 0)
 const side = atom({ plugin: 'goal-run', key: 'side' } as const, null as Side | null)
@@ -238,6 +241,7 @@ async function save($: EngineInterface) {
   }
   await $.store.set(key, g)
   await update($, heldAt, () => g?.setAt ?? 0)
+  await update($, seen, () => JSON.stringify(g ?? null))
   if (await read($, superseded)) await update($, superseded, () => false)
 }
 
@@ -255,6 +259,21 @@ async function runAsFactory($: EngineInterface) {
     await setGoal($, cur => (cur ? { ...cur, source: g.source } : cur))
     $.ui.toast(`Could not start the factory; run /factory ${g.text}`)
   })
+}
+
+// What another session saved since this one last loaded or saved comes in: progress on the goal, a
+// goal cleared, or a new one. Every change here is saved as it's made, so the last save wins; one
+// save() refused (a newer goal was saved elsewhere, and the toast said so) gives way to that goal.
+async function sync($: EngineInterface) {
+  const saved = await $.store.get(await storeKey($))
+  if (saved === undefined) return
+  const stored = saved && typeof saved === 'object' ? (saved as Goal) : null
+  const there = JSON.stringify(stored)
+  if (there === (await read($, seen))) return
+  await update($, goal, () => stored)
+  await update($, heldAt, () => stored?.setAt ?? 0)
+  await update($, seen, () => there)
+  if (await read($, superseded)) await update($, superseded, () => false)
 }
 
 async function setGoal($: EngineInterface, fn: (g: Goal | null) => Goal | null) {
@@ -438,19 +457,15 @@ export const register: Register = (on, options) => {
     hasFactory = (await $.command.list().catch(() => [])).some(c => c.name === 'factory')
 
     // A goal kept for this project from an earlier session: offered to continue, or a new one asked for.
-    if (!(await read($, goal))) {
-      const key = await storeKey($)
-      let saved = await $.store.get(key)
-      const legacy = await legacyKey($)
-      if (!saved && legacy !== key) {
-        saved = await $.store.get(legacy)
-        if (saved && typeof saved === 'object') await $.store.set(key, saved)
-      }
-      if (saved && typeof saved === 'object') {
-        await update($, goal, () => saved as Goal)
-        await update($, heldAt, () => (saved as Goal).setAt ?? 0)
-      }
+    const key = await storeKey($)
+    const legacy = await legacyKey($)
+    if (legacy !== key && (await $.store.get(key)) === undefined) {
+      const old = await $.store.get(legacy)
+      if (old && typeof old === 'object') await $.store.set(key, old)
     }
+    // The project's saved goal; a resumed session, which comes back with the goal it had, takes in
+    // what another session changed meanwhile.
+    await sync($)
     const g = await read($, goal)
     if (g && g.status !== 'done') {
       if (askOnStart) await update($, asking, () => 'resume')
@@ -461,6 +476,12 @@ export const register: Register = (on, options) => {
     await syncTicking($)
     return next(e)
   })
+
+  // Another session open beside this one may have changed the goal since.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined && e.text !== '') await sync($).catch(() => {})
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('session.end', async ($, e, next) => {
     for (const timer of timers.splice(0)) timer.cancel()

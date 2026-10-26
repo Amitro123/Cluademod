@@ -972,3 +972,43 @@ describe('one list per repository, and items through the factory', () => {
     await pane.unmount()
   })
 })
+
+describe("another session's changes reach this one", () => {
+  type Saved = { id: string; title: string; status: string }[]
+  const setUp = async ($: Engine, on: On) => {
+    const saved: Record<string, unknown> = {}
+    engine(on, { 'README.md': '' }, saved)
+    on('turn.start', (_, e) => ({ turnId: e.turnId }) as never)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    for (const args of ['Finished elsewhere', 'Removed elsewhere', 'Still open']) await $.command.run({ command: 'followup', args } as never)
+    const list = saved['items:/repo'] as Saved
+    // The other session: the first item done, the second removed.
+    saved['items:/repo'] = list.filter(i => i.title !== 'Removed elsewhere').map(i => (i.title === 'Finished elsewhere' ? { ...i, status: 'done' } : i))
+    return saved
+  }
+  const shown = async ($: Engine) => {
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const t = await texts(pane)
+    await pane.unmount()
+    return t
+  }
+
+  test('a resumed session, which comes back with its old list, takes them in at the start', async ($, on) => {
+    await setUp($, on)
+    expect(await shown($)).toMatch(/Removed elsewhere/)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true, source: 'resume' } as never)
+    const t = await shown($)
+    expect(t).not.toMatch(/Removed elsewhere/)
+    expect(t).toMatch(/1 open · 0 in progress · 1 done/)
+  })
+
+  test('a session open beside the other one takes them in at its next prompt', async ($, on) => {
+    await setUp($, on)
+    expect(await shown($)).toMatch(/Removed elsewhere/)
+    await $.turn.start({ turnId: 't9', text: 'next prompt' } as never)
+    const t = await shown($)
+    expect(t).not.toMatch(/Removed elsewhere/)
+    expect(t).toMatch(/Finished elsewhere/)
+    expect(t).toMatch(/1 open · 0 in progress · 1 done/)
+  })
+})
