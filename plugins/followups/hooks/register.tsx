@@ -270,6 +270,18 @@ export function mergeLists<T extends { id: string }>(base: T[], mine: T[], store
   return [...kept, ...stored.filter(i => !held.has(i.id) && !was.has(i.id))]
 }
 
+// What another session saved since this one last loaded or saved comes in: an item it finished or
+// removed is finished or gone here too, and what changed only here is kept (the same merge as a save).
+async function sync($: EngineInterface) {
+  const saved = await $.store.get(await storeKey($))
+  if (!Array.isArray(saved)) return
+  const stored = migrate(saved)
+  const from = await read($, base)
+  if (JSON.stringify(stored) === JSON.stringify(from)) return
+  await update($, items, mine => mergeLists(from, mine, stored))
+  await update($, base, () => stored)
+}
+
 async function save($: EngineInterface) {
   const key = await storeKey($)
   const saved = await $.store.get(key)
@@ -457,15 +469,9 @@ export const register: Register = (on, options) => {
     await migrateKey($, 'items')
     await migrateKey($, 'skipped')
     hasFactory = (await $.command.list().catch(() => [])).some(c => c.name === 'factory')
-    // Items kept in this project before carry over to a new session.
-    if (!held.length) {
-      const saved = await $.store.get(await storeKey($))
-      if (Array.isArray(saved) && saved.length) {
-        const list = migrate(saved)
-        await update($, items, () => list)
-        await update($, base, () => list)
-      }
-    }
+    // Items kept in this project carry over to a new session; a resumed one, which comes back with
+    // the list it had, takes in what other sessions changed meanwhile.
+    await sync($)
     const turnedDown = await $.store.get(await skippedKey($))
     if (Array.isArray(turnedDown)) {
       const fromStore = turnedDown.filter((t): t is string => typeof t === 'string')
@@ -487,6 +493,8 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined && e.text !== '') {
       isFlagged = false
       isBlocked = false
+      // Another session open beside this one may have changed the list since.
+      await sync($).catch(() => {})
     }
     return next(e)
   })
