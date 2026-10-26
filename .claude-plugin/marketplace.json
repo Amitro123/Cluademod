@@ -34,7 +34,7 @@
     {
       "name": "brain-hud",
       "source": "./plugins/brain-hud",
-      "description": "A pixel Claude with a brain reacts to each MISTAKES.md entry, and a pane draws the mistake-brain memory as a tree"
+      "description": "Agent memory with its skill built in: mistake-brain logs and routes lessons, a pixel Claude with a brain reacts, and a pane draws the memory as a graph"
     },
     {
       "name": "factory",

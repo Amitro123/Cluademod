@@ -9,7 +9,7 @@ Seven mods, each installed on its own. They also work side by side: each draws i
 | [followups](#followups-dont-lose-what-claude-notices) | Claude flags what it notices, asks whether to track it, and keeps a to-do you can export |
 | [rtl-toggle](#rtl-toggle-hebrew-and-english-on-one-line) | Fixes the reading order of lines that mix English and Hebrew |
 | [goal-run](#goal-run-a-goal-for-the-session) | Asks for a goal when a session starts, has Claude plan it, and runs a pixel Claude to 100% as the tasks get done |
-| [brain-hud](#brain-hud-the-agents-memory-made-visible) | A pixel Claude with a brain reacts to each entry Claude logs to `MISTAKES.md`, and a pane draws the project's memory as a tree |
+| [brain-hud](#brain-hud-the-agents-memory-made-visible) | Agent memory with its skill built in: mistake-brain logs and routes lessons, a pixel Claude with a brain reacts to each entry, and a pane draws the memory as a graph |
 | [factory](#factory-a-software-factory) | `/factory <feature>`: a spec, your approval of its plan, a build on its own branch, checks, parallel reviews and an approver, then Claude opens the PR |
 
 Add the marketplace once, then install the ones you want:
@@ -211,13 +211,23 @@ Tests: `claude plugin test plugins/goal-run`.
 
 ![brain-hud: three of the scenes above the prompt, an offer from followups, and the Brain pane with the memory drawn as a knowledge graph](assets/brain-hud.png)
 
-<sub>The scenes and the brain map are the mod's own SVG output; the windows around them are mock-ups. The data is agent-brain-org's own memory, with one new lesson just routed into Projects (✦).</sub>
+<sub>The scenes and the brain map are the mod's own SVG output; the windows around them are mock-ups. The data is a real project's memory, with one new lesson just routed into Projects (✦).</sub>
 
-The [mistake-brain](https://github.com/Keshet-Broadcasting/agent-brain-org) skill gives an agent a memory that lasts between sessions. Claude logs what happened to `MISTAKES.md` (a mistake, a success, a decision or a handoff). It routes those entries into PARA folders under `.agent-brain/shared/` (Projects, Areas, Resources, Archives), promotes a lesson that repeats into a rule, and now and then reorganizes the memory ("dream"). brain-hud shows that memory as it grows. It only reads: logging, routing and promoting stay with the skill.
+brain-hud gives Claude a memory that lasts between sessions, and shows it. The **mistake-brain** skill ships inside it, with its hooks. Claude logs what happened to `MISTAKES.md` (a mistake, a success, a decision or a handoff). It routes those entries into PARA folders under `.agent-brain/shared/` (Projects, Areas, Resources, Archives), promotes a lesson that repeats into a rule (with your approval), and now and then reorganizes the memory ("dream"). The mod shows that memory as it grows. Nothing else needs installing.
 
 ```text
 /plugin install brain-hud@claudemod
 ```
+
+Then, in each project that should remember: `/brain-hud:mistake-brain init`, or **Set up memory** in the Brain pane (`/brain`). It creates `MISTAKES.md`, the PARA folders, the index `.agent-brain/shared/MEMORY.md` and the standing rules. A `CLAUDE.md` tracked in git is left as it is; the instruction goes into `.claude/rules/mistake-brain.md`.
+
+### The skill, built in
+
+- **The command** is `/brain-hud:mistake-brain` with `log`, `route`, `promote`, `dream`, `recall`, `init` or `update`. Claude also runs it on its own: after a fix, a revert or a correction it logs an entry, and with 3 or more entries waiting it routes them.
+- **The hooks come with the plugin.** At session start the index is put in Claude's context with what's waiting. A revert or a discarded change drafts a mistake entry. A failing test, lint or typecheck is kept as a candidate until the fix is confirmed. A write to `MISTAKES.md` asks for routing, or surfaces patterns ready to become rules. They run in every project, and do nothing in one without `MISTAKES.md` or `.agent-brain/`. They need Python 3 (`python3`, or `python` on Windows); without it they're skipped and the session goes on.
+- **The index keeps itself right.** Each file's lesson count and last date are facts on disk, so a script writes them (`rebuild_index.py`), never the model: at session start, after a lesson file is written, and at the end of `route`, `dream` and `init`. Claude writes only each file's one-line summary. A line the script doesn't recognise, or one for a file since removed, is left for `dream` to decide on.
+- **Coming from a separate install of the skill** (`~/.claude/skills/mistake-brain`): run `/brain-hud:mistake-brain init` once in each project. It removes the hooks the old install registered in `.claude/settings.local.json`, so none fires twice, and tells you to delete the old folder, which would load as a second, older skill. It reports a tracked `.claude/settings.json` that still has them, rather than editing it. The memory files themselves are the same format and carry over.
+- What changed when it moved into the plugin: `plugins/brain-hud/skills/mistake-brain/HISTORY.md`. Its Python tests: `python -m pytest plugins/brain-hud/tests/skill` (CI runs them).
 
 - **A pixel Claude with a brain**, above the prompt, plays a short scene whenever the memory changes:
 
@@ -239,26 +249,26 @@ The [mistake-brain](https://github.com/Keshet-Broadcasting/agent-brain-org) skil
     - **📁 Projects, Areas, Resources** and **🗄 Archives**: each PARA file with its lesson count and date, counted from the file; the file that just changed shows its summary too. A file on disk that `MEMORY.md` doesn't name shows as *not in MEMORY.md*, the gap the skill's dream fixes.
     - **⚖ Rules**: what has been promoted, once there is something.
     - What just changed is marked ✦.
-- **Entries waiting to be routed.** With 3 or more unrouted entries, the band above the prompt says *🧠 N entries to route* with **Route now** (`r`), which runs `/mistake-brain route` (or asks Claude to, where the command can't be run), and **Later**, which waits until more come in.
+- **Entries waiting to be routed.** With 3 or more unrouted entries, the band above the prompt says *🧠 N entries to route* with **Route now** (`r`), which runs `/brain-hud:mistake-brain route` (or asks Claude to, where the command can't be run), and **Later**, which waits until more come in.
 - **With the other mods.**
-  - **followups:** when Claude finishes a to-do item you started (its `done` tool), the band asks *Worth remembering?* in one line: **Log as** the suggested type (a bug as a mistake, anything else as a success), **…** for the other types, and **Not now**. A press asks Claude to log it with `/mistake-brain log`, so the entry keeps the skill's format.
+  - **followups:** when Claude finishes a to-do item you started (its `done` tool), the band asks *Worth remembering?* in one line: **Log as** the suggested type (a bug as a mistake, anything else as a success), **…** for the other types, and **Not now**. A press asks Claude to log it with `/brain-hud:mistake-brain log`, so the entry keeps the skill's format.
   - **goal-run:** a reached goal is offered as a success or a handoff, named as you set it. A goal a to-do item closed is offered too when goal-run's note on followups' `done` result reaches brain-hud; that depends on the order the mods load in (see below).
   - The offer's hotkeys are `l` (log as the suggested type) and `m` (the other types), clear of followups' (`a`, `s`) and goal-run's (`g`, `k`, `c`, `n`) in the same band. No digits: Claude Code passes a digit typed into an empty prompt box to the band, so a prompt starting with `1.` would have logged to memory.
   - A **handoff** entry in the pane has **+ to-do**, which adds it to followups' list with `/followup`.
   - **How they hear each other.** followups and goal-run answer their own tools (`done`, `plan`, `update`) and stop there, so another mod's hook on those tools runs only when that mod sits above the owner, and Claude Code doesn't promise an order among installed mods. brain-hud and goal-run therefore also read each of those calls from the `PostToolUse` event, which every mod sees whatever the order; an offer, or a task closed, happens once whichever arrives first. Not yet checked in a live session with all the mods installed: with `claude --debug`, a line `<event> bypassed by <plugin>` for these tools would mean a hook was skipped.
-- In a project with no `MISTAKES.md` and no `.agent-brain/` the mod stays quiet; the pane says that `/mistake-brain init` sets one up.
+- In a project with no `MISTAKES.md` and no `.agent-brain/` the mod stays quiet; the pane offers **Set up memory**, which runs `/brain-hud:mistake-brain init`.
 
 ### The memory graph
 
 ![The Brain pane's knowledge graph, dark and light: MEMORY.md at the centre, the four PARA folders, their files, and each MISTAKES.md entry as a dot linked to its file](assets/brain-hud-graph.png)
 
-<sub>The palette follows the theme in `/config`. The graph is the mod's own SVG, drawn from agent-brain-org's real memory: 30 lessons in one Project file (its ring of mostly red dots is the mistakes that taught them), 3 Resource files, empty Areas and Archives, and 2 entries still in the inbox.</sub>
+<sub>The palette follows the theme in `/config`. The graph is the mod's own SVG, drawn from a real project's memory: 30 lessons in one Project file (its ring of mostly red dots is the mistakes that taught them), 3 Resource files, empty Areas and Archives, and 2 entries still in the inbox.</sub>
 
 ![A routed entry in four frames: logged and waiting in the inbox, on its way, almost at its file, filed with the file glowing](assets/brain-hud-route.png)
 
 <sub>When the skill routes an entry, its dot travels from the inbox to the file its `PARA route` names (about two seconds), then the file glows.</sub>
 
-Tests: `claude plugin test plugins/brain-hud`.
+Tests: `claude plugin test plugins/brain-hud` (the mod) and `python -m pytest plugins/brain-hud/tests/skill` (the skill).
 
 ## factory: a software factory
 
@@ -312,7 +322,7 @@ A feature goes in and a reviewed PR comes out. Each step is a sub-agent with its
 - `maxRounds` (`1`, `2`, `3`): how many times reviewers may send the builder back before the approver decides on what there is.
 - The roles are agent types, `factory:spec-writer`, `factory:builder`, `factory:security-reviewer`, `factory:code-reviewer` and `factory:approver`, hidden from the model so only the factory runs them. Their instructions are short defaults in the mod.
 
-Not yet: reviewers chosen by the diff (database, API, tests, logging), role skills loaded from a folder such as keshet-builder-skills, 🏭 buttons in goal-run's and followups' panes, minor findings offered to followups, and an ESCALATE offered to brain-hud. Not yet run end to end in a live session: the tests drive the engine's events with the agents, git and the checks stubbed.
+Not yet: reviewers chosen by the diff (database, API, tests, logging), role skills loaded from a folder of skills, 🏭 buttons in goal-run's and followups' panes, minor findings offered to followups, and an ESCALATE offered to brain-hud. Not yet run end to end in a live session: the tests drive the engine's events with the agents, git and the checks stubbed.
 
 Tests: `claude plugin test plugins/factory`.
 

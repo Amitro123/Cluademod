@@ -1,8 +1,11 @@
 {
   "name": "brain-hud",
-  "version": "0.3.3",
-  "description": "Shows the memory mistake-brain builds for a project: a pixel Claude with a brain reacts to each entry in MISTAKES.md, and a pane draws the PARA memory as a tree. Offers finished follow-ups and reached goals to memory.",
-  "author": { "name": "Amit Rosen", "url": "https://github.com/Amitro123" },
+  "version": "0.4.0",
+  "description": "Agent memory that works on its own: the mistake-brain skill and its hooks ship inside (log, route, promote, dream, recall), and a pixel Claude with a brain reacts to each MISTAKES.md entry while a pane draws the PARA memory as a graph. Offers finished follow-ups and reached goals to memory.",
+  "author": {
+    "name": "Amit Rosen",
+    "url": "https://github.com/Amitro123"
+  },
   "repository": "https://github.com/Amitro123/claudemod",
   "license": "MIT",
   "types": "./types/index.d.ts"

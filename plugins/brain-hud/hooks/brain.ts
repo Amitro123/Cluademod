@@ -3,6 +3,9 @@
 
 import type { Brain, Entry, EntryType, Folder, Lesson, Pulse } from '../types'
 
+
+// The mistake-brain skill ships in this plugin: its command is the plugin's.
+export const SKILL = 'brain-hud:mistake-brain'
 export const FOLDERS: Folder[] = ['Projects', 'Areas', 'Resources', 'Archives']
 const TYPES: EntryType[] = ['mistake', 'success', 'decision', 'handoff']
 
@@ -161,7 +164,7 @@ export function diffBrain(a: Brain | null, b: Brain): Omit<Pulse, 'at'> | null {
 // What the person is asked to have Claude log: through the skill, so the entry keeps its format.
 export function logPrompt(type: EntryType, title: string, detail: string): string {
   return [
-    `Log this to MISTAKES.md with /mistake-brain log, as Type: ${type}.`,
+    `Log this to MISTAKES.md with /${SKILL} log, as Type: ${type}.`,
     `- ${title}`,
     ...(detail ? [`- ${detail}`] : []),
     'Fill the fields for that type from what happened in this session; keep it short.',

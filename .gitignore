@@ -1,3 +1,5 @@
 node_modules/
 demo/frames/
 plugins/*/.claude-plugin/types/
+__pycache__/
+.pytest_cache/
