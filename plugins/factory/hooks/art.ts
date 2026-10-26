@@ -22,7 +22,8 @@ const short = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…
 
 // One step's state, read off the run (the plan gate and the outcomes have no step of their own).
 export function states(run: Run) {
-  const planState: StepState = run.phase === 'spec' ? 'wait' : run.phase === 'plan' ? 'run' : 'pass'
+  // Approved once the builder has been started; a run stopped before that never had its plan approved.
+  const planState: StepState = run.phase === 'plan' ? 'run' : run.steps.builder.state !== 'wait' ? 'pass' : 'wait'
   const reviewing = run.reviews.filter(r => r.round === run.round && r.round > 0)
   const inCount = reviewing.filter(r => r.state === 'pass' || r.state === 'changes' || r.state === 'fail').length
   const waitState: StepState = !reviewing.length ? 'wait' : inCount < reviewing.length ? 'run' : reviewing.some(r => r.state !== 'pass') ? 'changes' : 'pass'
@@ -98,7 +99,7 @@ export function diagramSvg(run: Run, frame: number, theme: Theme = 'light'): str
   s += `<path d="M${bx + bw + 8} 148l-8 4 8 4z" fill="${st.waitState === 'changes' ? COLOR.changes : P.line}"/>`
   s += `<text x="${W - 20}" y="300" font-size="10" fill="${P.dim}" transform="rotate(-90 ${W - 20} 300)">changes: builder again</text>`
   s += arrow(396, 414, cx, true)
-  s += box(bx, 414, bw, 44, ROLES.approver.label, ROLES.approver.model, run.steps.approver.state, run.phase === 'needs-human' || run.phase === 'ready' || run.phase === 'done' ? run.note : '')
+  s += box(bx, 414, bw, 44, ROLES.approver.label, ROLES.approver.model, run.steps.approver.state, run.blocked?.on === 'escalate' || run.phase === 'ready' || run.phase === 'done' ? run.note : '')
   s += `<line x1="${cx - 70}" y1="458" x2="${cx - 70}" y2="486" stroke="${P.line}" stroke-dasharray="4 3"/><line x1="${cx + 70}" y1="458" x2="${cx + 70}" y2="486" stroke="${P.line}" stroke-dasharray="4 3"/>`
   s += `<text x="${cx - 118}" y="480" font-size="9.5" fill="${P.dim}" text-anchor="middle">APPROVE</text><text x="${cx + 118}" y="480" font-size="9.5" fill="${P.dim}" text-anchor="middle">ESCALATE</text>`
   s += box(cx - 190, 486, 160, 40, 'open PR', '', st.pr)
