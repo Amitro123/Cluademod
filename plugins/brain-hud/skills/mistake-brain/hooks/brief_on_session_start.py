@@ -266,10 +266,7 @@ def main() -> int:
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    project_dir = Path(
-        os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or "."
-    )
-    return main_for(project_dir)
+    return main_for(host_layout.project_root(payload))
 
 
 if __name__ == "__main__":

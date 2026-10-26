@@ -79,33 +79,46 @@ def test_stop_hook_owns_revert_detection(tmp_path, monkeypatch):
 
 
 def test_stop_hook_detects_consecutive_identical_resets(tmp_path, monkeypatch):
+    """Two resets with the same reflog message are told apart by the count;
+    each one that dropped commits is drafted."""
     reflog_count = 11
     written_states = []
 
     def fake_git(args, _cwd):
         if args[:2] == ["rev-parse", "HEAD"]:
-            return "same-head"
+            return "new-head"
         if args[:2] == ["reflog", "-1"]:
-            return "reset: moving to HEAD"
+            return "reset: moving to HEAD~1"
         if args[:2] == ["reflog", "--format=%gD"]:
             return "\n".join(f"HEAD@{{{i}}}" for i in range(reflog_count))
         return None
 
     monkeypatch.setattr(stop_hook, "_git", fake_git)
+    monkeypatch.setattr(stop_hook, "_dropped_commits", lambda *_args: True)
     monkeypatch.setattr(
         stop_hook,
         "_write_state",
         lambda _project, head, marker: written_states.append((head, marker)),
     )
 
-    assert stop_hook._detect(tmp_path, "same-head", "10") == (
-        "reset",
-        "reset: moving to HEAD",
-    )
-    assert written_states[-1] == ("same-head", "11")
+    assert stop_hook._detect(tmp_path, "old-head", "10") == ("reset", "reset: moving to HEAD~1")
+    assert written_states[-1] == ("new-head", "11")
     reflog_count = 12
-    assert stop_hook._detect(tmp_path, "same-head", "11") == (
-        "reset",
-        "reset: moving to HEAD",
-    )
-    assert written_states[-1] == ("same-head", "12")
+    assert stop_hook._detect(tmp_path, "older-head", "11") == ("reset", "reset: moving to HEAD~1")
+    assert written_states[-1] == ("new-head", "12")
+
+
+def test_a_reset_that_leaves_head_where_it_was_is_not_a_mistake(tmp_path, monkeypatch):
+    """`git reset` (unstage) writes "reset: moving to HEAD" without moving HEAD."""
+    def fake_git(args, _cwd):
+        if args[:2] == ["rev-parse", "HEAD"]:
+            return "same-head"
+        if args[:2] == ["reflog", "-1"]:
+            return "reset: moving to HEAD"
+        if args[:2] == ["reflog", "--format=%gD"]:
+            return "\n".join(f"HEAD@{{{i}}}" for i in range(11))
+        return None
+
+    monkeypatch.setattr(stop_hook, "_git", fake_git)
+    monkeypatch.setattr(stop_hook, "_write_state", lambda *_args: None)
+    assert stop_hook._detect(tmp_path, "same-head", "10") == (None, None)

@@ -60,13 +60,32 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+import host_layout  # noqa: E402
+
+# Each pattern is matched against one shell command at a time (split on ; & |).
+# `git restore` counts only when it touches the worktree: without --staged, or
+# with --staged and --worktree/-W. `git restore --staged f` only unstages.
 REVERT_PATTERNS = [
     r"\bgit\s+checkout\s+--\s+\S",
-    r"\bgit\s+restore\b",
+    r"\bgit\s+restore\b(?!.*(?:--staged|-S\b))",
+    r"\bgit\s+restore\b(?=.*(?:--worktree|-W\b))",
     r"\bgit\s+clean\s+-[a-zA-Z]*f",
 ]
 
-MARKER = "<!-- mistake-brain: new entries are inserted immediately below this line -->"
+MARKER = host_layout.MARKER
+
+
+def matches_revert(command: str) -> bool:
+    """True when one of the command's shell commands discards worktree changes."""
+    unquoted = strip_quoted_spans(command)
+    return any(
+        re.search(p, part)
+        for part in re.split(r"[;&|\n]+", unquoted)
+        for p in REVERT_PATTERNS
+    )
 
 
 def strip_quoted_spans(command: str) -> str:
@@ -97,13 +116,10 @@ def main() -> int:
     command = (payload.get("tool_input") or {}).get("command", "")
     if not command:
         return 0
-    unquoted = strip_quoted_spans(command)
-    if not any(re.search(p, unquoted) for p in REVERT_PATTERNS):
+    if not matches_revert(command):
         return 0
 
-    project_dir = Path(
-        os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or "."
-    )
+    project_dir = host_layout.project_root(payload)
     mistakes_path = project_dir / "MISTAKES.md"
     if not mistakes_path.exists():
         return 0
@@ -129,11 +145,7 @@ def main() -> int:
         f"- **Status:** unrouted\n"
     )
 
-    text = text.replace(MARKER, MARKER + "\n\n" + entry_block, 1)
-    text = re.sub(
-        r"\n{3,}", "\n\n", text
-    )  # same normalization compose_mistakes.py uses
-    mistakes_path.write_text(text, encoding="utf-8")
+    mistakes_path.write_text(host_layout.insert_entry(text, entry_block), encoding="utf-8")
 
     # Emit routing reminder via additionalContext — the auto_pipeline PostToolUse hook
     # won't fire because this hook writes directly (Python I/O, not via Edit/Write tools).

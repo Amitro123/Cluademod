@@ -369,3 +369,48 @@ def test_scripts_are_run_from_the_skill_folder_not_a_global_copy():
         text = p.read_text(encoding="utf-8")
         for m in re.finditer(r"python3? \S*\.claude/skills/mistake-brain\S*", text):
             pytest.fail(f"{p.relative_to(SKILL)} runs a script from a copy: {m.group(0)}")
+
+
+# ---------- one project, the same for every hook (S5, S6) ----------
+
+def test_edits_outside_the_project_dont_run_its_pipeline(tmp_path):
+    pipeline = _hook("auto_pipeline_on_mistakes_edit")
+    project = tmp_path / "repo"
+    (project).mkdir()
+    (project / "MISTAKES.md").write_text(init_project.MISTAKES_HEADER + init_project.MARKER + "\n", encoding="utf-8")
+    other = tmp_path / "repo.factory" / "slug"
+    for path in (other / "MISTAKES.md", tmp_path / "elsewhere" / ".agent-brain" / "shared" / "Areas" / "x.md"):
+        payload = {"tool_name": "Edit", "tool_input": {"file_path": str(path)}}
+        assert not pipeline._is_mistakes_edit(payload, project)
+        assert not pipeline._is_lesson_edit(payload, project)
+    mine = {"tool_name": "Write", "tool_input": {"file_path": "MISTAKES.md"}}
+    assert pipeline._is_mistakes_edit(mine, project)
+    lesson = {"tool_name": "Edit", "tool_input": {"file_path": str(project / ".agent-brain" / "shared" / "Areas" / "ci.md")}}
+    assert pipeline._is_lesson_edit(lesson, project)
+    index = {"tool_name": "Edit", "tool_input": {"file_path": str(project / ".agent-brain" / "shared" / "MEMORY.md")}}
+    assert not pipeline._is_lesson_edit(index, project)
+
+
+def test_project_root_prefers_the_project_dir_then_the_git_top(tmp_path, monkeypatch):
+    repo = tmp_path / "mono"
+    _git_repo(repo)
+    (repo / "MISTAKES.md").write_text("x", encoding="utf-8")
+    sub = repo / "services" / "api"
+    sub.mkdir(parents=True)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    # A session started in a subfolder of a mistake-brain repo: the repo.
+    assert host_layout.project_root({"cwd": str(sub)}).resolve() == repo.resolve()
+    # A subfolder with its own MISTAKES.md: that folder, as init put it there.
+    (sub / "MISTAKES.md").write_text("x", encoding="utf-8")
+    assert host_layout.project_root({"cwd": str(sub)}) == sub
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+    assert host_layout.project_root({"cwd": str(sub)}) == repo
+
+
+def test_insert_entry_only_touches_the_seam():
+    head = "# MISTAKES.md\n\n" + host_layout.MARKER
+    older = "## [2026-10-01 09:00] Old\n```\na\n\n\nb\n```\n"
+    text = head + "\n\n" + older
+    out = host_layout.insert_entry(text, "## [2026-10-26 08:00] New\n- **Status:** unrouted\n\n\n")
+    assert out == head + "\n\n## [2026-10-26 08:00] New\n- **Status:** unrouted\n\n" + older
+    assert host_layout.insert_entry(head + "\n", "## [x] Only\n") == head + "\n\n## [x] Only\n"

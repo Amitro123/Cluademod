@@ -39,6 +39,15 @@ MISTAKES_HEADER = (
 )
 
 
+def _load():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("vf_hook", HOOK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _run_hook(payload: dict, project_dir: Path) -> tuple:
     env = {**os.environ, "CLAUDE_PROJECT_DIR": str(project_dir)}
     r = subprocess.run(
@@ -206,13 +215,41 @@ def test_powershell_accepted(tmp_path):
 # 7. No git repo -> visible warning, no write (fail-closed)
 # ---------------------------------------------------------------------------
 
-def test_no_git_repo_is_silent(tmp_path):
-    """The plugin runs this hook in every project: without a git root it says nothing."""
+def test_a_project_without_git_still_captures(tmp_path):
+    """The project is found the way every hook finds it (CLAUDE_PROJECT_DIR, then
+    cwd): a mistake-brain project that isn't a git repo is still one."""
     (tmp_path / "MISTAKES.md").write_text("# MISTAKES.md" + chr(10))
     rc, out = _run_hook(_payload("pytest tests/"), tmp_path)
     assert rc == 0
-    assert not (tmp_path / PENDING_FILE).exists()
-    assert out.strip() == ""
+    assert (tmp_path / PENDING_FILE).exists()
+
+
+def test_the_same_command_failing_again_is_one_candidate(tmp_path):
+    _git_init(tmp_path)
+    _init_project(tmp_path)
+    outs = [_run_hook(_payload("pytest tests/"), tmp_path)[1] for _ in range(3)]
+    data = json.loads((tmp_path / PENDING_FILE).read_text())
+    assert len(data["candidates"]) == 1
+    assert data["candidates"][0]["count"] == 3
+    assert "CANDIDATE" in outs[0]
+    for out in outs[1:]:
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert ctx.startswith("[mistake-brain] still failing: pytest tests/")
+        assert "×" in ctx and len(ctx.splitlines()) == 1
+
+
+def test_candidates_are_capped_newest_kept(tmp_path):
+    _git_init(tmp_path)
+    _init_project(tmp_path)
+    hook = _load()
+    pending = tmp_path / PENDING_FILE
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    old = [{"command": f"pytest t{i}", "count": 1} for i in range(hook.MAX_CANDIDATES)]
+    pending.write_text(json.dumps({"candidates": old}))
+    _run_hook(_payload("pytest new"), tmp_path)
+    cmds = [c["command"] for c in json.loads(pending.read_text())["candidates"]]
+    assert len(cmds) == hook.MAX_CANDIDATES
+    assert cmds[-1] == "pytest new" and "pytest t0" not in cmds
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ import {
   detectChecks,
   detectSetup,
   isLive,
+  neverCommit,
   newRun,
   openFindings,
   parseDecision,
@@ -26,6 +27,7 @@ import {
   tailOf,
   tok,
   tokensOf,
+  untrackedOf,
   waitsOnPerson,
 } from './flow'
 import { FACTORY_PLAN_APPROVED_ARG, parsePlanOutcome, toolText } from './texts'
@@ -33,6 +35,9 @@ import { FACTORY_PLAN_APPROVED_ARG, parsePlanOutcome, toolText } from './texts'
 const run = atom({ plugin: 'factory', key: 'run' } as const, null as Run | null)
 const frame = atom({ plugin: 'factory', key: 'frame' } as const, 0)
 const theme = atom({ plugin: 'factory', key: 'theme' } as const, 'dark' as Theme)
+// The agents of runs that were stopped, newest last: their tool calls stay refused after a new run starts.
+const stoppedAgents = atom({ plugin: 'factory', key: 'stoppedAgents' } as const, [] as string[])
+const MAX_STOPPED = 50
 
 const PANE = 'factory'
 const PANE_TITLE = 'Factory'
@@ -134,11 +139,24 @@ async function start($: EngineInterface, feature: string): Promise<string> {
   }
   if (!r) return `Could not create a worktree for the run: the branches factory/${slug} to factory/${slug}-${MAX_SLUG_TRIES} are all taken.`
   const created: Run = { ...r, gate: (await goalRunThere($)) ? 'goal-run' : 'factory' }
+  await keepOutOfGit($, root)
   await readTheme($)
   await update($, run, () => created)
   void $.ui.open({ id: PANE, title: PANE_TITLE })
   await serial(async () => void (await spawnRole($, 'spec', specPrompt(created))))
   return `Factory run started: ${created.feature}. Branch ${created.branch}, worktree ${created.worktree}; the spec-writer is writing ${created.specFile}.`
+}
+
+// The worktrees live in .factory/ of the repository: listed in its exclude file, found through
+// git (a .git that is a file, in a worktree or a submodule, has it elsewhere), never committed.
+async function keepOutOfGit($: EngineInterface, root: string) {
+  const found = await git($, ['rev-parse', '--git-path', 'info/exclude'], root)
+  if (found.exitCode !== 0 || !found.stdout.trim()) return
+  const rel = found.stdout.trim()
+  const path = /^([a-zA-Z]:)?[\\/]/.test(rel) ? rel : `${root}/${rel}`
+  const text = await $.fs.read(path).then(t => String(t), () => '')
+  if (/^\.factory\/$/m.test(text)) return
+  await $.fs.write(path, `${text}${text && !text.endsWith('\n') ? '\n' : ''}.factory/\n`).catch(() => {})
 }
 
 // The diagram's palette follows the theme set in /config; dark when it can't be read.
@@ -185,18 +203,26 @@ async function startBuild($: EngineInterface, findings: Finding[], failed: Check
   if (r) await spawnRole($, 'builder', buildPrompt(r, findings, failed))
 }
 
-// What the builder left uncommitted is committed by the factory: reviewers and the PR see the same commits.
+// What the builder left uncommitted is committed by the factory: reviewers and the PR see the same
+// commits. Tracked changes all go in; a new file only when it isn't installed dependencies, build
+// output or a credential (those are left out, and the run's note says so).
 async function onBuilt($: EngineInterface) {
   const r = await read($, run)
   if (!r) return
   const status = await git($, ['status', '--porcelain'], r.worktree)
   if (status.exitCode === 0 && status.stdout.trim()) {
-    const added = await git($, ['add', '-A'], r.worktree)
-    const committed = added.exitCode === 0 ? await git($, ['commit', '-m', `factory: ${r.feature}`], r.worktree) : added
-    if (committed.exitCode !== 0) {
-      await block($, { on: 'builder' }, `The builder's work could not be committed: ${tailOf(`${committed.stdout}\n${committed.stderr}`, 2)}`)
+    const untracked = untrackedOf(status.stdout)
+    const skipped = untracked.filter(neverCommit)
+    const fresh = untracked.filter(p => !neverCommit(p))
+    let out = await git($, ['add', '-u'], r.worktree)
+    if (out.exitCode === 0 && fresh.length) out = await git($, ['add', '--', ...fresh], r.worktree)
+    const staged = out.exitCode === 0 ? await git($, ['diff', '--cached', '--quiet'], r.worktree) : out
+    if (out.exitCode === 0 && staged.exitCode !== 0) out = await git($, ['commit', '-m', `factory: ${r.feature}`], r.worktree)
+    if (out.exitCode !== 0) {
+      await block($, { on: 'builder' }, `The builder's work could not be committed: ${tailOf(`${out.stdout}\n${out.stderr}`, 2)}`)
       return
     }
+    if (skipped.length) await patch($, cur => ({ ...cur, skipped }))
   }
   await runChecks($)
 }
@@ -217,6 +243,7 @@ async function setUp($: EngineInterface, r: Run, files: string[]): Promise<boole
   if (r.setupDone) return true
   const cmds = setupOption.trim() ? splitChecks(setupOption) : [detectSetup(files)].filter((c): c is string[] => c !== null)
   for (const argv of cmds) {
+    if (!(await stillIn($, 'checks'))) return false
     await patch($, cur => ({ ...cur, note: `installing: ${argv.join(' ')}` }))
     const out = await run$($, argv, r.worktree)
     if (out.exitCode !== 0) {
@@ -227,6 +254,10 @@ async function setUp($: EngineInterface, r: Run, files: string[]): Promise<boole
   }
   await patch($, cur => ({ ...cur, setupDone: true }))
   return true
+}
+
+async function stillIn($: EngineInterface, phase: Run['phase']) {
+  return (await read($, run))?.phase === phase
 }
 
 async function runChecks($: EngineInterface) {
@@ -242,6 +273,8 @@ async function runChecks($: EngineInterface) {
   await patch($, cur => ({ ...cur, note: 'running the checks' }))
   const results: Check[] = []
   for (const argv of cmds) {
+    // A Stop meanwhile ends the checks here: the rest don't run for nothing.
+    if (!(await stillIn($, 'checks'))) return
     const out = await run$($, argv, r.worktree)
     results.push({ cmd: argv.join(' '), ok: out.exitCode === 0, tail: out.exitCode === 0 ? '' : tailOf(`${out.stdout}\n${out.stderr}`) })
   }
@@ -379,6 +412,7 @@ async function retryNow($: EngineInterface): Promise<string> {
 
 async function stopNow($: EngineInterface): Promise<string> {
   const r = await patch($, cur => (isLive(cur.phase) ? moveTo(cur, 'stopped', 'stopped by the person') : cur))
+  if (r) await update($, stoppedAgents, ids => [...ids.filter(id => !r.agents[id]), ...Object.keys(r.agents)].slice(-MAX_STOPPED))
   return r ? `Stopped. The branch ${r.branch} and its worktree ${r.worktree} stay; remove them with git worktree remove when done.` : 'No factory run.'
 }
 
@@ -428,7 +462,7 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     if (e.agentId !== undefined) {
       const r = await read($, run)
-      if (r?.agents[e.agentId] && !isLive(r.phase)) return { deny: STOPPED_DENY }
+      if ((r?.agents[e.agentId] && !isLive(r.phase)) || (await read($, stoppedAgents)).includes(e.agentId)) return { deny: STOPPED_DENY }
     }
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -539,6 +573,9 @@ export const register: Register = (on, options) => {
               <Text key={`f-${x.role}-${i}`} wrap="truncate-end">{`${x.role} · [${g.severity}] ${g.where} ${g.text}`}</Text>
             )))}
           </Box>
+        ) : null}
+        {r.skipped?.length ? (
+          <Text dimColor wrap="truncate-end">{`Left out of the commits: ${r.skipped.join(', ')}`}</Text>
         ) : null}
         {failed.length ? (
           <Box flexDirection="column">

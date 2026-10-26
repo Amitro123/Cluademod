@@ -184,14 +184,24 @@ export function prPrompt(run: Run, reason: string): string {
     `Push branch ${run.branch} (its worktree is ${run.worktree}) and open a pull request from it.`,
     `Title it after the feature. In the body: what it does (from ${run.specFile}), the checks (${run.checks.map(c => `${c.cmd} ${c.ok ? '✓' : '✗'}`).join(', ') || 'none'}), and ${run.round} review round${run.round === 1 ? '' : 's'}: ${run.reviews.map(r => `${r.role} ${r.state === 'pass' ? 'PASS' : 'CHANGES'}`).join(', ')}.`,
     ...(minor.length ? ['List these minor findings under "Not fixed":', ...minor] : []),
+    ...(run.skipped?.length ? [`The factory left these new files out of its commits (dependencies, build output or credentials); don't add them: ${run.skipped.join(', ')}.`] : []),
   ].join('\n')
 }
 
 // ---------- a run ----------
 
-// The worktrees sit next to the repository, in <repo>.factory/, so nothing in the main checkout
-// (test runners, linters, indexers) scans a second copy of the code.
-export const worktreeOf = (root: string, slug: string) => `${root.replace(/[\\/]+$/, '')}.factory/${slug}`
+// The worktrees sit inside the repository, in .factory/ (kept out of git): within the session's
+// working directory, so the agents' edits get the same permissions and sandbox as the person's.
+export const worktreeOf = (root: string, slug: string) => `${root.replace(/[\\/]+$/, '')}/.factory/${slug}`
+
+// What the builder may leave untracked that never goes into a commit: installed dependencies,
+// build output, and credentials.
+const NEVER_COMMIT = [/(^|\/)(node_modules|\.venv|venv|__pycache__|dist|build)(\/|$)/, /(^|\/)\.env(\.[^/]*)?$/, /\.(pem|key|p12|pfx)$/i]
+export const neverCommit = (path: string) => NEVER_COMMIT.some(re => re.test(path))
+
+// The untracked paths in `git status --porcelain` output (a folder ends in /).
+export const untrackedOf = (porcelain: string) =>
+  porcelain.split('\n').filter(l => l.startsWith('?? ')).map(l => l.slice(3).replace(/^"(.*)"$/, '$1'))
 
 export function newRun(feature: string, at: number, base: string, root: string, slug = slugOf(feature)): Run {
   const step = (): { state: StepState; tokens: number } => ({ state: 'wait', tokens: 0 })

@@ -34,9 +34,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-def _is_brain_project(project_dir: Path) -> bool:
-    return (project_dir / "MISTAKES.md").is_file() or (project_dir / ".agent-brain").is_dir()
-
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+import host_layout  # noqa: E402
 
 STATUS_UNROUTED_RE = re.compile(r"^- \*\*Status:\*\*\s*unrouted\s*$", re.MULTILINE)
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "StrReplace"})
@@ -54,14 +55,27 @@ def _file_path(payload: dict) -> str:
     return payload.get("file_path") or ""
 
 
-def _is_mistakes_edit(payload: dict) -> bool:
-    """Return True iff the tool call modified a file named MISTAKES.md."""
+def _edited(payload: dict, project_dir: Path) -> Path | None:
+    """The file an edit tool wrote, resolved against the project; None for other tools."""
     tool_name = payload.get("tool_name", "")
     if tool_name and tool_name not in EDIT_TOOLS:
-        return False
+        return None
     file_path = _file_path(payload)
+    if not file_path:
+        return None
     # Normalise separators so both / and \ work on Windows.
-    return file_path.replace("\\", "/").endswith("MISTAKES.md")
+    p = Path(file_path.replace("\\", "/"))
+    try:
+        return (p if p.is_absolute() else project_dir / p).resolve()
+    except OSError:
+        return None
+
+
+def _is_mistakes_edit(payload: dict, project_dir: Path = Path(".")) -> bool:
+    """True iff the tool call wrote *this project's* MISTAKES.md, not another
+    repo's or a factory worktree's copy."""
+    p = _edited(payload, project_dir)
+    return p is not None and p == (project_dir / "MISTAKES.md").resolve()
 
 
 def _count_unrouted(mistakes_path: Path) -> int:
@@ -71,22 +85,18 @@ def _count_unrouted(mistakes_path: Path) -> int:
     return len(STATUS_UNROUTED_RE.findall(text))
 
 
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
-
-
 def _skill_scripts_dir(project_dir: Path) -> Path | None:
     """The scripts of this same skill version: never a copy elsewhere, which
     may be older (a stale global copy is how the index lost its counts)."""
     return SCRIPTS_DIR if SCRIPTS_DIR.is_dir() else None
 
 
-def _is_lesson_edit(payload: dict) -> bool:
-    """True when the tool call wrote a PARA lesson file in .agent-brain/shared/."""
-    tool_name = payload.get("tool_name", "")
-    if tool_name and tool_name not in EDIT_TOOLS:
+def _is_lesson_edit(payload: dict, project_dir: Path = Path(".")) -> bool:
+    """True when the tool call wrote a lesson file in *this project's* .agent-brain/shared/."""
+    p = _edited(payload, project_dir)
+    if p is None or p.suffix != ".md" or p.name == "MEMORY.md":
         return False
-    path = _file_path(payload).replace("\\", "/")
-    return "/.agent-brain/shared/" in f"/{path}" and path.endswith(".md") and not path.endswith("/MEMORY.md")
+    return (project_dir / ".agent-brain" / "shared").resolve() in p.parents
 
 
 def _rebuild_index(project_dir: Path) -> bool:
@@ -180,11 +190,11 @@ def process(payload: dict, project_dir: Path) -> str | None:
     A lesson file written (route's step 4) refreshes the index from disk, so its
     counts and dates are right even when step 6 is skipped.
     """
-    if _is_lesson_edit(payload):
+    if _is_lesson_edit(payload, project_dir):
         if _rebuild_index(project_dir):
             _append_log(project_dir, "lesson file edited → MEMORY.md counts refreshed")
         return None
-    if not _is_mistakes_edit(payload):
+    if not _is_mistakes_edit(payload, project_dir):
         return None
 
     mistakes_path = project_dir / "MISTAKES.md"
@@ -253,10 +263,8 @@ def main() -> int:
     except Exception:
         return 0
 
-    project_dir = Path(
-        os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or "."
-    )
-    if not _is_brain_project(project_dir):
+    project_dir = host_layout.project_root(payload)
+    if not host_layout.is_brain_project(project_dir):
         return 0
     context = process(payload, project_dir)
     if context:

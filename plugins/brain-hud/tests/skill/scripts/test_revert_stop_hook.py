@@ -141,3 +141,65 @@ def test_end_to_end_main_drafts_on_revert(tmp_path):
     assert result.returncode == 0
     assert "auto-drafted" in result.stdout
     assert "[auto-draft]" in (repo / "MISTAKES.md").read_text(encoding="utf-8")
+
+
+def _after(repo: Path, *commands: list[str]):
+    """Detect across a turn in which the given git commands ran."""
+    hook._detect(repo, None, None)
+    old_head, old_reflog = hook._read_state(repo)
+    for argv in commands:
+        subprocess.run(["git", *argv], cwd=repo, check=True, capture_output=True, text=True)
+    return hook._detect(repo, old_head, old_reflog)
+
+
+def test_unstaging_with_git_reset_is_not_a_mistake(tmp_path):
+    repo = _init_repo(tmp_path)
+    _commit(repo, "a.txt", "1", "initial")
+    (repo / "b.txt").write_text("new", encoding="utf-8")
+    _git(["add", "b.txt"], repo)
+    assert _after(repo, ["reset"]) == (None, None)
+
+
+def test_a_soft_reset_keeps_the_work_and_is_not_a_mistake(tmp_path):
+    repo = _init_repo(tmp_path)
+    _commit(repo, "a.txt", "1", "initial")
+    _commit(repo, "a.txt", "2", "second change")
+    assert _after(repo, ["reset", "--soft", "HEAD~1"]) == (None, None)
+
+
+def test_a_mixed_reset_keeps_the_work_and_is_not_a_mistake(tmp_path):
+    repo = _init_repo(tmp_path)
+    _commit(repo, "a.txt", "1", "initial")
+    _commit(repo, "a.txt", "2", "second change")
+    assert _after(repo, ["reset", "HEAD~1"]) == (None, None)
+
+
+def test_a_hard_reset_that_drops_a_commit_is_one_entry(tmp_path):
+    repo = _init_repo(tmp_path)
+    _commit(repo, "a.txt", "1", "initial")
+    _commit(repo, "a.txt", "2", "second change")
+    event, desc = _after(repo, ["reset", "--hard", "HEAD~1"])
+    assert event == "reset" and desc.startswith("reset: moving to")
+
+
+def test_a_reset_forward_is_not_a_mistake(tmp_path):
+    repo = _init_repo(tmp_path)
+    _commit(repo, "a.txt", "1", "initial")
+    _commit(repo, "a.txt", "2", "second change")
+    second = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    _git(["reset", "--hard", "HEAD~1"], repo)
+    assert _after(repo, ["reset", "--hard", second]) == (None, None)
+
+
+def test_a_draft_leaves_older_entries_byte_for_byte(tmp_path):
+    mistakes = _inbox(tmp_path)
+    older = (
+        "## [2026-10-01 09:00] Kept a log\n- **Type:** mistake\n- **What happened:** the log:\n"
+        "  ```\n  line one\n\n\n  line four\n  ```\n- **Status:** routed\n"
+    )
+    mistakes.write_text(mistakes.read_text(encoding="utf-8") + "\n" + older, encoding="utf-8")
+    assert hook._draft_entry(tmp_path, "reset", "reset: moving to HEAD~1")
+    text = mistakes.read_text(encoding="utf-8")
+    assert older in text
+    assert f"{MARKER}\n\n## [" in text
+    assert "\n\n\n## [2026-10-01" not in text
