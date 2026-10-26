@@ -260,6 +260,20 @@ Then, in each project that should remember: `/brain-hud:mistake-brain init`, or 
   - **How they hear each other.** followups and goal-run answer their own tools (`done`, `plan`, `update`) and stop there, so another mod's hook on those tools runs only when that mod sits above the owner, and Claude Code doesn't promise an order among installed mods. brain-hud and goal-run therefore also read each of those calls from the `PostToolUse` event, which every mod sees whatever the order; an offer, or a task closed, happens once whichever arrives first. Not yet checked in a live session with all the mods installed: with `claude --debug`, a line `<event> bypassed by <plugin>` for these tools would mean a hook was skipped.
 - In a project with no `MISTAKES.md` and no `.agent-brain/` the mod stays quiet; the pane offers **Set up memory**, which runs `/brain-hud:mistake-brain init`.
 
+### The session journal
+
+Memory between sessions is the skill's; the journal is for the session you're in. Work that goes to sub-agents (a model router's worker on a cheap model, an `Explore`, a factory role) comes back to the main agent as a bottom line, which keeps its context small. What each worker found, where, and what it left open would then be gone. brain-hud writes it down as it happens, with no model involved:
+
+- **One line per event**: each sub-agent's report (what it was asked, its first findings, what it changed, its files, its open questions, read from a routed-worker's *Findings / Files / Changes / Unsure-about* sections or from the report's first line), each `MISTAKES.md` entry, each to-do finished through followups, each goal step and approved plan from goal-run.
+- **The `journal` tool** (`mcp__brain-hud__journal`, optional `last`) hands Claude the journal, so it can look up what a worker found earlier instead of re-reading the files or sending another worker.
+- **One line beside your next prompt** when the journal grew, e.g. *Session so far: 3 worker reports, 1 memory entry, 2 open questions. Latest: …*; no line when nothing new happened.
+- **A copy on disk** at `.claude/brain/session-<id>.md`, added to the repository's `.git/info/exclude` so it is never committed. One file per session; delete old ones whenever you like.
+- **A handoff at the end.** When the session ends with something open (a worker's open question, a to-do started and not done, a goal not reached) and the project has a mistake-brain memory, brain-hud adds a `Type: handoff` entry, *Session handoff (auto-draft)*, below the marker in `MISTAKES.md`, with the next steps and a pointer to the journal file. It is unrouted like any entry, so the next session's route files it. Nothing open, no entry.
+
+Options: `journal` (`on`/`off`) and `handoffDraft` (`on`/`off`), both on by default.
+
+If you also run a router mod with a budget on work tools per prompt, exempt `mcp__brain-hud__journal` (and followups' and goal-run's tools) from it: a lookup in the journal is meant to replace reading files, not count as reading them.
+
 ### The memory graph
 
 ![The Brain pane's knowledge graph, dark and light: MEMORY.md at the centre, the four PARA folders, their files, and each MISTAKES.md entry as a dot linked to its file](assets/brain-hud-graph.png)

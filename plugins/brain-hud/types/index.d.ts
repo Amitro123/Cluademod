@@ -3,6 +3,10 @@ export type EntryType = 'mistake' | 'success' | 'decision' | 'handoff'
 // One MISTAKES.md entry, from its heading and fields; `at` is the heading's "YYYY-MM-DD HH:MM".
 export type Entry = { at: string; title: string; type: EntryType; status: string; route: string }
 export type Folder = 'Projects' | 'Areas' | 'Resources' | 'Archives'
+// One line of the session journal: a worker's report, a memory entry, a to-do done or a goal step,
+// at its clock time; a worker's open questions ride along for the end-of-session handoff.
+export type JournalKind = 'worker' | 'memory' | 'todo' | 'goal'
+export type JournalEntry = { at: string; kind: JournalKind; text: string; open?: string[] }
 // One PARA file: what MEMORY.md says of it, or only that it's on disk (`isIndexed` false).
 export type Lesson = { file: string; summary: string; lessons: number; updated: string; isIndexed: boolean }
 export type Brain = {
@@ -43,6 +47,15 @@ declare module 'claude-code' {
       theme: 'dark' | 'light'
       // The unrouted count the person said "Later" to: the reminder waits until there are more.
       routeLater: number
+      // The session journal (worker reports, memory entries, to-dos done, goal steps), and how
+      // many of its entries the main agent was last told of beside a prompt.
+      journal: JournalEntry[]
+      told: number
+      // To-dos finished this session, whether the goal was reached, and whether the end-of-session
+      // handoff draft was written: what the draft leaves out.
+      doneIds: string[]
+      goalReached: boolean
+      handedOff: boolean
     }
   }
 }
