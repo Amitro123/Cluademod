@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { detectChecks, detectSetup, parseDecision, parseTasks, parseVerdict, splitChecks } from '../hooks/flow'
-import { PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
+import { factoryArgs, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 
@@ -512,6 +512,22 @@ describe('the person decides', () => {
     const edit = { tool: 'Edit', file_path: '/repo/.factory/rate-limiter/a.ts', old_string: 'a', new_string: 'b' }
     expect(String((await $.tool.call({ ...edit, agentId: 'a1' } as never)).deny)).toMatch(/factory run was stopped/)
     expect((await $.tool.call({ ...edit, agentId: 'a2' } as never)).result).toBe('edited')
+  })
+
+  test('a run from a to-do item has Claude mark the item done once the PR is open', async ($, on) => {
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const started = await command($, factoryArgs('Rate limiter — bursts must pass', 'k3x-1a2b3'))
+    expect(started).toMatch(/Factory run started: Rate limiter — bursts must pass\./)
+    expect(last(w).prompt).not.toContain('followup:')
+    await answer($, 'a1', SPEC_ANSWER)
+    await command($, 'approve')
+    await answer($, 'a2', 'built')
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    await answer($, 'a5', 'DECISION: APPROVE\nREASON: ok')
+    await command($, 'approve')
+    expect(w.sent.at(-1)).toMatch(/call mcp__followups__done with id "k3x-1a2b3"/)
   })
 
   test('a second run waits for the first', async ($, on) => {

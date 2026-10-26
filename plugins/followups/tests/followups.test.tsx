@@ -911,3 +911,64 @@ describe('merging with another session', () => {
     expect(mergeLists([it_('1'), it_('2')], [it_('2'), it_('3')], [it_('1'), it_('4')])).toEqual([it_('3'), it_('4')])
   })
 })
+
+describe('one list per repository, and items through the factory', () => {
+  test('the list saved from the main checkout is there in a worktree session, and the old key moves over', async ($, on) => {
+    on('process.run', () => ({ value: { exitCode: 0, stdout: '/main/.git\n', stderr: '' } }) as never)
+    const saved: Record<string, unknown> = {
+      'items:/repo': [{ id: 'a', title: 'Old item', detail: '', where: '', at: 1, kind: 'task', status: 'open' }],
+      'skipped:/repo': ['not needed'],
+    }
+    engine(on, { 'README.md': '' }, saved)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    expect((saved['items:/main'] as { title: string }[]).map(i => i.title)).toEqual(['Old item'])
+    expect(saved['skipped:/main']).toEqual(['not needed'])
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/Old item/)
+    await pane.unmount()
+  })
+
+  test('🏭 runs an open item through /factory with its id, and puts it back when that fails', async ($, on) => {
+    const ran: string[] = []
+    let fail = false
+    on('command.list', () => ({ value: [{ name: 'factory', description: 'f', source: 'plugin' }] }) as never)
+    on('command.run', (_, e) => {
+      if (e.command !== 'factory') return { text: '' } as never
+      ran.push(String(e.args))
+      if (fail) throw new Error('no')
+      return { text: '' } as never
+    })
+    const saved: Record<string, unknown> = {}
+    engine(on, { 'README.md': '' }, saved)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'followup', args: 'Add a rate limiter' } as never)
+    const items = () => saved['items:/repo'] as { id: string; status: string }[]
+    const id = items()[0]!.id
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    await pane.press({ key: `f-${id}` })
+    expect(ran).toEqual([`Add a rate limiter [followup:${id}]`])
+    expect(items()[0]!.status).toBe('in_progress')
+    expect(await pane.find({ key: `f-${id}` } as never)).toBeFalsy()
+    await pane.unmount()
+
+    fail = true
+    await $.command.run({ command: 'followup', args: 'Second one' } as never)
+    const second = items().find(i => i.status === 'open')!.id
+    const again = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    await again.press({ key: `f-${second}` })
+    expect(items().find(i => i.id === second)!.status).toBe('open')
+    await again.unmount()
+  })
+
+  test('without the factory installed there is no 🏭', async ($, on) => {
+    const saved: Record<string, unknown> = {}
+    engine(on, { 'README.md': '' }, saved)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'followup', args: 'Add a rate limiter' } as never)
+    const id = (saved['items:/repo'] as { id: string }[])[0]!.id
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await pane.find({ key: `s-${id}` } as never)).toBeTruthy()
+    expect(await pane.find({ key: `f-${id}` } as never)).toBeFalsy()
+    await pane.unmount()
+  })
+})

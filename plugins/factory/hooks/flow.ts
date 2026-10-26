@@ -184,6 +184,7 @@ export function prPrompt(run: Run, reason: string): string {
     `Push branch ${run.branch} (its worktree is ${run.worktree}) and open a pull request from it.`,
     `Title it after the feature. In the body: what it does (from ${run.specFile}), the checks (${run.checks.map(c => `${c.cmd} ${c.ok ? '✓' : '✗'}`).join(', ') || 'none'}), and ${run.round} review round${run.round === 1 ? '' : 's'}: ${run.reviews.map(r => `${r.role} ${r.state === 'pass' ? 'PASS' : 'CHANGES'}`).join(', ')}.`,
     ...(minor.length ? ['List these minor findings under "Not fixed":', ...minor] : []),
+    ...(run.followupId ? [`Once the PR is open, call mcp__followups__done with id "${run.followupId}" and the PR's link as the note: the run came from that to-do item.`] : []),
     ...(run.skipped?.length ? [`The factory left these new files out of its commits (dependencies, build output or credentials); don't add them: ${run.skipped.join(', ')}.`] : []),
   ].join('\n')
 }

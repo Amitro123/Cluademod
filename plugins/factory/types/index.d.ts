@@ -51,6 +51,8 @@ export type Run = {
   setupDone: boolean
   // New files the factory left out of its commits: dependencies, build output, credentials.
   skipped?: string[]
+  // The followups to-do item the run came from: marked done once the PR is open.
+  followupId?: string
 }
 
 declare module 'claude-code' {

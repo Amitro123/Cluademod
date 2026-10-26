@@ -30,7 +30,7 @@ import {
   untrackedOf,
   waitsOnPerson,
 } from './flow'
-import { FACTORY_PLAN_APPROVED_ARG, parsePlanOutcome, toolText } from './texts'
+import { FACTORY_PLAN_APPROVED_ARG, parseFactoryArgs, parsePlanOutcome, toolText } from './texts'
 
 const run = atom({ plugin: 'factory', key: 'run' } as const, null as Run | null)
 const frame = atom({ plugin: 'factory', key: 'frame' } as const, 0)
@@ -119,7 +119,8 @@ async function spawnRole($: EngineInterface, role: Role, prompt: string): Promis
   return true
 }
 
-async function start($: EngineInterface, feature: string): Promise<string> {
+async function start($: EngineInterface, args: string): Promise<string> {
+  const { feature, followupId } = parseFactoryArgs(args)
   const cur = await read($, run)
   if (cur && isLive(cur.phase)) return `A factory run is already going: ${cur.feature}. /factory stop ends it.`
   const top = await git($, ['rev-parse', '--show-toplevel'])
@@ -138,7 +139,7 @@ async function start($: EngineInterface, feature: string): Promise<string> {
     else if (!/already exists/i.test(added.stderr)) return `Could not create a worktree for the run: ${tailOf(added.stderr, 3)}`
   }
   if (!r) return `Could not create a worktree for the run: the branches factory/${slug} to factory/${slug}-${MAX_SLUG_TRIES} are all taken.`
-  const created: Run = { ...r, gate: (await goalRunThere($)) ? 'goal-run' : 'factory' }
+  const created: Run = { ...r, gate: (await goalRunThere($)) ? 'goal-run' : 'factory', ...(followupId ? { followupId } : {}) }
   await keepOutOfGit($, root)
   await readTheme($)
   await update($, run, () => created)

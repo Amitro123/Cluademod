@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import { runnerX, trackText } from '../hooks/art'
 import { addSide, insertTask, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan, stepTokens } from '../hooks/register'
 import type { Goal } from '../types'
-import { doneResult, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
+import { doneResult, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory, projectFrom } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 const UPDATE = 'mcp__goal-run__update'
@@ -714,3 +714,67 @@ describe('a plan from a factory run', () => {
   })
 })
 
+
+describe('one goal per repository, whichever worktree the session is in', () => {
+  const unfinished: Goal = { text: 'Ship it', status: 'active', tasks: [{ id: 't1', title: 'One', status: 'done', tokens: 10 }, { id: 't2', title: 'Two', status: 'pending', tokens: 0 }], activeId: null, other: 0 }
+
+  test('the key is the main repository: its own checkout and a worktree agree', () => {
+    expect(projectFrom('/repo', '.git')).toBe('/repo')
+    expect(projectFrom('/repo/', '.git\n')).toBe('/repo')
+    expect(projectFrom('/repo/.claude/worktrees/a', '/repo/.git')).toBe('/repo')
+    expect(projectFrom('C:\\work\\api-wt', 'C:\\work\\api\\.git')).toBe('C:\\work\\api')
+    expect(projectFrom('/scratch', '')).toBe('/scratch')
+  })
+
+  test("a goal saved from the main checkout is there in a worktree session", async ($, on) => {
+    on('process.run', () => ({ value: { exitCode: 0, stdout: '/main/.git\n', stderr: '' } }) as never)
+    const w = engine(on, { saved: { 'goal:/main': unfinished } })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const r = await $.command.run({ command: 'session-goal', args: '' } as never)
+    expect(String(r.text)).toBe('Goal: Ship it (50%)')
+    await $.tool.call({ tool: UPDATE, id: 't2', status: 'done' } as never)
+    expect((w.saved['goal:/main'] as Goal).status).toBe('done')
+  })
+
+  test('a goal saved under the old per-folder key moves to the repository key', async ($, on) => {
+    on('process.run', () => ({ value: { exitCode: 0, stdout: '/main/.git\n', stderr: '' } }) as never)
+    const w = engine(on, { saved: { 'goal:/repo': unfinished } })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    expect((w.saved['goal:/main'] as Goal).text).toBe('Ship it')
+  })
+})
+
+describe('a goal run through the factory', () => {
+  test('Run as factory hands the goal to /factory, and the factory plan replaces it', async ($, on) => {
+    const ran: string[] = []
+    on('command.list', () => ({ value: [{ name: 'factory', description: 'f', source: 'plugin' }] }) as never)
+    on('command.run', (_, e) => {
+      ran.push(`${e.command} ${e.args ?? ''}`.trim())
+      return { text: '' } as never
+    })
+    const w = engine(on, { answers: ['Approve, run through', 'Approve, start building'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Rate limiter' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    await pane.press({ key: 'factory' })
+    expect(ran).toContain('factory Rate limiter')
+    expect((w.saved['goal:/repo'] as Goal).source).toBe('factory')
+    // No button once it's the factory's.
+    expect(await pane.find({ key: 'factory' } as never)).toBeFalsy()
+    await pane.unmount()
+    const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks: [{ title: 'Bucket', priority: 'high' }] } as never)
+    expect(String(r.result)).toBe(PLAN_APPROVED_FOR_FACTORY)
+    expect((w.saved['goal:/repo'] as Goal).tasks.map(t => t.title)).toEqual(['Bucket'])
+  })
+
+  test('without the factory installed there is no button', async ($, on) => {
+    engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One'] } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await pane.find({ key: 'factory' } as never)).toBeFalsy()
+    await pane.unmount()
+  })
+})
