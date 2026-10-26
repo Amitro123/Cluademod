@@ -778,3 +778,38 @@ describe('a goal run through the factory', () => {
     await pane.unmount()
   })
 })
+
+describe("another session's changes to the goal reach this one", () => {
+  const start = async ($: Engine, on: On) => {
+    const w = engine(on, { answers: ['Approve, run through'] })
+    on('turn.start', (_, e) => ({ turnId: e.turnId }) as never)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
+    return w
+  }
+  const shownGoal = async ($: Engine) => String((await $.command.run({ command: 'session-goal', args: '' } as never)).text)
+
+  test('a resumed session takes in progress made elsewhere', async ($, on) => {
+    const w = await start($, on)
+    const there = w.saved['goal:/repo'] as Goal
+    w.saved['goal:/repo'] = { ...there, tasks: there.tasks.map(t => ({ ...t, status: 'done' })), status: 'done' }
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true, source: 'resume' } as never)
+    expect(await shownGoal($)).toBe('Goal: Ship it (100%)')
+  })
+
+  test('a goal cleared elsewhere is gone here at the next prompt', async ($, on) => {
+    const w = await start($, on)
+    w.saved['goal:/repo'] = null
+    await $.turn.start({ turnId: 't9', text: 'next' } as never)
+    expect(await shownGoal($)).toMatch(/^No goal yet/)
+  })
+
+  test('a newer goal set elsewhere replaces this one at the next prompt', async ($, on) => {
+    const w = await start($, on)
+    const there = w.saved['goal:/repo'] as Goal
+    w.saved['goal:/repo'] = { ...there, text: 'Write the docs', setAt: (there.setAt ?? 0) + 1000 }
+    await $.turn.start({ turnId: 't9', text: 'next' } as never)
+    expect(await shownGoal($)).toMatch(/^Goal: Write the docs/)
+  })
+})
