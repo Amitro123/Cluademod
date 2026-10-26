@@ -64,3 +64,22 @@ export function parsePlanOutcome(text: string): { approved: true } | { changes: 
   const m = /^The person wants changes: ([\s\S]*?)\nThe factory's spec-writer revises the spec/.exec(text)
   return m ? { changes: m[1]!.trim() } : null
 }
+
+// followups → factory: a to-do item run through the factory carries its id in /factory's arguments,
+// so the run's PR prompt has Claude mark it done with followups' done tool.
+export const factoryArgs = (feature: string, followupId?: string) => (followupId ? `${feature} [followup:${followupId}]` : feature)
+export function parseFactoryArgs(args: string): { feature: string; followupId?: string } {
+  const m = /^([\s\S]*?)\s*\[followup:([\w-]+)\]\s*$/.exec(args)
+  return m ? { feature: m[1]!.trim(), followupId: m[2]! } : { feature: args.trim() }
+}
+
+// What a project's saved goal and to-do list are keyed by: the main repository, the same for each of
+// its git worktrees (a session in a worktree has a root of its own), else the session's root.
+// `git` answers `--git-common-dir` relative to the root in the main checkout, absolute in a worktree.
+export function projectFrom(root: string, commonDir: string): string {
+  const r = root.replace(/[\\/]+$/, '')
+  const dir = commonDir.trim()
+  if (!dir) return r
+  const abs = /^([a-zA-Z]:)?[\\/]/.test(dir) ? dir : `${r}/${dir}`
+  return abs.replace(/[\\/]+$/, '').replace(/[\\/]\.git$/, '').replace(/[\\/]\.$/, '')
+}

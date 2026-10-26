@@ -1,8 +1,11 @@
 {
   "name": "followups",
-  "version": "0.5.5",
+  "version": "0.6.0",
   "description": "Claude flags what it notices along the way, asks whether to keep each one, and keeps a to-do you can export to memory, docs or the README",
-  "author": { "name": "Amit Rosen", "url": "https://github.com/Amitro123" },
+  "author": {
+    "name": "Amit Rosen",
+    "url": "https://github.com/Amitro123"
+  },
   "repository": "https://github.com/Amitro123/claudemod",
   "license": "MIT",
   "types": "./types/index.d.ts",
@@ -12,21 +15,30 @@
       "title": "Look for follow-ups after each answer",
       "description": "After each of Claude's answers, a small model reads it for problems mentioned but left open and offers them above the prompt. off relies on Claude calling the flag tool itself",
       "default": "on",
-      "options": ["on", "off"]
+      "options": [
+        "on",
+        "off"
+      ]
     },
     "stopCheck": {
       "type": "string",
       "title": "Check for unflagged follow-ups when a turn ends",
       "description": "When Claude's final reply says something is unverified, untested or left open and it never called the flag tool, ask it once to flag those items before the turn ends. Interactive sessions only",
       "default": "on",
-      "options": ["on", "off"]
+      "options": [
+        "on",
+        "off"
+      ]
     },
     "openOnStart": {
       "type": "string",
       "title": "Open the To-do pane when a session starts",
       "description": "on opens it when this project has open or in-progress items left from an earlier session",
       "default": "on",
-      "options": ["on", "off"]
+      "options": [
+        "on",
+        "off"
+      ]
     }
   }
 }

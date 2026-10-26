@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
-import { FACTORY_PLAN_APPROVED_ARG, FACTORY_SOURCE, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, toolText } from './texts'
+import { FACTORY_PLAN_APPROVED_ARG, FACTORY_SOURCE, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
 // The goal-run tests import the start-prompt parser from here, as before it was shared.
 export { parseStartPrompt }
 
@@ -208,7 +208,21 @@ export function reminder(g: Goal): string {
 
 // ---------- updates ----------
 
-const storeKey = async ($: EngineInterface) => `goal:${await $.session.root()}`
+// Per project: the main repository, so a goal carries over between sessions in different worktrees.
+const projects = new Map<string, string>()
+async function projectOf($: EngineInterface): Promise<string> {
+  const root = await $.session.root()
+  const known = projects.get(root)
+  if (known) return known
+  const out = await $.process.run(['git', 'rev-parse', '--git-common-dir'], { cwd: root, timeoutMs: 5_000 }).catch(() => null)
+  const project = projectFrom(root, out && out.exitCode === 0 ? out.stdout : '')
+  projects.set(root, project)
+  return project
+}
+
+const storeKey = async ($: EngineInterface) => `goal:${await projectOf($)}`
+// Where a goal was saved before the key was the repository: the session's own root.
+const legacyKey = async ($: EngineInterface) => `goal:${await $.session.root()}`
 
 async function save($: EngineInterface) {
   const key = await storeKey($)
@@ -225,6 +239,22 @@ async function save($: EngineInterface) {
   await $.store.set(key, g)
   await update($, heldAt, () => g?.setAt ?? 0)
   if (await read($, superseded)) await update($, superseded, () => false)
+}
+
+// Whether the factory mod is installed: the Goal pane offers to run the goal through it.
+let hasFactory = false
+
+// The goal goes to the factory: marked as the factory's, so the spec's plan replaces it (instead of
+// being kept apart as the person's own), then /factory runs with its text. A refused command puts
+// the goal back as it was.
+async function runAsFactory($: EngineInterface) {
+  const g = await read($, goal)
+  if (!g) return
+  await setGoal($, cur => (cur ? { ...cur, source: FACTORY_SOURCE } : cur))
+  void $.command.run({ command: 'factory', args: g.text }).catch(async () => {
+    await setGoal($, cur => (cur ? { ...cur, source: g.source } : cur))
+    $.ui.toast(`Could not start the factory; run /factory ${g.text}`)
+  })
 }
 
 async function setGoal($: EngineInterface, fn: (g: Goal | null) => Goal | null) {
@@ -405,10 +435,17 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
     await $.command.register({ name: 'session-goal', description: 'Set a session goal, or show it', argumentHint: '[goal | clear]' })
+    hasFactory = (await $.command.list().catch(() => [])).some(c => c.name === 'factory')
 
     // A goal kept for this project from an earlier session: offered to continue, or a new one asked for.
     if (!(await read($, goal))) {
-      const saved = await $.store.get(await storeKey($))
+      const key = await storeKey($)
+      let saved = await $.store.get(key)
+      const legacy = await legacyKey($)
+      if (!saved && legacy !== key) {
+        saved = await $.store.get(legacy)
+        if (saved && typeof saved === 'object') await $.store.set(key, saved)
+      }
       if (saved && typeof saved === 'object') {
         await update($, goal, () => saved as Goal)
         await update($, heldAt, () => (saved as Goal).setAt ?? 0)
@@ -770,6 +807,9 @@ export const register: Register = (on, options) => {
         <Box flexDirection="row" gap={1}>
           {g.status === 'active' ? (
             <Button key="pace" label={paceOf(g) === 'run' ? '⏩ Runs through · ask between' : '⏸ Asks between · run through'} plain onPress={() => setGoal($, cur => (cur ? { ...cur, pace: paceOf(cur) === 'run' ? 'ask' : 'run' } : cur))} />
+          ) : null}
+          {hasFactory && g.status !== 'done' && g.source !== FACTORY_SOURCE ? (
+            <Button key="factory" label="🏭 Run as factory" plain onPress={() => runAsFactory($)} />
           ) : null}
           <Button key="clear" label="Clear goal" plain onPress={() => setGoal($, () => null)} />
         </Box>

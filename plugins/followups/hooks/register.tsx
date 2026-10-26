@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Flag, Item, Status } from '../types'
-import { doneResult, startLine } from './texts'
+import { doneResult, factoryArgs, projectFrom, startLine } from './texts'
 
 // ---------- state ----------
 
@@ -231,8 +231,29 @@ async function offerOpenItems($: EngineInterface, report: string): Promise<numbe
 
 const newId = (at: number) => `${at.toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 
-// Exports and the saved list belong to the project, so both key on its root.
-const storeKey = async ($: EngineInterface) => `items:${await $.session.root()}`
+// The saved list belongs to the project: the main repository, the same for each of its git
+// worktrees (a session in a worktree has a root of its own), else the session's root.
+const projects = new Map<string, string>()
+async function projectOf($: EngineInterface): Promise<string> {
+  const root = await $.session.root()
+  const known = projects.get(root)
+  if (known) return known
+  const out = await $.process.run(['git', 'rev-parse', '--git-common-dir'], { cwd: root, timeoutMs: 5_000 }).catch(() => null)
+  const project = projectFrom(root, out && out.exitCode === 0 ? out.stdout : '')
+  projects.set(root, project)
+  return project
+}
+
+const storeKey = async ($: EngineInterface) => `items:${await projectOf($)}`
+
+// A list saved under the key it had before (the session's own root) moves to the project's key.
+async function migrateKey($: EngineInterface, prefix: string) {
+  const key = `${prefix}:${await projectOf($)}`
+  const legacy = `${prefix}:${await $.session.root()}`
+  if (key === legacy || (await $.store.get(key)) !== undefined) return
+  const old = await $.store.get(legacy)
+  if (old !== undefined && old !== null) await $.store.set(key, old)
+}
 
 // A three-way merge with what another session in the same project saved meanwhile. `base` is the
 // list as this session last loaded or saved it: what changed here since wins, what changed only
@@ -260,7 +281,7 @@ async function save($: EngineInterface) {
 }
 
 // What the person turned down, kept per project like the list, so it isn't offered again later.
-const skippedKey = async ($: EngineInterface) => `skipped:${await $.session.root()}`
+const skippedKey = async ($: EngineInterface) => `skipped:${await projectOf($)}`
 
 async function turnDown($: EngineInterface, title: string) {
   const t = norm(title)
@@ -335,6 +356,20 @@ async function start($: EngineInterface, which: Item[]) {
   // A turn of its own once the session is idle; it may not resolve until then, so not awaited. If
   // it can't be sent, the items go back to open, where their Start button is.
   $.prompt.submit({ text: startPrompt(which) }).catch(() => setStatus($, new Set(which.map(i => i.id)), 'open'))
+}
+
+// Whether the factory mod is installed: an open item can be run through it instead of started.
+let hasFactory = false
+
+// An item run through the factory: /factory with what the item says, its id carried along so the
+// run's PR prompt has Claude mark it done. In progress meanwhile; back to open if it can't start.
+async function toFactory($: EngineInterface, i: Item) {
+  await setStatus($, new Set([i.id]), 'in_progress')
+  const feature = [i.title, i.detail, i.where && `(${i.where})`].filter(Boolean).join(' — ')
+  void $.command.run({ command: 'factory', args: factoryArgs(feature, i.id) }).catch(async () => {
+    await setStatus($, new Set([i.id]), 'open')
+    $.ui.toast('Could not start the factory for it; run /factory yourself')
+  })
 }
 
 // The markdown an export writes: the items as a checklist between two markers.
@@ -419,7 +454,10 @@ export const register: Register = (on, options) => {
     // $.state outlives a reload, so a list an older version held is migrated in place too.
     const held = await read($, items)
     if (held.some(i => !isStatus((i as { status?: unknown }).status))) await update($, items, l => migrate(l))
-    // Items kept in this folder before carry over to a new session.
+    await migrateKey($, 'items')
+    await migrateKey($, 'skipped')
+    hasFactory = (await $.command.list().catch(() => [])).some(c => c.name === 'factory')
+    // Items kept in this project before carry over to a new session.
     if (!held.length) {
       const saved = await $.store.get(await storeKey($))
       if (Array.isArray(saved) && saved.length) {
@@ -615,6 +653,7 @@ export const register: Register = (on, options) => {
                   </Box>
                   <Box flexDirection="row" gap={1}>
                     {i.status === 'open' ? <Button key={`s-${i.id}`} label="▶ Start" plain onPress={() => start($, [i])} /> : null}
+                    {i.status === 'open' && hasFactory ? <Button key={`f-${i.id}`} label="🏭" plain onPress={() => toFactory($, i)} /> : null}
                     <Button key={`t-${i.id}`} label={i.status === 'done' ? '↺ Reopen' : '✓ Done'} plain onPress={toggle(i.id)} />
                     <Button key={`x-${i.id}`} label="✕" plain onPress={remove(i.id)} />
                   </Box>
