@@ -7,6 +7,7 @@ import type { Theme } from './art'
 import {
   approvePrompt,
   buildPrompt,
+  cleanFeature,
   detectChecks,
   detectSetup,
   isLive,
@@ -25,12 +26,13 @@ import {
   specPrompt,
   splitChecks,
   tailOf,
+  takeOverNote,
   tok,
   tokensOf,
   untrackedOf,
   waitsOnPerson,
 } from './flow'
-import { FACTORY_PLAN_APPROVED_ARG, parseFactoryArgs, parsePlanOutcome, toolText } from './texts'
+import { FACTORY_PLAN_APPROVED_ARG, factoryArgs, parseFactoryArgs, parseGoalPrompt, parsePlanOutcome, parseStartPrompt, toolText } from './texts'
 
 const run = atom({ plugin: 'factory', key: 'run' } as const, null as Run | null)
 const frame = atom({ plugin: 'factory', key: 'frame' } as const, 0)
@@ -54,6 +56,8 @@ let maxRounds = 2
 let checksOption = ''
 let setupOption = ''
 let autoPr = false
+// A goal set in goal-run, or a to-do item started in followups, becomes a factory run.
+let takeOver = true
 // Transitions run one at a time: two reviewers finishing together must not both start the approver.
 // Every spawn and every agent's completion goes through this queue, so a completion is handled only
 // after the job that spawned its agent has recorded the agent's id.
@@ -92,11 +96,15 @@ const goalRunThere = async ($: EngineInterface) => (await $.command.list().catch
 
 // Starts one role's agent in the run's worktree. A role type the engine refused to register falls
 // back to a general-purpose agent carrying the role's instructions in its prompt.
-async function spawnRole($: EngineInterface, role: Role, prompt: string): Promise<boolean> {
+// Each agent's spawn, by id: what a retry needs (the reload of the module forgets them; the step
+// then waits for Retry instead).
+const spawns = new Map<string, { role: Role; prompt: string; hasModel: boolean; isRetry: boolean }>()
+
+async function spawnRole($: EngineInterface, role: Role, prompt: string, { onSessionModel = false } = {}): Promise<boolean> {
   const r = await read($, run)
   if (!r || !isLive(r.phase)) return false
   const spec = ROLES[role]
-  const base = { prompt, description: `factory · ${describe(role, r)}`, model: spec.model, cwd: r.worktree }
+  const base = { prompt, description: `factory · ${describe(role, r)}`, ...(onSessionModel ? {} : { model: spec.model }), cwd: r.worktree }
   let res = await $.agent.spawn({ ...base, subagentType: `factory:${spec.name}` }).catch(err => ({ deny: String(err) }) as { deny: string })
   if ('deny' in res && res.deny) {
     res = await $.agent.spawn({ ...base, subagentType: 'general-purpose', prompt: `${ROLE_PROMPTS[role]}\n\n${prompt}` }).catch(err => ({ deny: String(err) }) as { deny: string })
@@ -116,11 +124,36 @@ async function spawnRole($: EngineInterface, role: Role, prompt: string): Promis
     agents: { ...cur.agents, [id]: role },
     reviews: cur.reviews.map(x => (x.role === role ? { ...x, agentId: id } : x)),
   }))
+  spawns.set(id, { role, prompt, hasModel: !onSessionModel, isRetry: onSessionModel })
   return true
 }
 
+// Why an agent's turn ended without its answer: what the step's note says, '' when it answered.
+export function whyEnded(e: { reason: string; answer: string; refusal?: { explanation: string | null } }): string {
+  if (e.reason === 'answer') return ''
+  if (e.reason === 'aborted') return 'it was interrupted'
+  if (e.reason === 'refusal') return `the model refused${e.refusal?.explanation ? `: ${e.refusal.explanation}` : ''}`
+  const said = e.answer.trim()
+  return `an API error ended it${said ? `: ${tailOf(said, 1)}` : ''}`
+}
+
+// What a goal prompt or a one-item Start prompt hands the factory: /factory's arguments, else null.
+// Several items started together stay the main Claude's.
+export function takeOverArgs(text: string): string | null {
+  const goal = parseGoalPrompt(text)
+  if (goal) return goal
+  const items = parseStartPrompt(text)
+  if (items.length !== 1) return null
+  const it = items[0]!
+  const line = new RegExp(`^- id ${it.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: (.*)$`, 'm').exec(text)?.[1] ?? it.title
+  return factoryArgs(line.replace(/ \(bug\)/, '').replace(/ \[where: ([^\]]*)\]$/, ' ($1)'), it.id)
+}
+
 async function start($: EngineInterface, args: string): Promise<string> {
-  const { feature, followupId } = parseFactoryArgs(args)
+  const parsed = parseFactoryArgs(args)
+  const feature = cleanFeature(parsed.feature)
+  const followupId = parsed.followupId
+  if (!feature) return 'What should the factory build? /factory <feature>'
   const cur = await read($, run)
   if (cur && isLive(cur.phase)) return `A factory run is already going: ${cur.feature}. /factory stop ends it.`
   const top = await git($, ['rev-parse', '--show-toplevel'])
@@ -167,10 +200,10 @@ async function readTheme($: EngineInterface) {
   await update($, theme, () => (/light/i.test(value) ? 'light' : 'dark'))
 }
 
-async function onSpec($: EngineInterface, answer: string, ok: boolean) {
-  const tasks = ok ? parseTasks(answer) : []
+async function onSpec($: EngineInterface, answer: string, why: string) {
+  const tasks = why ? [] : parseTasks(answer)
   if (!tasks.length) {
-    await block($, { on: 'spec' }, ok ? 'The spec-writer gave no TASKS list.' : 'The spec-writer stopped before finishing.', r => ({ ...r, steps: { ...r.steps, spec: { ...r.steps.spec, state: 'fail' } } }))
+    await block($, { on: 'spec' }, why ? `The spec-writer stopped: ${why}.` : 'The spec-writer gave no TASKS list.', r => ({ ...r, steps: { ...r.steps, spec: { ...r.steps.spec, state: 'fail' } } }))
     return
   }
   // goal-run is asked again: installed or removed since the run started, the plan goes where it can.
@@ -309,8 +342,8 @@ async function spawnReviewers($: EngineInterface, r: Run) {
   }
 }
 
-async function onReview($: EngineInterface, role: Reviewer, agentId: string, answer: string, ok: boolean) {
-  const verdict = ok ? parseVerdict(answer) : { state: 'changes' as const, findings: [{ severity: 'major' as const, where: '-', text: 'The reviewer stopped before finishing.' }] }
+async function onReview($: EngineInterface, role: Reviewer, agentId: string, answer: string, why: string) {
+  const verdict = !why ? parseVerdict(answer) : { state: 'changes' as const, findings: [{ severity: 'major' as const, where: '-', text: `The reviewer stopped: ${why}.` }] }
   const r = await patch($, cur => ({ ...cur, reviews: cur.reviews.map(x => (x.role === role && x.agentId === agentId ? { ...x, state: verdict.state, findings: verdict.findings } : x)) }))
   if (!r || r.phase !== 'review') return
   const mine = r.reviews.filter(x => x.round === r.round)
@@ -325,8 +358,8 @@ async function startApprover($: EngineInterface) {
   if (r) await spawnRole($, 'approver', approvePrompt(r))
 }
 
-async function onApprover($: EngineInterface, answer: string, ok: boolean) {
-  const { decision, reason } = ok ? parseDecision(answer) : { decision: 'ESCALATE' as const, reason: 'The approver stopped before deciding.' }
+async function onApprover($: EngineInterface, answer: string, why: string) {
+  const { decision, reason } = !why ? parseDecision(answer) : { decision: 'ESCALATE' as const, reason: `The approver stopped before deciding: ${why}.` }
   if (decision === 'ESCALATE') {
     await block($, { on: 'escalate' }, reason, r => ({ ...r, steps: { ...r.steps, approver: { ...r.steps.approver, state: 'changes' } } }))
     $.ui.toast('The factory needs you: Approve PR, or /factory stop')
@@ -347,18 +380,25 @@ async function finish($: EngineInterface, reason: string) {
   })
 }
 
-async function onAgentDone($: EngineInterface, agentId: string, answer: string, ok: boolean) {
+async function onAgentDone($: EngineInterface, agentId: string, answer: string, why: string, isApiError: boolean) {
   const r = await read($, run)
   const role = r?.agents[agentId]
   if (!r || !role || !isLive(r.phase)) return
-  if (role === 'spec') return r.phase === 'spec' ? onSpec($, answer, ok) : undefined
+  // An API error on the role's own model (one the account can't use, say): once, the same agent
+  // again on the session's model.
+  const spawn = spawns.get(agentId)
+  if (isApiError && spawn && spawn.hasModel && !spawn.isRetry) {
+    await patch($, cur => ({ ...cur, note: `the ${describe(role, cur)} failed on ${ROLES[role].model} (${why}); trying the session's model` }))
+    if (await spawnRole($, role, spawn.prompt, { onSessionModel: true })) return
+  }
+  if (role === 'spec') return r.phase === 'spec' ? onSpec($, answer, why) : undefined
   if (role === 'builder') {
     if (r.phase !== 'build') return
-    if (!ok) return block($, { on: 'builder' }, 'The builder stopped before finishing.', cur => ({ ...cur, steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'fail' } } }))
+    if (why) return block($, { on: 'builder' }, `The builder stopped: ${why}.`, cur => ({ ...cur, steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'fail' } } }))
     return onBuilt($)
   }
-  if (role === 'approver') return r.phase === 'approve' ? onApprover($, answer, ok) : undefined
-  return onReview($, role, agentId, answer, ok)
+  if (role === 'approver') return r.phase === 'approve' ? onApprover($, answer, why) : undefined
+  return onReview($, role, agentId, answer, why)
 }
 
 async function addTokens($: EngineInterface, agentId: string, n: number) {
@@ -436,6 +476,7 @@ export const register: Register = (on, options) => {
   checksOption = String(options.checks ?? '')
   setupOption = String(options.setup ?? '')
   autoPr = String(options.autoPr ?? 'off') === 'on'
+  takeOver = String(options.takeOver ?? 'on') !== 'off'
 
   on('session.start', async ($, e, next) => {
     for (const t of timers.splice(0)) t.cancel()
@@ -457,6 +498,18 @@ export const register: Register = (on, options) => {
 
   // The roles are the factory's: the model doesn't dispatch them itself.
   on('agent.offer', async ($, e, next) => (e.agent.startsWith('factory:') ? { isOffered: false } : next(e)))
+
+  // The goal prompt goal-run sends, and the Start prompt of one to-do item from followups, start a
+  // run instead of the main Claude doing the work; the prompt that goes on tells it so.
+  on('prompt.submit', async ($, e, next) => {
+    if (!takeOver) return next(e)
+    const args = takeOverArgs(e.text)
+    if (!args) return next(e)
+    const cur = await read($, run)
+    if (cur && isLive(cur.phase)) return next(e)
+    void start($, args).then(msg => $.ui.toast(msg)).catch(() => {})
+    return next({ ...e, text: takeOverNote(parseFactoryArgs(args).feature) })
+  }).catch(($, e, next) => next(e))
 
   // A stopped run's agents can't be aborted, so their every tool call is refused: they stop editing
   // and spending. Only the run's own agents; the main loop and other agents go on.
@@ -486,7 +539,8 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     if (e.agentId !== undefined) {
       const id = e.agentId
-      void serial(() => onAgentDone($, id, e.answer, e.reason === 'answer'))
+      const why = whyEnded(e)
+      void serial(() => onAgentDone($, id, e.answer, why, e.reason === 'error'))
     }
     return r
   }).catch(($, e, next) => next(e))

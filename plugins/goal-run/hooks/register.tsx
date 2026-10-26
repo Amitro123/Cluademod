@@ -510,8 +510,9 @@ export const register: Register = (on, options) => {
     const items = planItems(input.tasks)
     if (!items.length) return { deny: 'A plan needs at least one task.' }
     const before = await read($, goal)
-    // A factory plan never takes over the person's own goal, and doesn't inherit its done tasks.
-    if (isFactory && before && before.source !== FACTORY_SOURCE && before.status !== 'done') return { result: PLAN_KEPT_FOR_FACTORY }
+    // A factory plan never takes over the person's own goal under way, and doesn't inherit its done
+    // tasks. A goal still being planned (no plan approved yet) is the one the factory took over.
+    if (isFactory && before && before.source !== FACTORY_SOURCE && before.status !== 'done' && before.status !== 'planning') return { result: PLAN_KEPT_FOR_FACTORY }
     const text = clip(String(input.goal ?? '').trim() || before?.text || 'Session goal', 200)
     // A plan with no goal set before it is a new goal, set now.
     const proposed = { setAt: await $.clock.now(), ...replan(isFactory ? null : before, text, orderPlan(items)), ...(isFactory ? { source: FACTORY_SOURCE } : {}) }

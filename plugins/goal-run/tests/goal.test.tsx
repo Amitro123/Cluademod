@@ -672,6 +672,15 @@ describe('a plan from a factory run', () => {
     expect(g.tasks.map(t => t.status)).toEqual(['done', 'pending'])
   })
 
+  test("a goal still being planned is the factory's to plan: its plan replaces it", async ($, on) => {
+    const w = engine(on, { answers: ['Approve, start building'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Rate limiter' } as never)
+    const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks } as never)
+    expect(String(r.result)).toBe(PLAN_APPROVED_FOR_FACTORY)
+    expect((w.saved['goal:/repo'] as Goal).source).toBe('factory')
+  })
+
   test("a regular plan's answers are not the factory's", async ($, on) => {
     engine(on, { answers: ['Approve, run through', 'Change it'] })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)

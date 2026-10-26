@@ -2,8 +2,8 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { detectChecks, detectSetup, parseDecision, parseTasks, parseVerdict, splitChecks } from '../hooks/flow'
-import { factoryArgs, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
+import { cleanFeature, detectChecks, detectSetup, parseDecision, parseTasks, parseVerdict, splitChecks } from '../hooks/flow'
+import { factoryArgs, goalPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 
@@ -24,7 +24,7 @@ const SPEC_ANSWER = 'Wrote docs/specs/rate-limiter.md.\nTASKS:\n1. [high] Token 
 const PASS = 'Looked at the diff.\nVERDICT: PASS\nFINDINGS:\n- [minor] src/limit.ts:4 a name could be clearer'
 const CHANGES = 'VERDICT: CHANGES\nFINDINGS:\n- [major] src/mw.ts:12 Retry-After is in ms, not seconds'
 
-type Spawned = { id: string; subagentType: string; prompt: string; description: string; cwd?: string }
+type Spawned = { id: string; subagentType: string; prompt: string; description: string; cwd?: string; model?: string }
 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
@@ -47,11 +47,11 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
   on('command.list', () => ({ value: goalRun ? [{ name: 'session-goal', description: 'g', source: 'plugin' }] : [] }) as never)
   // The mod's own spawn arrives in the Agent tool's words (subagent_type).
   on('agent.spawn', (_, e) => {
-    const a = e as unknown as { subagentType?: string; subagent_type?: string; prompt: string; description: string; cwd?: string }
+    const a = e as unknown as { subagentType?: string; subagent_type?: string; prompt: string; description: string; cwd?: string; model?: string }
     const type = a.subagentType ?? a.subagent_type ?? ''
     if (denyType && type.startsWith('factory:')) return { deny: 'unknown agent type' } as never
     const id = `a${spawned.length + 1}`
-    spawned.push({ id, subagentType: type, prompt: a.prompt, description: a.description, cwd: a.cwd })
+    spawned.push({ id, subagentType: type, prompt: a.prompt, description: a.description, cwd: a.cwd, ...(a.model ? { model: a.model } : {}) })
     return { model: 'm', agentId: id } as never
   })
   // The kit answers a mod's own spawn itself, without an agentId: the mod finds its agent in the list.
@@ -545,6 +545,96 @@ describe('the person decides', () => {
   })
 })
 
+describe('goals and to-do items run through the factory by themselves', () => {
+  const START = (lines: string[]) => [lines.length === 1 ? 'Start this item from my to-do list:' : `Start these ${lines.length} items from my to-do list, one after the other:`, ...lines, 'Do the work. When an item is finished, call mcp__followups__done with its id (and a short note).'].join('\n')
+
+  test("goal-run's goal prompt starts a run, and the main Claude is told the factory has it", async ($, on) => {
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const r = await $.prompt.submit({ text: goalPrompt('Rate limiter for the API'), origin: { kind: 'plugin' } } as never)
+    await settled()
+    expect(String(r.text)).toMatch(/^The factory took this over: "Rate limiter for the API"/)
+    expect(last(w)).toMatchObject({ subagentType: 'factory:spec-writer' })
+    expect(last(w).prompt).toContain('Feature: Rate limiter for the API')
+    expect(w.toasts.at(-1)).toMatch(/Factory run started/)
+  })
+
+  test("a single to-do item's Start becomes a run that marks the item done once the PR is open", async ($, on) => {
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const r = await $.prompt.submit({ text: START(['- id k3x-1a2b3: Add a rate limiter (bug) — bursts must pass [where: src/mw.ts]']) } as never)
+    await settled()
+    expect(String(r.text)).toMatch(/factory took this over: "Add a rate limiter — bursts must pass \(src\/mw\.ts\)"/)
+    expect(last(w).prompt).toContain('Feature: Add a rate limiter — bursts must pass (src/mw.ts)')
+    await answer($, 'a1', SPEC_ANSWER)
+    await command($, 'approve')
+    await answer($, 'a2', 'built')
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    await answer($, 'a5', 'DECISION: APPROVE\nREASON: ok')
+    await command($, 'approve')
+    expect(w.sent.at(-1)).toMatch(/mcp__followups__done with id "k3x-1a2b3"/)
+  })
+
+  test('several items started together, a run already going, or takeOver off: the prompt goes on as it was', async ($, on) => {
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const two = START(['- id a1: One', '- id a2: Two'])
+    expect(String((await $.prompt.submit({ text: two } as never)).text)).toBe(two)
+    await $.prompt.submit({ text: goalPrompt('First') } as never)
+    await settled()
+    const second = goalPrompt('Second')
+    expect(String((await $.prompt.submit({ text: second } as never)).text)).toBe(second)
+    expect(w.spawned).toHaveLength(1)
+  })
+
+  test('with takeOver off nothing is taken over', { options: { takeOver: 'off' } }, async ($, on) => {
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const text = goalPrompt('Rate limiter')
+    expect(String((await $.prompt.submit({ text } as never)).text)).toBe(text)
+    expect(w.spawned).toHaveLength(0)
+  })
+
+  test("a paste's wrapper doesn't reach the feature, the branch or the spec file", async ($, on) => {
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const r = await command($, '<pasted_content id="e2b6">\nFix the retry bug in the router\n</pasted_content id="e2b6">')
+    expect(r).toMatch(/Factory run started: Fix the retry bug in the router\. Branch factory\/fix-the-retry-bug-in-the-router/)
+    expect(last(w).prompt).toContain('docs/specs/fix-the-retry-bug-in-the-router.md')
+    expect(last(w).prompt).not.toContain('pasted_content')
+  })
+})
+
+describe('an agent that fails says why', () => {
+  test('an API error retries once on the session model, then stops with the reason', async ($, on) => {
+    const w = engine(on)
+    await startRun($)
+    expect(last(w).model).toBe('opus')
+    await answer($, 'a1', 'model not available: opus', 'error')
+    expect(last(w)).toMatchObject({ id: 'a2', subagentType: 'factory:spec-writer' })
+    expect(last(w).model).toBeUndefined()
+    await answer($, 'a2', 'overloaded', 'error')
+    expect(w.spawned).toHaveLength(2)
+    expect(await bandText($)).toMatch(/The spec-writer stopped: an API error ended it: overloaded/)
+    // The diagram doesn't call the plan approved.
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const t = await texts(pane)
+    expect(t).toMatch(/◌ plan approval/)
+    expect(t).toMatch(/✕ spec-writer/)
+    await pane.unmount()
+  })
+
+  test('a refusal is reported with the explanation, not retried', async ($, on) => {
+    const w = engine(on)
+    await startRun($)
+    await $.turn.complete({ answer: '', durationMs: 10, isAborted: false, turnId: 't', agentId: 'a1', reason: 'refusal', refusal: { category: 'x', explanation: 'policy' } } as never)
+    await settled()
+    expect(w.spawned).toHaveLength(1)
+    expect(await bandText($)).toMatch(/The spec-writer stopped: the model refused: policy/)
+  })
+})
+
 describe('the parsers', () => {
   test('tasks, with priorities and what they need', () => {
     expect(parseTasks(SPEC_ANSWER)).toEqual([
@@ -565,6 +655,10 @@ describe('the parsers', () => {
   test('decisions: anything unclear escalates', () => {
     expect(parseDecision('DECISION: APPROVE\nREASON: good')).toEqual({ decision: 'APPROVE', reason: 'good' })
     expect(parseDecision('hmm').decision).toBe('ESCALATE')
+  })
+
+  test('a feature loses a paste wrapper', () => {
+    expect(cleanFeature('<pasted_content id="x">\n  Fix it  \n</pasted_content id="x">')).toBe('Fix it')
   })
 
   test('checks: the option splits into argv, detection reads the project', () => {

@@ -102,6 +102,14 @@ export const tailOf = (text: string, lines = 30) => text.trim().split('\n').slic
 
 // ---------- what each step is asked ----------
 
+// The feature as typed or handed over, without the wrapper a paste carries in the prompt.
+export const cleanFeature = (text: string) =>
+  text.replace(/<\/?pasted_content\b[^>]*>/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim()
+
+// To the main Claude, when the factory takes over a goal or a to-do item: the work is the factory's.
+export const takeOverNote = (feature: string) =>
+  `The factory took this over: "${feature.split('\n')[0]!.slice(0, 200)}". Its spec-writer writes the spec and its builder does the work, in a worktree of its own. Don't start the work or propose a plan yourself; answer in one line that the factory is on it.`
+
 export const slugOf = (feature: string) =>
   feature.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'feature'
 

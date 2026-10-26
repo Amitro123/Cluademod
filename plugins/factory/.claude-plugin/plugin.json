@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A software factory: /factory <feature> writes a spec, has you approve its plan (in goal-run when it's installed), builds it on a branch, runs the checks and parallel reviews, and has an approver agent decide; you then press Open PR and Claude opens it. Its pane draws where the run is",
   "author": {
     "name": "Amit Rosen",
@@ -41,6 +41,16 @@
       "options": [
         "off",
         "on"
+      ]
+    },
+    "takeOver": {
+      "type": "string",
+      "title": "Take over goals and to-do items",
+      "description": "on: a goal set in goal-run, or a single to-do item started in followups, runs through the factory instead of the main conversation. off: only /factory and the 🏭 buttons start a run",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
       ]
     }
   }
