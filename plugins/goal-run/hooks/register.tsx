@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
-import { FACTORY_PLAN_APPROVED_ARG, FACTORY_SOURCE, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, toolText } from './texts'
+import { FACTORY_PLAN_APPROVED_ARG, FACTORY_SOURCE, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, toolText } from './texts'
 // The goal-run tests import the start-prompt parser from here, as before it was shared.
 export { parseStartPrompt }
 
@@ -452,9 +452,11 @@ export const register: Register = (on, options) => {
     const items = planItems(input.tasks)
     if (!items.length) return { deny: 'A plan needs at least one task.' }
     const before = await read($, goal)
+    // A factory plan never takes over the person's own goal, and doesn't inherit its done tasks.
+    if (isFactory && before && before.source !== FACTORY_SOURCE && before.status !== 'done') return { result: PLAN_KEPT_FOR_FACTORY }
     const text = clip(String(input.goal ?? '').trim() || before?.text || 'Session goal', 200)
     // A plan with no goal set before it is a new goal, set now.
-    const proposed = { setAt: await $.clock.now(), ...replan(before, text, orderPlan(items)), ...(isFactory ? { source: FACTORY_SOURCE } : {}) }
+    const proposed = { setAt: await $.clock.now(), ...replan(isFactory ? null : before, text, orderPlan(items)), ...(isFactory ? { source: FACTORY_SOURCE } : {}) }
     await update($, asking, () => null)
     await setGoal($, () => proposed)
     void $.ui.open({ id: PANE, title: PANE_TITLE })

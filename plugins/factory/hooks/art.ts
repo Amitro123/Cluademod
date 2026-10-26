@@ -26,13 +26,14 @@ export function states(run: Run) {
   const reviewing = run.reviews.filter(r => r.round === run.round && r.round > 0)
   const inCount = reviewing.filter(r => r.state === 'pass' || r.state === 'changes' || r.state === 'fail').length
   const waitState: StepState = !reviewing.length ? 'wait' : inCount < reviewing.length ? 'run' : reviewing.some(r => r.state !== 'pass') ? 'changes' : 'pass'
-  const approved = run.phase === 'done' && run.steps.approver.state === 'pass'
+  const opened = run.phase === 'done' && run.steps.approver.state === 'pass'
   return {
     planState,
     waitState,
     inCount,
     outOf: reviewing.length,
-    pr: (approved ? 'pass' : 'wait') as StepState,
+    // Ready: approved, the PR waits for the person's press.
+    pr: (opened ? 'pass' : run.phase === 'ready' ? 'run' : 'wait') as StepState,
     human: (run.phase === 'needs-human' ? 'changes' : 'wait') as StepState,
   }
 }
@@ -97,12 +98,12 @@ export function diagramSvg(run: Run, frame: number, theme: Theme = 'light'): str
   s += `<path d="M${bx + bw + 8} 148l-8 4 8 4z" fill="${st.waitState === 'changes' ? COLOR.changes : P.line}"/>`
   s += `<text x="${W - 20}" y="300" font-size="10" fill="${P.dim}" transform="rotate(-90 ${W - 20} 300)">changes: builder again</text>`
   s += arrow(396, 414, cx, true)
-  s += box(bx, 414, bw, 44, ROLES.approver.label, ROLES.approver.model, run.steps.approver.state, run.phase === 'needs-human' || run.phase === 'done' ? run.note : '')
+  s += box(bx, 414, bw, 44, ROLES.approver.label, ROLES.approver.model, run.steps.approver.state, run.phase === 'needs-human' || run.phase === 'ready' || run.phase === 'done' ? run.note : '')
   s += `<line x1="${cx - 70}" y1="458" x2="${cx - 70}" y2="486" stroke="${P.line}" stroke-dasharray="4 3"/><line x1="${cx + 70}" y1="458" x2="${cx + 70}" y2="486" stroke="${P.line}" stroke-dasharray="4 3"/>`
   s += `<text x="${cx - 118}" y="480" font-size="9.5" fill="${P.dim}" text-anchor="middle">APPROVE</text><text x="${cx + 118}" y="480" font-size="9.5" fill="${P.dim}" text-anchor="middle">ESCALATE</text>`
   s += box(cx - 190, 486, 160, 40, 'open PR', '', st.pr)
   s += box(cx + 30, 486, 160, 40, 'needs-human', '', st.human)
-  s += `<text x="${cx}" y="546" font-size="10" fill="${P.dim}" text-anchor="middle">${esc(short(`branch ${run.branch} · ${run.worktree.replace(/^.*[\\/](\.factory[\\/])/, '$1')}`, 96))}</text>`
+  s += `<text x="${cx}" y="546" font-size="10" fill="${P.dim}" text-anchor="middle">${esc(short(`branch ${run.branch} · ${run.worktree.split(/[\\/]/).slice(-2).join('/')}`, 96))}</text>`
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><rect width="${W}" height="${H}" rx="10" fill="${P.bg}"/>${s}</svg>`
 }
 
@@ -117,6 +118,6 @@ export function pipelineLines(run: Run): string[] {
     line(run.steps.checks.state, 'checks', checksLine(run)),
     ...run.reviews.map(r => `  ${line(r.state, `${ROLES[r.role].label} (${ROLES[r.role].model})`, r.state === 'changes' ? `${r.findings.length} findings` : r.state === 'pass' ? 'PASS' : '')}`),
     line(run.steps.approver.state, `approver (${ROLES.approver.model})`),
-    line(st.pr === 'pass' ? 'pass' : st.human === 'changes' ? 'changes' : 'wait', st.pr === 'pass' ? 'open PR' : st.human === 'changes' ? 'needs-human' : 'PR or needs-human'),
+    line(st.pr !== 'wait' ? st.pr : st.human === 'changes' ? 'changes' : 'wait', st.pr === 'pass' ? 'open PR' : st.pr === 'run' ? 'open PR (you)' : st.human === 'changes' ? 'needs-human' : 'PR or needs-human'),
   ]
 }

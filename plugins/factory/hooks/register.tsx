@@ -1,13 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Check, Finding, Reviewer, Role, Run } from '../types'
+import type { Blocked, Check, Finding, Phase, Reviewer, Role, Run } from '../types'
 import { buildRound, DIAGRAM, diagramSvg, pipelineLines } from './art'
 import type { Theme } from './art'
 import {
   approvePrompt,
   buildPrompt,
   detectChecks,
+  detectSetup,
   isLive,
   newRun,
   openFindings,
@@ -19,11 +20,13 @@ import {
   reviewPrompt,
   ROLE_PROMPTS,
   ROLES,
+  slugOf,
   specPrompt,
   splitChecks,
   tailOf,
   tok,
   tokensOf,
+  waitsOnPerson,
 } from './flow'
 import { FACTORY_PLAN_APPROVED_ARG, parsePlanOutcome, toolText } from './texts'
 
@@ -35,16 +38,20 @@ const PANE = 'factory'
 const PANE_TITLE = 'Factory'
 const PLAN_TOOL = 'mcp__goal-run__plan'
 const MAX_CHECK_ROUNDS = 2
+const MAX_SLUG_TRIES = 5
 const CHECK_TIMEOUT_MS = 600_000
 const FRAME_MS = 700
 const ACCENT = '#2563eb'
+const STOPPED_DENY = 'The factory run was stopped. Stop now and answer with one line.'
 
 // Set from the options when the module registers.
 let maxRounds = 2
 let checksOption = ''
-// Whether goal-run is there to put the spec's tasks in a plan and ask the person; else the factory asks.
-let hasGoalRun = false
+let setupOption = ''
+let autoPr = false
 // Transitions run one at a time: two reviewers finishing together must not both start the approver.
+// Every spawn and every agent's completion goes through this queue, so a completion is handled only
+// after the job that spawned its agent has recorded the agent's id.
 let queue: Promise<void> = Promise.resolve()
 const timers: { cancel: () => void }[] = []
 
@@ -57,18 +64,32 @@ async function patch($: EngineInterface, fn: (r: Run) => Run): Promise<Run | nul
   return update($, run, cur => (cur ? fn(cur) : cur))
 }
 
+// A move to a phase the run works in clears what it was blocked on.
+const moveTo = (r: Run, phase: Phase, note: string): Run => ({ ...r, phase, note, blocked: null })
+
+async function block($: EngineInterface, blocked: Blocked, note: string, fn: (r: Run) => Run = r => r) {
+  // A run stopped meanwhile stays stopped.
+  await patch($, r => (isLive(r.phase) ? { ...fn(r), phase: 'needs-human', blocked, note } : r))
+}
+
 async function git($: EngineInterface, args: string[], cwd?: string) {
   return $.process.run(['git', ...args], { ...(cwd ? { cwd } : {}), timeoutMs: 60_000 }).catch(err => ({ exitCode: 1, stdout: '', stderr: String(err) }))
+}
+
+async function run$($: EngineInterface, argv: string[], cwd: string) {
+  return $.process.run(argv, { cwd, timeoutMs: CHECK_TIMEOUT_MS }).catch(err => ({ exitCode: 1, stdout: '', stderr: String(err) }))
 }
 
 const describe = (role: Role, r: Run) =>
   role === 'builder' ? `builder, round ${buildRound(r)}` : role === 'spec' ? 'spec-writer' : role === 'approver' ? 'approver' : `${ROLES[role].label} review`
 
+const goalRunThere = async ($: EngineInterface) => (await $.command.list().catch(() => [])).some(c => c.name === 'session-goal')
+
 // Starts one role's agent in the run's worktree. A role type the engine refused to register falls
 // back to a general-purpose agent carrying the role's instructions in its prompt.
 async function spawnRole($: EngineInterface, role: Role, prompt: string): Promise<boolean> {
   const r = await read($, run)
-  if (!r) return false
+  if (!r || !isLive(r.phase)) return false
   const spec = ROLES[role]
   const base = { prompt, description: `factory · ${describe(role, r)}`, model: spec.model, cwd: r.worktree }
   let res = await $.agent.spawn({ ...base, subagentType: `factory:${spec.name}` }).catch(err => ({ deny: String(err) }) as { deny: string })
@@ -76,16 +97,20 @@ async function spawnRole($: EngineInterface, role: Role, prompt: string): Promis
     res = await $.agent.spawn({ ...base, subagentType: 'general-purpose', prompt: `${ROLE_PROMPTS[role]}\n\n${prompt}` }).catch(err => ({ deny: String(err) }) as { deny: string })
   }
   if ('deny' in res && res.deny) {
-    await patch($, cur => ({ ...cur, phase: 'needs-human', note: `Could not start the ${describe(role, cur)}: ${res.deny}` }))
+    await block($, { on: 'start', role }, `Could not start the ${describe(role, r)}: ${res.deny}`)
     return false
   }
   // Without an id in the answer, the agent is found in the session's list by its description.
   const id = (res as { agentId?: string }).agentId ?? (await $.agent.list().catch(() => [])).filter(a => a.description === base.description && !r.agents[a.id]).at(-1)?.id
   if (!id) {
-    await patch($, cur => ({ ...cur, phase: 'needs-human', note: `Started the ${describe(role, cur)}, but can't follow it: no agent id.` }))
+    await block($, { on: 'start', role }, `Started the ${describe(role, r)}, but can't follow it: no agent id.`)
     return false
   }
-  await patch($, cur => ({ ...cur, agents: { ...cur.agents, [id]: role } }))
+  await patch($, cur => ({
+    ...cur,
+    agents: { ...cur.agents, [id]: role },
+    reviews: cur.reviews.map(x => (x.role === role ? { ...x, agentId: id } : x)),
+  }))
   return true
 }
 
@@ -97,24 +122,25 @@ async function start($: EngineInterface, feature: string): Promise<string> {
   const root = top.stdout.trim()
   const head = await git($, ['rev-parse', 'HEAD'], root)
   if (head.exitCode !== 0) return 'The repository has no commit yet to build from.'
-  let r = newRun(feature, await $.clock.now(), head.stdout.trim(), root)
-  // A branch name already taken gets a number.
-  for (let k = 2; k <= 6; k++) {
-    const added = await git($, ['worktree', 'add', '-b', r.branch, r.worktree, r.base], root)
-    if (added.exitCode === 0) break
-    if (k === 6) return `Could not create a worktree for the run: ${tailOf(added.stderr, 3)}`
-    r = { ...r, slug: `${r.slug}-${k}`, branch: `factory/${r.slug}-${k}`, worktree: r.worktree.replace(/[^\\/]+$/, `${r.slug}-${k}`), specFile: `docs/specs/${r.slug}-${k}.md` }
+  const at = await $.clock.now()
+  const slug = slugOf(feature)
+  let r: Run | null = null
+  // A branch or folder name already taken gets a number; any other failure is reported as it is.
+  for (let k = 1; k <= MAX_SLUG_TRIES && !r; k++) {
+    const next = newRun(feature, at, head.stdout.trim(), root, k === 1 ? slug : `${slug}-${k}`)
+    const added = await git($, ['worktree', 'add', '-b', next.branch, next.worktree, next.base], root)
+    if (added.exitCode === 0) r = next
+    else if (!/already exists/i.test(added.stderr)) return `Could not create a worktree for the run: ${tailOf(added.stderr, 3)}`
   }
-  await keepOutOfGit($, root)
+  if (!r) return `Could not create a worktree for the run: the branches factory/${slug} to factory/${slug}-${MAX_SLUG_TRIES} are all taken.`
+  const created: Run = { ...r, gate: (await goalRunThere($)) ? 'goal-run' : 'factory' }
   await readTheme($)
-  await update($, run, () => r)
+  await update($, run, () => created)
   void $.ui.open({ id: PANE, title: PANE_TITLE })
-  hasGoalRun = (await $.command.list().catch(() => [])).some(c => c.name === 'session-goal')
-  await spawnRole($, 'spec', specPrompt(r))
-  return `Factory run started: ${r.feature}. Branch ${r.branch}; the spec-writer is writing ${r.specFile}.`
+  await serial(async () => void (await spawnRole($, 'spec', specPrompt(created))))
+  return `Factory run started: ${created.feature}. Branch ${created.branch}, worktree ${created.worktree}; the spec-writer is writing ${created.specFile}.`
 }
 
-// The worktrees live in .factory/ of the repository: listed in .git/info/exclude, never committed.
 // The diagram's palette follows the theme set in /config; dark when it can't be read.
 async function readTheme($: EngineInterface) {
   const row = (await $.config.list().catch(() => [])).find(r => r.key === 'theme')
@@ -122,50 +148,101 @@ async function readTheme($: EngineInterface) {
   await update($, theme, () => (/light/i.test(value) ? 'light' : 'dark'))
 }
 
-async function keepOutOfGit($: EngineInterface, root: string) {
-  const path = `${root}/.git/info/exclude`
-  const text = await $.fs.read(path).then(t => String(t), () => null)
-  if (text === null || /^\.factory\/$/m.test(text)) return
-  await $.fs.write(path, `${text.replace(/\n?$/, '\n')}.factory/\n`).catch(() => {})
-}
-
 async function onSpec($: EngineInterface, answer: string, ok: boolean) {
   const tasks = ok ? parseTasks(answer) : []
   if (!tasks.length) {
-    await patch($, r => ({ ...r, phase: 'needs-human', steps: { ...r.steps, spec: { ...r.steps.spec, state: 'fail' } }, note: ok ? 'The spec-writer gave no TASKS list.' : 'The spec-writer stopped before finishing.' }))
+    await block($, { on: 'spec' }, ok ? 'The spec-writer gave no TASKS list.' : 'The spec-writer stopped before finishing.', r => ({ ...r, steps: { ...r.steps, spec: { ...r.steps.spec, state: 'fail' } } }))
     return
   }
-  const r = await patch($, cur => ({ ...cur, tasks, phase: 'plan', steps: { ...cur.steps, spec: { ...cur.steps.spec, state: 'pass' } }, note: 'waiting for you to approve the plan' }))
-  if (r && hasGoalRun) void $.prompt.submit({ text: planPrompt(r) }).catch(() => {})
+  // goal-run is asked again: installed or removed since the run started, the plan goes where it can.
+  const viaGoalRun = (await read($, run))?.gate === 'goal-run' && (await goalRunThere($))
+  const r = await patch($, cur => ({
+    ...moveTo(cur, 'plan', 'waiting for you to approve the plan'),
+    tasks,
+    gate: viaGoalRun ? 'goal-run' : 'factory',
+    steps: { ...cur.steps, spec: { ...cur.steps.spec, state: 'pass' } },
+  }))
+  if (r && viaGoalRun) void $.prompt.submit({ text: planPrompt(r) }).catch(() => {})
 }
 
-async function onPlan($: EngineInterface, outcome: { approved: true } | { changes: string }) {
+async function onPlan($: EngineInterface, outcome: { approved: true } | { changes: string } | { kept: true }) {
   const r = await read($, run)
   if (!r || r.phase !== 'plan') return
   if ('approved' in outcome) return startBuild($, [], [])
-  await patch($, cur => ({ ...cur, phase: 'spec', steps: { ...cur.steps, spec: { ...cur.steps.spec, state: 'run' } }, note: 'revising the spec' }))
-  await spawnRole($, 'spec', specPrompt(r, outcome.changes || 'The person asked for changes to the plan.'))
+  // The person has a goal of their own in goal-run: the factory's band asks instead.
+  if ('kept' in outcome) return void (await patch($, cur => ({ ...cur, gate: 'factory', note: 'waiting for you to approve the plan (here: goal-run keeps your own goal)' })))
+  await respec($, outcome.changes || 'The person asked for changes to the plan.')
+}
+
+async function respec($: EngineInterface, feedback = '') {
+  const r = await patch($, cur => ({ ...moveTo(cur, 'spec', feedback ? 'revising the spec' : 'writing the spec'), steps: { ...cur.steps, spec: { ...cur.steps.spec, state: 'run' } } }))
+  if (r) await spawnRole($, 'spec', specPrompt(r, feedback))
 }
 
 async function startBuild($: EngineInterface, findings: Finding[], failed: Check[]) {
-  const r = await patch($, cur => ({ ...cur, phase: 'build', steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'run' } }, note: failed.length ? 'fixing the checks' : findings.length ? `fixing ${findings.length} finding${findings.length === 1 ? '' : 's'}` : 'building' }))
+  const note = failed.length ? 'fixing the checks' : findings.length ? `fixing ${findings.length} finding${findings.length === 1 ? '' : 's'}` : 'building'
+  const r = await patch($, cur => ({ ...moveTo(cur, 'build', note), steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'run' } } }))
   if (r) await spawnRole($, 'builder', buildPrompt(r, findings, failed))
 }
 
-async function checkCommands($: EngineInterface, worktree: string): Promise<string[][]> {
+// What the builder left uncommitted is committed by the factory: reviewers and the PR see the same commits.
+async function onBuilt($: EngineInterface) {
+  const r = await read($, run)
+  if (!r) return
+  const status = await git($, ['status', '--porcelain'], r.worktree)
+  if (status.exitCode === 0 && status.stdout.trim()) {
+    const added = await git($, ['add', '-A'], r.worktree)
+    const committed = added.exitCode === 0 ? await git($, ['commit', '-m', `factory: ${r.feature}`], r.worktree) : added
+    if (committed.exitCode !== 0) {
+      await block($, { on: 'builder' }, `The builder's work could not be committed: ${tailOf(`${committed.stdout}\n${committed.stderr}`, 2)}`)
+      return
+    }
+  }
+  await runChecks($)
+}
+
+async function namesIn($: EngineInterface, dir: string) {
+  return (await $.fs.list(dir).catch(() => [])).map(f => f.name)
+}
+
+async function checkCommands($: EngineInterface, worktree: string, files: string[]): Promise<string[][]> {
   if (checksOption.trim()) return splitChecks(checksOption)
-  const files = (await $.fs.list(worktree).catch(() => [])).map(f => f.name)
   const pkg = files.includes('package.json') ? await $.fs.read(`${worktree}/package.json`).then(t => String(t), () => null) : null
   return detectChecks(files, pkg)
 }
 
+// A fresh worktree has no dependencies installed: the `setup` option, or the lockfile's install, runs
+// once a run before its first checks. Its failure is the person's to look at, not the builder's.
+async function setUp($: EngineInterface, r: Run, files: string[]): Promise<boolean> {
+  if (r.setupDone) return true
+  const cmds = setupOption.trim() ? splitChecks(setupOption) : [detectSetup(files)].filter((c): c is string[] => c !== null)
+  for (const argv of cmds) {
+    await patch($, cur => ({ ...cur, note: `installing: ${argv.join(' ')}` }))
+    const out = await run$($, argv, r.worktree)
+    if (out.exitCode !== 0) {
+      const check: Check = { cmd: argv.join(' '), ok: false, tail: tailOf(`${out.stdout}\n${out.stderr}`) }
+      await block($, { on: 'setup' }, `The setup failed: ${check.cmd}. Fix it (or set the setup option), then Retry.`, cur => ({ ...cur, checks: [check], steps: { ...cur.steps, checks: { ...cur.steps.checks, state: 'fail' } } }))
+      return false
+    }
+  }
+  await patch($, cur => ({ ...cur, setupDone: true }))
+  return true
+}
+
 async function runChecks($: EngineInterface) {
-  const r = await patch($, cur => ({ ...cur, phase: 'checks', steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'pass' }, checks: { ...cur.steps.checks, state: 'run' } }, checkRound: cur.checkRound + 1, note: 'running the checks' }))
+  const r = await patch($, cur => ({
+    ...moveTo(cur, 'checks', 'running the checks'),
+    steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'pass' }, checks: { ...cur.steps.checks, state: 'run' } },
+    checkRound: cur.checkRound + 1,
+  }))
   if (!r) return
-  const cmds = await checkCommands($, r.worktree)
+  const files = await namesIn($, r.worktree)
+  if (!(await setUp($, r, files))) return
+  const cmds = await checkCommands($, r.worktree, files)
+  await patch($, cur => ({ ...cur, note: 'running the checks' }))
   const results: Check[] = []
   for (const argv of cmds) {
-    const out = await $.process.run(argv, { cwd: r.worktree, timeoutMs: CHECK_TIMEOUT_MS }).catch(err => ({ exitCode: 1, stdout: '', stderr: String(err) }))
+    const out = await run$($, argv, r.worktree)
     results.push({ cmd: argv.join(' '), ok: out.exitCode === 0, tail: out.exitCode === 0 ? '' : tailOf(`${out.stdout}\n${out.stderr}`) })
   }
   const failed = results.filter(c => !c.ok)
@@ -173,51 +250,63 @@ async function runChecks($: EngineInterface) {
   if (!after || after.phase !== 'checks') return
   if (!failed.length) return startReviews($)
   if (after.checkRound < MAX_CHECK_ROUNDS) return startBuild($, [], failed)
-  await patch($, cur => ({ ...cur, phase: 'needs-human', note: `The checks still fail after ${cur.checkRound} builder passes: ${failed.map(c => c.cmd).join(', ')}.` }))
+  await block($, { on: 'checks' }, `The checks still fail after ${after.checkRound} builder passes: ${failed.map(c => c.cmd).join(', ')}.`)
 }
 
+// Every reviewer looks at every round: a fix for one reviewer is new code for the others too.
 async function startReviews($: EngineInterface) {
-  // Round one asks every reviewer; a later round only those who asked for changes.
   const r = await patch($, cur => {
     const round = cur.round + 1
-    const again = cur.round === 0 ? cur.reviews.map(x => x.role) : cur.reviews.filter(x => x.state === 'changes').map(x => x.role)
     return {
-      ...cur,
+      ...moveTo(cur, 'review', `reviewing, round ${round}`),
       round,
       checkRound: 0,
-      phase: 'review',
-      note: `reviewing, round ${round}`,
-      reviews: cur.reviews.map(x => (again.includes(x.role) ? { ...x, state: 'run', findings: [], round } : x)),
+      reviews: cur.reviews.map(x => ({ ...x, state: 'run', findings: [], round, agentId: null })),
     }
   })
-  if (!r) return
-  const stat = await git($, ['diff', '--stat', r.base], r.worktree)
-  for (const x of r.reviews.filter(v => v.round === r.round)) await spawnRole($, x.role, reviewPrompt(r, x.role, stat.exitCode === 0 ? stat.stdout.trim() : ''))
+  if (r) await spawnReviewers($, r)
 }
 
-async function onReview($: EngineInterface, role: Reviewer, answer: string, ok: boolean) {
+// The reviewers of this round not started yet (all of them, or those a failed start left).
+async function spawnReviewers($: EngineInterface, r: Run) {
+  const stat = await git($, ['diff', '--stat', r.base, 'HEAD'], r.worktree)
+  for (const x of r.reviews.filter(v => v.round === r.round && v.state === 'run' && !v.agentId)) {
+    if (!(await spawnRole($, x.role, reviewPrompt(r, x.role, stat.exitCode === 0 ? stat.stdout.trim() : '')))) return
+  }
+}
+
+async function onReview($: EngineInterface, role: Reviewer, agentId: string, answer: string, ok: boolean) {
   const verdict = ok ? parseVerdict(answer) : { state: 'changes' as const, findings: [{ severity: 'major' as const, where: '-', text: 'The reviewer stopped before finishing.' }] }
-  const r = await patch($, cur => ({ ...cur, reviews: cur.reviews.map(x => (x.role === role ? { ...x, state: verdict.state, findings: verdict.findings } : x)) }))
+  const r = await patch($, cur => ({ ...cur, reviews: cur.reviews.map(x => (x.role === role && x.agentId === agentId ? { ...x, state: verdict.state, findings: verdict.findings } : x)) }))
   if (!r || r.phase !== 'review') return
   const mine = r.reviews.filter(x => x.round === r.round)
   if (mine.some(x => x.state === 'run')) return
   const changes = mine.filter(x => x.state === 'changes')
   if (changes.length && r.round < maxRounds) return startBuild($, openFindings(changes), [])
-  await patch($, cur => ({ ...cur, phase: 'approve', steps: { ...cur.steps, approver: { ...cur.steps.approver, state: 'run' } }, note: 'the approver is deciding' }))
-  const now = await read($, run)
-  if (now) await spawnRole($, 'approver', approvePrompt(now))
+  await startApprover($)
+}
+
+async function startApprover($: EngineInterface) {
+  const r = await patch($, cur => ({ ...moveTo(cur, 'approve', 'the approver is deciding'), steps: { ...cur.steps, approver: { ...cur.steps.approver, state: 'run' } } }))
+  if (r) await spawnRole($, 'approver', approvePrompt(r))
 }
 
 async function onApprover($: EngineInterface, answer: string, ok: boolean) {
   const { decision, reason } = ok ? parseDecision(answer) : { decision: 'ESCALATE' as const, reason: 'The approver stopped before deciding.' }
-  if (decision === 'APPROVE') return finish($, reason)
-  await patch($, r => ({ ...r, phase: 'needs-human', steps: { ...r.steps, approver: { ...r.steps.approver, state: 'changes' } }, note: reason }))
-  $.ui.toast('The factory needs you: /factory approve or /factory stop')
+  if (decision === 'ESCALATE') {
+    await block($, { on: 'escalate' }, reason, r => ({ ...r, steps: { ...r.steps, approver: { ...r.steps.approver, state: 'changes' } } }))
+    $.ui.toast('The factory needs you: Approve PR, or /factory stop')
+    return
+  }
+  // The approver is an agent: the PR, outward-facing, waits for the person unless autoPr is on.
+  if (autoPr) return finish($, reason)
+  await patch($, r => ({ ...moveTo(r, 'ready', `approved${reason ? `: ${reason}` : ''}. Open the PR when you're ready`), steps: { ...r.steps, approver: { ...r.steps.approver, state: 'pass' } } }))
+  $.ui.toast('The approver approved the change: Open PR in the factory band, or /factory approve')
 }
 
-// Approved, by the approver or by the person: the main Claude opens the PR.
+// Approved by the person (or by the approver, with autoPr on): the main Claude opens the PR.
 async function finish($: EngineInterface, reason: string) {
-  const r = await patch($, cur => ({ ...cur, phase: 'done', steps: { ...cur.steps, approver: { ...cur.steps.approver, state: 'pass' } }, note: reason || 'approved' }))
+  const r = await patch($, cur => ({ ...moveTo(cur, 'done', reason || 'approved'), steps: { ...cur.steps, approver: { ...cur.steps.approver, state: 'pass' } } }))
   if (!r) return
   void $.prompt.submit({ text: prPrompt(r, reason) }).catch(() => {
     $.ui.toast(`Approved. Open a PR from ${r.branch} yourself; the prompt could not be sent.`)
@@ -228,13 +317,14 @@ async function onAgentDone($: EngineInterface, agentId: string, answer: string, 
   const r = await read($, run)
   const role = r?.agents[agentId]
   if (!r || !role || !isLive(r.phase)) return
-  if (role === 'spec') return onSpec($, answer, ok)
+  if (role === 'spec') return r.phase === 'spec' ? onSpec($, answer, ok) : undefined
   if (role === 'builder') {
-    if (!ok) return void (await patch($, cur => ({ ...cur, phase: 'needs-human', steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'fail' } }, note: 'The builder stopped before finishing.' })))
-    return runChecks($)
+    if (r.phase !== 'build') return
+    if (!ok) return block($, { on: 'builder' }, 'The builder stopped before finishing.', cur => ({ ...cur, steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'fail' } } }))
+    return onBuilt($)
   }
-  if (role === 'approver') return onApprover($, answer, ok)
-  return onReview($, role, answer, ok)
+  if (role === 'approver') return r.phase === 'approve' ? onApprover($, answer, ok) : undefined
+  return onReview($, role, agentId, answer, ok)
 }
 
 async function addTokens($: EngineInterface, agentId: string, n: number) {
@@ -247,6 +337,8 @@ async function addTokens($: EngineInterface, agentId: string, n: number) {
   })
 }
 
+// Approve: the plan, the PR the approver approved, or a change the approver escalated. Anything else
+// that stopped the run isn't approved past: it's retried or the run is stopped.
 async function approveNow($: EngineInterface): Promise<string> {
   const r = await read($, run)
   if (!r) return 'No factory run.'
@@ -255,30 +347,64 @@ async function approveNow($: EngineInterface): Promise<string> {
     void serial(() => onPlan($, { approved: true }))
     return 'Plan approved: the builder starts.'
   }
-  if (r.phase === 'needs-human') {
-    void serial(() => finish($, 'approved by the person'))
+  if (r.phase === 'ready' || (r.phase === 'needs-human' && r.blocked?.on === 'escalate')) {
+    void serial(() => finish($, r.phase === 'ready' ? r.note.replace(/\. Open the PR when you're ready$/, '') : 'approved by the person over the approver'))
     return 'Approved: Claude opens the PR.'
   }
+  if (r.phase === 'needs-human') return `Nothing to approve: ${r.note} /factory retry runs that step again; /factory stop ends the run.`
   return `Nothing waits for approval: the run is ${r.note}.`
 }
 
+// Retry: the step that stopped the run, again.
+async function retryNow($: EngineInterface): Promise<string> {
+  const r = await read($, run)
+  if (!r || r.phase !== 'needs-human' || !r.blocked) return 'Nothing to retry.'
+  if (r.blocked.on === 'escalate') return 'The approver escalated: /factory approve opens the PR anyway, /factory stop ends the run.'
+  const b = r.blocked
+  void serial(async () => {
+    if (b.on === 'spec') return respec($)
+    if (b.on === 'builder') return startBuild($, openFindings(r.reviews.filter(x => x.round === r.round)), r.checks.filter(c => !c.ok))
+    if (b.on === 'checks' || b.on === 'setup') {
+      await patch($, cur => ({ ...cur, checkRound: 0 }))
+      return runChecks($)
+    }
+    if (b.role === 'spec') return respec($)
+    if (b.role === 'builder') return startBuild($, openFindings(r.reviews.filter(x => x.round === r.round)), r.checks.filter(c => !c.ok))
+    if (b.role === 'approver') return startApprover($)
+    const now = await patch($, cur => moveTo(cur, 'review', `reviewing, round ${cur.round}`))
+    if (now) await spawnReviewers($, now)
+  })
+  return `Retrying: ${b.on === 'start' ? `starting the ${describe(b.role, r)}` : b.on === 'setup' ? 'the setup and the checks' : b.on === 'checks' ? 'the checks' : `the ${b.on === 'spec' ? 'spec-writer' : 'builder'}`}.`
+}
+
 async function stopNow($: EngineInterface): Promise<string> {
-  const r = await patch($, cur => ({ ...cur, phase: 'stopped', note: 'stopped by the person' }))
+  const r = await patch($, cur => (isLive(cur.phase) ? moveTo(cur, 'stopped', 'stopped by the person') : cur))
   return r ? `Stopped. The branch ${r.branch} and its worktree ${r.worktree} stay; remove them with git worktree remove when done.` : 'No factory run.'
+}
+
+// What the person can do when the run waits on them: open the approved PR, approve past an
+// escalation, or retry the step that stopped the run.
+function actions($: EngineInterface, r: Run): { key: string; label: string; press: () => unknown }[] {
+  if (r.phase === 'ready') return [{ key: 'pr', label: 'Open PR', press: () => approveNow($) }]
+  if (r.phase !== 'needs-human') return []
+  if (r.blocked?.on === 'escalate') return [{ key: 'pr', label: 'Approve PR', press: () => approveNow($) }]
+  return [{ key: 'retry', label: 'Retry', press: () => retryNow($) }]
 }
 
 async function tick($: EngineInterface) {
   const r = await read($, run)
-  if (r && isLive(r.phase) && r.phase !== 'needs-human') await update($, frame, f => f + 1)
+  if (r && isLive(r.phase) && !waitsOnPerson(r.phase)) await update($, frame, f => f + 1)
 }
 
 export const register: Register = (on, options) => {
   maxRounds = Math.max(1, Math.min(3, Number(options.maxRounds ?? 2) || 2))
   checksOption = String(options.checks ?? '')
+  setupOption = String(options.setup ?? '')
+  autoPr = String(options.autoPr ?? 'off') === 'on'
 
   on('session.start', async ($, e, next) => {
     for (const t of timers.splice(0)) t.cancel()
-    await $.command.register({ name: 'factory', description: 'Run a feature through the software factory: spec, plan, build, checks, reviews, approval', argumentHint: '<feature> | approve | stop' })
+    await $.command.register({ name: 'factory', description: 'Run a feature through the software factory: spec, plan, build, checks, reviews, approval', argumentHint: '<feature> | approve | retry | stop' })
     for (const role of Object.keys(ROLES) as Role[]) {
       const spec = ROLES[role]
       await $.agent
@@ -297,10 +423,20 @@ export const register: Register = (on, options) => {
   // The roles are the factory's: the model doesn't dispatch them itself.
   on('agent.offer', async ($, e, next) => (e.agent.startsWith('factory:') ? { isOffered: false } : next(e)))
 
+  // A stopped run's agents can't be aborted, so their every tool call is refused: they stop editing
+  // and spending. Only the run's own agents; the main loop and other agents go on.
+  on('tool.call', async ($, e, next) => {
+    if (e.agentId !== undefined) {
+      const r = await read($, run)
+      if (r?.agents[e.agentId] && !isLive(r.phase)) return { deny: STOPPED_DENY }
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('command.run', { command: 'factory' }, async ($, e) => {
     const arg = e.args.trim()
-    if (arg === 'approve') return { text: await approveNow($) }
-    if (arg === FACTORY_PLAN_APPROVED_ARG) return { text: await approveNow($) }
+    if (arg === 'approve' || arg === FACTORY_PLAN_APPROVED_ARG) return { text: await approveNow($) }
+    if (arg === 'retry') return { text: await retryNow($) }
     if (arg === 'stop') return { text: await stopNow($) }
     if (!arg) {
       await $.ui.open({ id: PANE, title: PANE_TITLE })
@@ -310,10 +446,10 @@ export const register: Register = (on, options) => {
     return { text: await start($, arg) }
   })
 
-  // Each agent's answer moves the run on.
+  // Each agent's answer moves the run on, in the queue (see serial).
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId !== undefined && (await read($, run))?.agents[e.agentId]) {
+    if (e.agentId !== undefined) {
       const id = e.agentId
       void serial(() => onAgentDone($, id, e.answer, e.reason === 'answer'))
     }
@@ -327,8 +463,9 @@ export const register: Register = (on, options) => {
     return r
   }).catch(async function* ($, e, next) { return yield* next(e) })
 
-  // goal-run's plan dialog answers for the spec's tasks: approved, or changes for the spec-writer.
-  // Read from the tool call and from PostToolUse, whichever reaches the factory (the mods' order).
+  // goal-run's plan dialog answers for the spec's tasks: approved, changes for the spec-writer, or
+  // kept (the person's own goal stays; the factory asks). Read from the tool call and from
+  // PostToolUse, whichever reaches the factory (the mods' order).
   on('tool.call', { tool: PLAN_TOOL }, async ($, e, next) => {
     const r = await next(e)
     const outcome = parsePlanOutcome(String(r.result ?? ''))
@@ -352,14 +489,13 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey || !r || !isLive(r.phase)) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const below = await next(e)
-    const waitsOnMe = r.phase === 'plan' || r.phase === 'needs-human'
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" gap={1} paddingX={1} alignItems="center">
-          <Text bold color={waitsOnMe ? '#d97706' : ACCENT}>{`🏭 ${r.feature}`}</Text>
+          <Text bold color={waitsOnPerson(r.phase) ? '#d97706' : ACCENT}>{`🏭 ${r.feature}`}</Text>
           <Text dimColor wrap="truncate-end">{`· ${r.note} · ${tok(tokensOf(r))} tokens`}</Text>
-          {r.phase === 'plan' && !hasGoalRun ? <Button key="f-approve-plan" label="Approve plan" variant="primary" onPress={() => approveNow($)} /> : null}
-          {r.phase === 'needs-human' ? <Button key="f-approve" label="Approve" variant="primary" onPress={() => approveNow($)} /> : null}
+          {r.phase === 'plan' && r.gate === 'factory' ? <Button key="f-approve-plan" label="Approve plan" variant="primary" onPress={() => approveNow($)} /> : null}
+          {actions($, r).map(a => <Button key={`f-${a.key}`} label={a.label} variant="primary" onPress={a.press} />)}
           <Button key="f-open" label="Open" onPress={() => $.ui.open({ id: PANE, title: PANE_TITLE })} />
           <Button key="f-stop" label="Stop" onPress={() => stopNow($)} />
         </Box>
@@ -378,7 +514,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column" gap={1}>
           <Text bold color={ACCENT}>🏭 Factory</Text>
-          <Text dimColor>No run yet. /factory &lt;feature&gt; writes a spec, has you approve its plan, builds it on a branch, runs the checks and the reviews, and asks the approver.</Text>
+          <Text dimColor>No run yet. /factory &lt;feature&gt; writes a spec, has you approve its plan, builds it on a branch, runs the checks and the reviews, and asks the approver. You open the PR.</Text>
         </Box>
       )
     }
@@ -412,7 +548,7 @@ export const register: Register = (on, options) => {
         ) : null}
         <Box flexDirection="row" gap={1}>
           {r.phase === 'plan' ? <Button key="p-approve-plan" label="Approve plan" variant="primary" onPress={() => approveNow($)} /> : null}
-          {r.phase === 'needs-human' ? <Button key="p-approve" label="Approve" variant="primary" onPress={() => approveNow($)} /> : null}
+          {actions($, r).map(a => <Button key={`p-${a.key}`} label={a.label} variant="primary" onPress={a.press} />)}
           {isLive(r.phase) ? <Button key="p-stop" label="Stop" onPress={() => stopNow($)} /> : null}
         </Box>
       </Box>

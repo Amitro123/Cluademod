@@ -122,6 +122,8 @@ async function reread($: EngineInterface) {
   const before = await read($, brain)
   const after = await scan($)
   await update($, brain, () => after)
+  // Routed down below the count Later or Route now saw: the reminder counts from there.
+  if (after) await update($, routeLater, n => Math.min(n, unrouted(after)))
   const ev = after ? diffBrain(before, after) : null
   if (ev) await show($, ev)
 }

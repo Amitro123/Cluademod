@@ -1,8 +1,11 @@
 {
   "name": "factory",
-  "version": "0.1.1",
-  "description": "A software factory: /factory <feature> writes a spec, has you approve its plan (in goal-run when it's installed), builds it on a branch, runs the checks and parallel reviews, and asks an approver before Claude opens the PR. Its pane draws where the run is",
-  "author": { "name": "Amit Rosen", "url": "https://github.com/Amitro123" },
+  "version": "0.2.0",
+  "description": "A software factory: /factory <feature> writes a spec, has you approve its plan (in goal-run when it's installed), builds it on a branch, runs the checks and parallel reviews, and has an approver agent decide; you then press Open PR and Claude opens it. Its pane draws where the run is",
+  "author": {
+    "name": "Amit Rosen",
+    "url": "https://github.com/Amitro123"
+  },
   "repository": "https://github.com/Amitro123/claudemod",
   "license": "MIT",
   "types": "./types/index.d.ts",
@@ -18,7 +21,27 @@
       "title": "Review rounds",
       "description": "How many times reviewers may send the builder back before the approver decides",
       "default": "2",
-      "options": ["1", "2", "3"]
+      "options": [
+        "1",
+        "2",
+        "3"
+      ]
+    },
+    "setup": {
+      "type": "string",
+      "title": "Setup command",
+      "description": "Commands that install the dependencies in a run's fresh worktree before its first checks, separated by ; (no shell), e.g. npm ci. Empty uses the lockfile (npm ci, pnpm or yarn install) when node_modules is missing",
+      "default": ""
+    },
+    "autoPr": {
+      "type": "string",
+      "title": "Open the PR without asking",
+      "description": "on: the PR is opened as soon as the approver agent approves. off: the run waits for you to press Open PR",
+      "default": "off",
+      "options": [
+        "off",
+        "on"
+      ]
     }
   }
 }

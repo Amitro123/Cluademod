@@ -203,7 +203,7 @@ Tests: `claude plugin test plugins/rtl-toggle`.
 - `/session-goal <text>` sets a goal at any time, `/session-goal` shows it, and `/session-goal clear` drops it. Claude Code has its own `/goal`, so the mod's command has a different name.
 - The goal is saved per project on the machine running Claude Code, like followups' list, so it carries over between local sessions in the same folder. If two sessions in the folder each set a goal, the one set later is the one saved. The other session is told once, with a toast, that its progress isn't saved.
 - `askOnStart` (`on` / `off`) turns the start-of-session question off.
-- **A plan from factory.** When the factory's spec is put to you as the goal's plan, the dialog is titled *Factory plan* and offers **Approve, start building** or **Change it**. Approved, the factory's builder does the tasks and marks them, and the main Claude is told not to: there's no goal reminder on your prompts, no nudge at a stop and no question between tasks. Changes go back to the factory's spec-writer. Approving later in the pane runs `/factory plan-approved`.
+- **A plan from factory.** When the factory's spec is put to you as the goal's plan, the dialog is titled *Factory plan* and offers **Approve, start building** or **Change it**. Approved, the factory's builder does the tasks and marks them, and the main Claude is told not to: there's no goal reminder on your prompts, no nudge at a stop and no question between tasks. Changes go back to the factory's spec-writer. Approving later in the pane runs `/factory plan-approved`. If you already have a goal of your own that isn't done, it stays: the factory's plan isn't set as the goal, and the factory asks for approval in its own band. A factory plan starts fresh, without an earlier goal's done tasks.
 
 Tests: `claude plugin test plugins/goal-run`.
 
@@ -278,34 +278,37 @@ A feature goes in and a reviewed PR comes out. Each step is a sub-agent with its
 /factory <feature>
   spec-writer (opus)    writes docs/specs/<slug>.md and a task list
   plan approval (you)   in goal-run's dialog, or factory's own Approve plan button
-  builder (opus)        implements on branch factory/<slug>, in the worktree .factory/<slug>
-  checks (no model)     tests, lint, typecheck; red goes back to the builder (2 passes)
+  builder (opus)        implements on branch factory/<slug>, in the worktree <repo>.factory/<slug>
+  checks (no model)     installs the dependencies once, then tests, lint, typecheck; red goes back to the builder (2 passes)
   reviewers, at once    security (opus) and code (sonnet): VERDICT PASS or CHANGES, with findings
-                        any CHANGES, with rounds left: the builder again, only those reviewers again
-  approver (opus)       APPROVE: Claude pushes the branch and opens the PR
-                        ESCALATE: the run waits for you (/factory approve or /factory stop)
+                        any CHANGES, with rounds left: the builder again, then every reviewer again
+  approver (opus)       APPROVE: the PR waits for your Open PR, then Claude pushes the branch and opens it
+                        ESCALATE: the run waits for you (Approve PR, or /factory stop)
 ```
 
-1. **The spec.** `/factory Add a rate limiter to the API` creates a git worktree on a new branch from your current commit, so the work never touches your working copy (`.factory/` is added to `.git/info/exclude`). The spec-writer writes the PRD, the technical spec and the acceptance criteria to `docs/specs/<slug>.md`, and ends with 3 to 8 tasks, each with a priority and the tasks it needs.
-2. **The plan is goal-run's.** With goal-run installed, the spec's tasks become the session goal's plan and its dialog is the factory's human gate. No code is written before you approve. **Change it** sends your words back to the spec-writer. Without goal-run, the band and the pane show **Approve plan**.
-3. **Build and checks.** The builder implements the tasks in the worktree, marks them in goal-run as it goes, and commits. Then the checks run with no model: the `checks` option, or what the project has (`npm test` and its `lint` and `typecheck` scripts, `pytest`, `go test`, `cargo test`). A failure goes back to the builder with its output, twice at most; reviewers only ever see a green build.
-4. **Reviews.** The security and code reviewers read the spec and the diff in parallel. Each ends with `VERDICT: PASS` or `VERDICT: CHANGES` and findings tagged `blocker`, `major` or `minor`. A missing verdict counts as changes, and so does a PASS that lists a blocker. With changes and rounds left (`maxRounds`, 2 by default), a fresh builder gets the findings, and only the reviewers who asked for changes look again.
-5. **The approver** reads the spec, the diff and the verdicts. **APPROVE** sends the main Claude a prompt to push the branch and open a PR, with the spec in it and the minor findings listed under "Not fixed". **ESCALATE**, or an agent that fails, stops the run at *needs-human* with the reason.
+1. **The spec.** `/factory Add a rate limiter to the API` creates a git worktree on a new branch from your current commit, so the work never touches your working copy. The worktree sits next to the repository, in `<repo>.factory/<slug>`, so test runners, linters and indexers in your checkout don't scan a second copy of the code. The spec-writer writes the PRD, the technical spec and the acceptance criteria to `docs/specs/<slug>.md`, and ends with 3 to 8 tasks, each with a priority and the tasks it needs.
+2. **The plan is goal-run's.** With goal-run installed, the spec's tasks become the session goal's plan and its dialog is the factory's human gate. No code is written before you approve. **Change it** sends your words back to the spec-writer. Without goal-run, the band and the pane show **Approve plan**. So they do when you already have a goal of your own in goal-run: the factory's plan doesn't replace it, and goal-run tells the factory to ask in its band.
+3. **Build and checks.** The builder implements the tasks in the worktree, marks them in goal-run as it goes, and commits; anything it leaves uncommitted the factory commits, so what is reviewed is what is pushed. A fresh worktree has no dependencies installed, so before the first checks the factory runs the `setup` option, or the lockfile's install when `node_modules` is missing (`npm ci`, `pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile`). A failed setup stops the run for you rather than sending the builder after it. Then the checks run with no model: the `checks` option, or what the project has (`npm test` and its `lint` and `typecheck` scripts, `pytest`, `go test`, `cargo test`). A failure goes back to the builder with its output, twice at most; reviewers only ever see a green build.
+4. **Reviews.** The security and code reviewers read the spec and the branch's commits (`git diff <base>..HEAD`) in parallel. Each ends with `VERDICT: PASS` or `VERDICT: CHANGES` and findings tagged `blocker`, `major` or `minor`. A missing verdict counts as changes, and so does a PASS that lists a blocker. With changes and rounds left (`maxRounds`, 2 by default), a fresh builder gets the findings, and every reviewer looks again: a fix for the code reviewer is new code for the security reviewer too.
+5. **The approver**, an agent, reads the spec, the diff and the verdicts. On **APPROVE** the run waits for you: **Open PR** (or `/factory approve`) sends the main Claude a prompt to push the branch and open a PR, with the spec in it and the minor findings listed under "Not fixed". With `autoPr` on, that prompt goes as soon as the approver approves. On **ESCALATE** the run waits at *needs-human* with the reason, and **Approve PR** opens the PR anyway.
+6. **When something else stops the run** (no task list, a builder that stopped, checks still red, a failed setup, an agent that couldn't start), it waits at *needs-human* with the reason and offers **Retry**, which runs that step again; there's no approving past it into a PR.
 
-![A run in four diagrams: the plan waiting for approval; both reviewers at once; code asks for changes and the builder goes to round 2; both PASS, the approver says APPROVE and the PR opens](assets/factory-flow.png)
+![A run in four diagrams: the plan waiting for approval; both reviewers at once; code asks for changes and the builder goes to round 2; both PASS, the approver says APPROVE and the PR waits for your Open PR](assets/factory-flow.png)
 
-<sub>The pane's diagram at four points of one run, in the light theme.</sub>
+<sub>The pane's diagram at four points of one run, in the light theme: the plan waiting for you; the reviewers at once; code asks for changes, round 2; approved, the PR waiting for your Open PR.</sub>
 
 ### What you see
 
 - **The Factory pane** (`/factory` opens it) draws the pipeline: each box with its model, its state (waiting, running, PASS, changes, skipped, failed) and its tokens, the reviewers side by side, the loop back to the builder with its round, and the branch. Under it are the current round's findings and the failing checks. In the terminal it's the same pipeline as text lines with ✓ ! ◐ ◌ marks. The palette follows the theme in `/config`.
-- **The band** above the prompt: *🏭 Rate limiter · reviewing, round 1 · 184k tokens*, with **Approve plan** or **Approve** when the run waits for you, **Open** and **Stop**.
+- **The band** above the prompt: *🏭 Rate limiter · reviewing, round 1 · 184k tokens*, with **Approve plan**, **Open PR**, **Approve PR** or **Retry** when the run waits for you, **Open** and **Stop**.
 - **task-hud** shows each of the factory's agents as a creature, named by run and role (*factory · security review*), with no change to task-hud.
 
 ### Commands and options
 
-- `/factory <feature>` starts a run (one at a time), `/factory` opens the pane, `/factory approve` approves the plan or a run at needs-human, and `/factory stop` ends the run. The branch and the worktree stay; remove them with `git worktree remove` when you're done.
+- `/factory <feature>` starts a run (one at a time), `/factory` opens the pane, `/factory approve` approves the plan or the PR (after APPROVE or ESCALATE), `/factory retry` runs again the step that stopped the run, and `/factory stop` ends the run. A stopped run's agents can't be aborted, so the factory refuses their every tool call: they stop editing and spending. The branch and the worktree stay; remove them with `git worktree remove` when you're done.
 - `checks`: commands to run after each build, separated by `;` (run without a shell). Empty detects them from the project.
+- `setup`: commands that install the dependencies in a run's worktree before its first checks, e.g. `npm ci`. Empty uses the lockfile when `node_modules` is missing.
+- `autoPr` (`off` / `on`): `on` opens the PR as soon as the approver agent approves; `off`, the default, waits for your Open PR.
 - `maxRounds` (`1`, `2`, `3`): how many times reviewers may send the builder back before the approver decides on what there is.
 - The roles are agent types, `factory:spec-writer`, `factory:builder`, `factory:security-reviewer`, `factory:code-reviewer` and `factory:approver`, hidden from the model so only the factory runs them. Their instructions are short defaults in the mod.
 

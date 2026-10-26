@@ -583,6 +583,17 @@ describe('in a session', () => {
     await band.press({ key: 'route-now' })
     expect(w.ran).toContain('mistake-brain route')
     expect(await texts(band)).toBe('')
+    // The skill routes them; 3 new ones bring the reminder back, not only more than the 4 it saw.
+    const routed = project()['MISTAKES.md']!
+    w.write('MISTAKES.md', routed)
+    await w.clock.advance(4_100)
+    await w.clock.advance(7_000)
+    expect(await texts(band)).toBe('')
+    const fresh = ['D', 'E'].map((t, k) => entry(`2026-10-25 0${k}:00`, `Fresh ${t}`, 'decision')).join('')
+    w.write('MISTAKES.md', routed.replace('line -->\n\n', `line -->\n\n${fresh}`))
+    await w.clock.advance(4_100)
+    await w.clock.advance(7_000)
+    expect(await texts(band)).toMatch(/🧠 3 entries to route/)
     await band.unmount()
   })
 
