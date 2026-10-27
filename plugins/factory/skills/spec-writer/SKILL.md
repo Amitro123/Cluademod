@@ -15,6 +15,16 @@ TASKS). This skill is how to get there. The prompt's format always wins over any
 - If the request points at a file, an issue or a to-do item, read it whole: it is the source of truth.
 - Check the project's own rules (CLAUDE.md, `.claude/rules/`, CONTRIBUTING) and follow them in the spec.
 
+## Reading, the costliest part of a run
+
+Every file read stays in your context and is paid again at each later step. So:
+
+- Search first (Grep, Glob), then read only what the search points to.
+- Read by range (offset and limit) around what you need. Never read whole a large file: type
+  definitions (`*.d.ts`), generated code, lockfiles, minified or vendored files, fixtures.
+- Don't read a file again unless it changed; keep a note of what you learned instead.
+- Read several independent files in one step, not one per step.
+
 ## 2. The spec file
 
 Write it in this order, short and concrete:
@@ -30,6 +40,11 @@ Write it in this order, short and concrete:
 5. **Open questions**: only real ones the code can't answer. If one blocks the design, say what you
    assumed and why, so the build can go on; don't mark the whole spec blocked for a question you
    can answer with a reasonable default.
+6. **Code map** (last): what you learned while reading, so the builder and the reviewers don't pay
+   to read it again. Each file the change touches or depends on, as `path:start-end` with the
+   functions or types there and a few words on each; the signatures of the types it uses from large
+   files (copy them, short); and the commands that test the change. Paths and ranges you checked,
+   not guessed.
 
 ## 3. Tasks
 

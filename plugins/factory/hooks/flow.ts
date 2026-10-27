@@ -169,6 +169,7 @@ export function specPrompt(run: Run, feedback = ''): string {
     `Feature: ${run.feature}`,
     ...(feedback ? [`The person asked for changes to your earlier spec: ${feedback}`, 'Revise the spec file and the tasks.'] : []),
     `Write the spec to ${run.specFile} (create the folder if needed).`,
+    `End the spec file with a "## Code map" section, for the builder and reviewers to start from instead of searching again: each file the change touches or depends on, with the functions, types and line ranges that matter (path:start-end) and a few words on each; the signatures of the types it uses from large files (type definitions, generated code), so nobody reads those whole; and the commands that test the change.`,
     'Then judge the size of the feature, on a line of its own:',
     'SIZE: small, medium or large',
     'small: a local change in one or two files. medium: a few files in one area, the design clear. large: it spans several modules, or needs design decisions (architecture, data model or migrations, security, concurrency), or the request leaves real questions open. The builder runs on a stronger model for a large one.',
@@ -189,6 +190,7 @@ export function buildPrompt(run: Run, findings: Finding[], failed: Check[], { ag
     : [
         `Implement the spec in ${run.specFile} for: ${run.feature}`,
         `You are on branch ${run.branch}, in its own worktree. Commit your work to this branch when done.`,
+        `Start from the spec's "Code map": read the files it lists by the ranges it gives. Search (Grep) before reading anything it doesn't list, and never read a large file (type definitions, generated code, lockfiles) whole.`,
         // Marked in goal-run only when its plan is the session goal: when goal-run kept the person's own
         // goal, its t1, t2... are the person's tasks, not these.
         run.gate === 'goal-run' ? 'The tasks (in the session goal: mark each with mcp__goal-run__update as in_progress, then done):' : 'The tasks:',
@@ -213,6 +215,7 @@ export function reviewPrompt(run: Run, role: Reviewer, stat: string): string {
     `Review the change for: ${run.feature}`,
     `The spec is ${run.specFile}. The change is the commits on branch ${run.branch} since ${run.base.slice(0, 12)}, in the repository you are started in (git diff ${run.base.slice(0, 12)}..HEAD): exactly what will be pushed.`,
     stat ? `Files changed:\n${stat}` : '',
+    `Start from the diff and the spec's "Code map"; read the changed files around the changed lines, not whole, and search before reading anything else.`,
     `Look only at what a ${role} review covers. Don't change any file.`,
     'End your answer with exactly:',
     'VERDICT: PASS or VERDICT: CHANGES',

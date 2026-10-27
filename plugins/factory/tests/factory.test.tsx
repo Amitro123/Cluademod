@@ -953,3 +953,15 @@ describe("the builder marks goal-run's tasks only when they are the factory's", 
     expect(w.spawned.find(s => s.subagentType === 'factory:builder')!.prompt).toContain('mark each with mcp__goal-run__update')
   })
 })
+
+describe('the code map: what the spec-writer read, passed on', () => {
+  test('the spec ends with a code map; the builder and the reviewers start from it', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    expect(w.spawned[0]!.prompt).toMatch(/End the spec file with a "## Code map" section[^\n]*path:start-end[^\n]*signatures of the types/)
+    expect(w.spawned.find(s => s.subagentType === 'factory:builder')!.prompt).toMatch(/Start from the spec's "Code map"[^\n]*never read a large file[^\n]*whole/)
+    for (const t of ['factory:security-reviewer', 'factory:code-reviewer']) {
+      expect(w.spawned.find(s => s.subagentType === t)!.prompt).toMatch(/Start from the diff and the spec's "Code map"/)
+    }
+  })
+})

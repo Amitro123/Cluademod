@@ -8,6 +8,17 @@ description: "How the factory's security reviewer reviews a change: trace untrus
 Your prompt gives the spec, the diff range and the answer format (VERDICT, FINDINGS). The prompt wins.
 Review the diff, not the whole repository: what this change adds or alters, and what it newly reaches.
 
+## Reading, the costliest part of a run
+
+Every file read stays in your context and is paid again at each later step. So:
+
+- Start from the diff (`git diff <base>..HEAD`) and the spec's Code map.
+- Search first (Grep, Glob), then read only what the search points to.
+- Read by range (offset and limit) around what you need. Never read whole a large file: type
+  definitions (`*.d.ts`), generated code, lockfiles, minified or vendored files, fixtures.
+- Don't read a file again unless it changed; keep a note of what you learned instead.
+- Read several independent files in one step, not one per step.
+
 ## Walk through
 
 1. **Inputs**: list every place the change takes data from outside (requests, files, env, CLI args,
