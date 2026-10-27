@@ -392,6 +392,40 @@ async function setUp($: EngineInterface, r: Run, files: string[]): Promise<boole
   return true
 }
 
+// The files that decide what an auto-detected command does: its scripts, its install, its test hooks.
+const CHECK_CONFIGS = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'pyproject.toml', 'setup.cfg', 'pytest.ini', 'go.mod', 'Cargo.toml', ':(glob)**/conftest.py']
+const RUN_THEM = 'Run them'
+
+// Commands the factory found itself run outside the session's permission prompts, in a worktree the
+// builder just wrote: the person lets them run first, and again whenever the files that define them
+// change. Commands set in the checks and setup options are the person's own and aren't asked about.
+async function approveAuto($: EngineInterface, r: Run, cmds: string[][]): Promise<boolean> {
+  const last = await git($, ['log', '-1', '--format=%H', 'HEAD', '--', ...CHECK_CONFIGS], r.worktree)
+  const key = `${cmds.map(c => c.join(' ')).join('; ')} @ ${last.stdout.trim()}`
+  if (r.autoApproved === key) return true
+  const changed = await git($, ['diff', '--name-only', r.base, 'HEAD', '--', ...CHECK_CONFIGS], r.worktree)
+  const touched = changed.exitCode === 0 ? changed.stdout.trim().split('\n').filter(Boolean) : []
+  const question = [
+    `Before the factory runs the checks it found in the project, in ${r.worktree}:`,
+    ...cmds.map(c => `$ ${c.join(' ')}`),
+    ...(touched.length ? ['', `The builder changed what these run: ${touched.join(', ')}. Look at that diff before you let them run.`] : []),
+    '',
+    'They run outside your permission prompts. Run them? (The checks and setup options set them for good.)',
+  ].join('\n')
+  let answer = ''
+  try {
+    answer = await $.ui.ask(question, { header: 'Factory checks', options: [RUN_THEM, NOT_NOW] })
+  } catch {
+    answer = ''
+  }
+  if (answer === RUN_THEM) {
+    await patch($, cur => ({ ...cur, autoApproved: key }))
+    return true
+  }
+  await block($, { on: 'checks' }, 'The checks wait for your OK to run the commands the factory found: Retry asks again, or set the checks and setup options.', cur => ({ ...cur, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: 'wait' } } }))
+  return false
+}
+
 async function stillIn($: EngineInterface, phase: Run['phase']) {
   return (await read($, run))?.phase === phase
 }
@@ -404,6 +438,11 @@ async function runChecks($: EngineInterface) {
   }))
   if (!r) return
   const files = await namesIn($, r.worktree)
+  const auto = [
+    ...(!r.setupDone && !setupOption.trim() ? [detectSetup(files)].filter((c): c is string[] => c !== null) : []),
+    ...(!checksOption.trim() ? await checkCommands($, r.worktree, files) : []),
+  ]
+  if (auto.length && !(await approveAuto($, r, auto))) return
   if (!(await setUp($, r, files))) return
   const cmds = await checkCommands($, r.worktree, files)
   await patch($, cur => ({ ...cur, note: 'running the checks' }))

@@ -29,9 +29,11 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, checksOk = 'Run them' as string | null } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
+  // The last commit of the files that define the checks: a test moves it to change them.
+  let configCommit = 'c0'
   const sent: string[] = []
   const toasts: string[] = []
   const written: Record<string, string> = {}
@@ -82,6 +84,8 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     if (cmd === 'git status --porcelain') return ok(dirty ? ' M src/mw.ts\n?? src/limit/new.ts\n?? node_modules/\n?? .env\n?? certs/server.key\n' : '')
     // -z -uall: each untracked file on its own, NUL-separated, unquoted (a new folder's .env too).
     if (cmd === 'git status --porcelain -z -uall') return ok(dirty ? [' M src/mw.ts', '?? src/limit/new.ts', '?? src/limit/שלום.ts', '?? app/.env', '?? app/index.js', '?? node_modules/x/a.js', '?? .env', '?? certs/server.key', 'R  src/b.ts', 'src/a.ts', ''].join('\0') : '')
+    if (cmd.startsWith('git log -1 --format=%H HEAD --')) return ok(`${configCommit}\n`)
+    if (cmd.startsWith('git diff --name-only abc123 HEAD --')) return ok(configCommit === 'c0' ? '' : 'package.json\n')
     if (cmd === 'git diff --cached --quiet') return { value: { exitCode: dirty ? 1 : 0, stdout: '', stderr: '' } } as never
     if (cmd === 'git rev-parse --git-path info/exclude') return ok('.git/info/exclude\n')
     if (cmd.startsWith('git commit') && commitFails) return { value: { exitCode: 1, stdout: '', stderr: 'Please tell me who you are.' } } as never
@@ -125,7 +129,8 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
   on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
     const q = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
     asked.push(q)
-    const a = answers.shift()
+    // The checks question has its own answer, so the other dialogs' answers stay in order.
+    const a = q.startsWith('Before the factory runs the checks') ? (checksOk ?? undefined) : answers.shift()
     if (a === undefined) throw new Error('dismissed')
     return { result: { questions: (e as unknown as { questions: unknown }).questions, answers: { [q]: a } } } as never
   })
@@ -133,7 +138,7 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
-  return { spawned, ran, sent, toasts, written, release, asked, clock, sends, registered }
+  return { spawned, ran, sent, toasts, written, release, asked, clock, sends, registered, setConfig: (c: string) => void (configCommit = c) }
 }
 
 const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<unknown[]> }) =>
@@ -1033,5 +1038,45 @@ describe("git's view of the builder's new files", () => {
 
   test('what was left out reads by folder', () => {
     expect(leftOut(['node_modules/a/b.js', 'node_modules/c.js', 'app/.env', 'web/dist/x.js', 'key.pem'])).toEqual(['node_modules/', 'app/.env', 'web/dist/', 'key.pem'])
+  })
+})
+
+describe('commands the factory found run only once you let them', () => {
+  test('asked before the first checks, with the exact commands; not now: the run waits, Retry asks again', async ($, on) => {
+    const w = engine(on, { files: ['package.json'], checksOk: null })
+    await toReviews($)
+    expect(w.asked.at(-1)).toMatch(/^Before the factory runs the checks it found in the project, in \/repo\/\.factory\/rate-limiter:\n\$ npm install\n\$ npm test\n/)
+    expect(w.ran).not.toContain('npm install')
+    expect(w.ran).not.toContain('npm test')
+    expect(await bandText($)).toMatch(/The checks wait for your OK/)
+    expect(w.spawned.map(s => s.subagentType)).not.toContain('factory:code-reviewer')
+  })
+
+  test('let run once, not asked again until the builder changes what they run', async ($, on) => {
+    const w = engine(on, { delivers: true })
+    await toReviews($)
+    expect(w.asked.filter(q => q.startsWith('Before the factory runs')).length).toBe(1)
+    expect(w.ran).toContain('npm test')
+    // Round 2 with nothing changed in what the checks run: not asked.
+    await answer($, 'a3', CHANGES)
+    await answer($, 'a4', PASS)
+    await answer($, 'a2', 'Fixed.')
+    expect(w.asked.filter(q => q.startsWith('Before the factory runs')).length).toBe(1)
+    // The person sends it back, and this time the builder changes package.json: asked again.
+    await answer($, 'a5', PASS)
+    await answer($, 'a6', PASS)
+    await answer($, 'a7', 'DECISION: APPROVE\nREASON: ok')
+    w.setConfig('c1')
+    await command($, 'rework use seconds')
+    await answer($, 'a2', 'Fixed again.')
+    expect(w.asked.filter(q => q.startsWith('Before the factory runs')).length).toBe(2)
+    expect(w.asked.at(-1)).toMatch(/The builder changed what these run: package\.json\. Look at that diff/)
+  })
+
+  test('with the checks and setup options set, nothing is asked', { options: { checks: 'npm test', setup: 'npm ci' } } as never, async ($: Engine, on: On) => {
+    const w = engine(on)
+    await toReviews($)
+    expect(w.asked.filter(q => q.startsWith('Before the factory runs'))).toEqual([])
+    expect(w.ran).toContain('npm test')
   })
 })
