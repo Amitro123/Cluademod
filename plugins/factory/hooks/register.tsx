@@ -36,6 +36,8 @@ import {
   parseSize,
   parseSkills,
   skillsLine,
+  builtinSkill,
+  lastLines,
 } from './flow'
 import { FACTORY_PLAN_APPROVED_ARG, FACTORY_START_TOOL, factoryArgs, parseFactoryArgs, parseGoalPrompt, parsePlanOutcome, parseStartPrompt, toolText } from './texts'
 
@@ -68,6 +70,8 @@ let autoPr = false
 let takeOver = true
 let modelsOption: 'auto' | 'fixed' = 'auto'
 let skillsOption: Partial<Record<Role, string[]>> = {}
+// A role's skills: the option's for it, else the factory's own.
+const skillsOf = (role: Role) => skillsOption[role] ?? [builtinSkill(role)]
 // Transitions run one at a time: two reviewers finishing together must not both start the approver.
 // Every spawn and every agent's completion goes through this queue, so a completion is handled only
 // after the job that spawned its agent has recorded the agent's id.
@@ -114,8 +118,8 @@ async function spawnRole($: EngineInterface, role: Role, prompt: string, { onSes
   const r = await read($, run)
   if (!r || !isLive(r.phase)) return false
   const spec = ROLES[role]
-  const skills = skillsOption[role]
-  if (skills?.length) prompt = `${skillsLine(skills)}\n\n${prompt}`
+  const skills = skillsOf(role)
+  if (skills.length) prompt = `${skillsLine(skills)}\n\n${prompt}`
   const base = { prompt, description: `factory · ${describe(role, r)}`, ...(onSessionModel ? {} : { model: modelOf(r, role) }), cwd: r.worktree }
   let res = await $.agent.spawn({ ...base, subagentType: `factory:${spec.name}` }).catch(err => ({ deny: String(err) }) as { deny: string })
   if ('deny' in res && res.deny) {
@@ -234,6 +238,34 @@ async function onSpec($: EngineInterface, answer: string, why: string) {
   else if (r) void askPlan($)
 }
 
+// The PR, put to the person in the conversation once the approver approved or escalated: what was
+// built and why, with Open (or Approve anyway), Not now, or what to change under Other (a rework).
+const OPEN_PR = 'Open the PR'
+const APPROVE_ANYWAY = 'Approve the PR anyway'
+async function askPr($: EngineInterface) {
+  const r = await read($, run)
+  const escalated = r?.phase === 'needs-human' && r.blocked?.on === 'escalate'
+  if (!r || (r.phase !== 'ready' && !escalated)) return
+  const yes = escalated ? APPROVE_ANYWAY : OPEN_PR
+  const lines = [
+    `The factory's change for "${r.feature.split('\n')[0]!.slice(0, 120)}" ${escalated ? 'was escalated by the approver' : 'was approved'}: ${r.note}`,
+    ...(r.stat || r.summary ? [`Changed: ${[r.stat, r.summary].filter(Boolean).join(' · ')}`] : []),
+    `Branch ${r.branch}${r.recorded ? `; what each step said is in ${r.record}/` : ''}.`,
+    '',
+    `${escalated ? 'Approve it anyway' : 'Open the PR'}? To send it back to the builder, say what to change under Other.`,
+  ]
+  let answer = ''
+  try {
+    answer = await $.ui.ask(lines.join('\n'), { header: 'Factory PR', options: [yes, NOT_NOW] })
+  } catch {
+    return
+  }
+  const now = await read($, run)
+  if (!now || now.phase !== r.phase) return
+  if (answer === yes) return void (await approveNow($))
+  if (answer && answer !== NOT_NOW) return void (await reworkNow($, answer))
+}
+
 // Without goal-run's dialog, the plan is put to the person in the engine's own: in the main
 // conversation, not only in the band. "Other" carries what to change.
 const APPROVE_PLAN = 'Approve and build'
@@ -310,6 +342,11 @@ async function onBuilt($: EngineInterface) {
     }
     if (skipped.length) await patch($, cur => ({ ...cur, skipped }))
   }
+  const stat = await git($, ['diff', '--stat', r.base, 'HEAD'], r.worktree)
+  if (stat.exitCode === 0 && stat.stdout.trim()) {
+    await patch($, cur => ({ ...cur, stat: lastLines(stat.stdout, 1) }))
+    await record($, `changes after builder round ${r.round + 1}`, stat.stdout)
+  }
   await runChecks($)
 }
 
@@ -365,6 +402,7 @@ async function runChecks($: EngineInterface) {
     results.push({ cmd: argv.join(' '), ok: out.exitCode === 0, tail: out.exitCode === 0 ? '' : tailOf(`${out.stdout}\n${out.stderr}`) })
   }
   const failed = results.filter(c => !c.ok)
+  if (results.length) await record($, 'checks', results.map(c => `${c.ok ? '✓' : '✗'} ${c.cmd}${c.tail ? `\n${c.tail}` : ''}`).join('\n'))
   const after = await patch($, cur => ({ ...cur, checks: results, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: !cmds.length ? 'skip' : failed.length ? 'fail' : 'pass' } } }))
   if (!after || after.phase !== 'checks') return
   if (!failed.length) return startReviews($)
@@ -421,12 +459,14 @@ async function onApprover($: EngineInterface, answer: string, why: string) {
   if (decision === 'ESCALATE') {
     await block($, { on: 'escalate' }, reason, r => ({ ...r, steps: { ...r.steps, approver: { ...r.steps.approver, state: 'changes' } } }))
     $.ui.toast('The factory needs you: Approve PR, /factory rework <what to change>, or /factory stop')
+    void askPr($)
     return
   }
   // The approver is an agent: the PR, outward-facing, waits for the person unless autoPr is on.
   if (autoPr) return finish($, reason)
   await patch($, r => ({ ...moveTo(r, 'ready', `approved${reason ? `: ${reason}` : ''}. Open the PR when you're ready`), steps: { ...r.steps, approver: { ...r.steps.approver, state: 'pass' } } }))
   $.ui.toast('The approver approved the change: Open PR in the factory band, /factory approve, or /factory rework <what to change>')
+  void askPr($)
 }
 
 // Approved by the person (or by the approver, with autoPr on): the main Claude opens the PR.
@@ -436,6 +476,15 @@ async function finish($: EngineInterface, reason: string) {
   void $.prompt.submit({ text: prPrompt(r, reason) }).catch(() => {
     $.ui.toast(`Approved. Open a PR from ${r.branch} yourself; the prompt could not be sent.`)
   })
+}
+
+// The run's record: each step's own words in a numbered file, beside the worktree and out of git,
+// so what the factory did can be read after the fact. A run from before the record keeps none.
+async function record($: EngineInterface, label: string, body: string) {
+  const r = await patch($, cur => (cur.record ? { ...cur, recorded: (cur.recorded ?? 0) + 1 } : cur))
+  if (!r?.record || !body.trim()) return
+  const name = `${String(r.recorded ?? 1).padStart(2, '0')}-${slugOf(label)}.md`
+  await $.fs.write(`${r.record}/${name}`, `# ${label}\n\n${body.trim()}\n`).catch(() => {})
 }
 
 async function onAgentDone($: EngineInterface, agentId: string, answer: string, why: string, isApiError: boolean) {
@@ -449,9 +498,11 @@ async function onAgentDone($: EngineInterface, agentId: string, answer: string, 
     await patch($, cur => ({ ...cur, note: `the ${describe(role, cur)} failed on ${modelOf(cur, role)} (${why}); trying the session's model` }))
     if (await spawnRole($, role, spawn.prompt, { onSessionModel: true })) return
   }
+  await record($, describe(role, r), why ? `Stopped: ${why}.${answer.trim() ? `\n\n${answer}` : ''}` : answer)
   if (role === 'spec') return r.phase === 'spec' ? onSpec($, answer, why) : undefined
   if (role === 'builder') {
     if (r.phase !== 'build') return
+    if (!why && answer.trim()) await patch($, cur => ({ ...cur, summary: lastLines(answer, 2) }))
     if (why) return block($, { on: 'builder' }, `The builder stopped: ${why}.`, cur => ({ ...cur, builderId: undefined, steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'fail' } } }))
     return onBuilt($)
   }
@@ -559,7 +610,7 @@ export const register: Register = (on, options) => {
     for (const role of Object.keys(ROLES) as Role[]) {
       const spec = ROLES[role]
       await $.agent
-        .register({ name: spec.name, description: `The factory's ${spec.label}: started by /factory runs only.`, prompt: ROLE_PROMPTS[role], model: spec.model, ...(spec.tools ? { tools: skillsOption[role]?.length ? [...spec.tools, 'Skill'] : spec.tools } : {}) })
+        .register({ name: spec.name, description: `The factory's ${spec.label}: started by /factory runs only.`, prompt: ROLE_PROMPTS[role], model: spec.model, ...(spec.tools ? { tools: skillsOf(role).length ? [...spec.tools, 'Skill'] : spec.tools } : {}) })
         .catch(() => {})
     }
     // Last, and allowed to fail: the rest of the start must not depend on it.
@@ -722,6 +773,8 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           <Text bold color={ACCENT}>{`🏭 ${r.feature}`}</Text>
           <Text dimColor wrap="truncate-end">{`${r.note} · ${tok(tokensOf(r))} tokens · spec ${r.specFile}`}</Text>
+          {r.stat || r.summary ? <Text wrap="wrap">{`Changed: ${[r.stat, r.summary].filter(Boolean).join(' · ')}`}</Text> : null}
+          {r.recorded ? <Text dimColor wrap="truncate-end">{`What each step said: ${r.record}/`}</Text> : null}
         </Box>
         {Svg ? (
           <Svg source={diagramSvg(r, f, await read($, theme))} alt={pipelineLines(r).join('; ')} width={DIAGRAM.width} height={DIAGRAM.height} />

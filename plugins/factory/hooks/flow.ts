@@ -55,9 +55,12 @@ export function modelsFor(size: Size | null, mode: 'auto' | 'fixed'): Record<Rol
   return out
 }
 
-// The skills option: which skills each role loads before its job, as "role=skill,skill; role=skill"
-// (spec, builder, security, code, approver). A skill can be a plugin's, plugin:name. Unknown roles
-// and empty names are left out.
+// The factory's own skill for a role, shipped in the plugin (skills/<name>/SKILL.md): its method.
+export const builtinSkill = (role: Role) => `factory:${ROLES[role].name}`
+
+// The skills option: which skills a role loads before its job, in place of the factory's own, as
+// "role=skill,skill; role=skill" (spec, builder, security, code, approver); "role=none" loads none.
+// A skill can be a plugin's, plugin:name. Unknown roles and empty names are left out.
 export function parseSkills(text: string): Partial<Record<Role, string[]>> {
   const out: Partial<Record<Role, string[]>> = {}
   for (const part of text.split(';')) {
@@ -66,7 +69,9 @@ export function parseSkills(text: string): Partial<Record<Role, string[]>> {
     const role = part.slice(0, at).trim().toLowerCase() as Role
     if (!(role in ROLES)) continue
     const names = part.slice(at + 1).split(',').map(x => x.trim()).filter(Boolean)
-    if (names.length) out[role] = [...(out[role] ?? []), ...names]
+    // none: the role loads no skill, not even the factory's own.
+    if (names.length === 1 && names[0]!.toLowerCase() === 'none') out[role] = []
+    else if (names.length) out[role] = [...(out[role] ?? []), ...names]
   }
   return out
 }
@@ -251,6 +256,13 @@ export function prPrompt(run: Run, reason: string): string {
 // The worktrees sit inside the repository, in .factory/ (kept out of git): within the session's
 // working directory, so the agents' edits get the same permissions and sandbox as the person's.
 export const worktreeOf = (root: string, slug: string) => `${root.replace(/[\\/]+$/, '')}/.factory/${slug}`
+// Beside the worktree, never in it: a slug has no dot, so no run's worktree is named so.
+export const recordOf = (root: string, slug: string) => `${root.replace(/[\\/]+$/, '')}/.factory/${slug}.record`
+
+// An agent's closing lines: the builder ends with a two-line summary of what it changed.
+export function lastLines(text: string, n: number): string {
+  return text.split('\n').map(l => l.trim()).filter(Boolean).slice(-n).join(' ').slice(0, 300)
+}
 
 // What the builder may leave untracked that never goes into a commit: installed dependencies,
 // build output, and credentials.
@@ -273,6 +285,7 @@ export function newRun(feature: string, at: number, base: string, root: string, 
     base,
     branch: `factory/${slug}`,
     worktree: worktreeOf(root, slug),
+    record: recordOf(root, slug),
     specFile: `docs/specs/${slug}.md`,
     tasks: [],
     steps: { spec: { state: 'run', tokens: 0 }, builder: step(), checks: step(), approver: step() },

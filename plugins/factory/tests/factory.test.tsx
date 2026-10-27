@@ -842,7 +842,7 @@ describe('later rounds, the person sending it back, and role skills', () => {
     await answer($, 'a4', PASS)
     expect(w.sends).toHaveLength(1)
     expect(last(w)).toMatchObject({ id: 'a5', subagentType: 'factory:builder' })
-    expect(last(w).prompt).toMatch(/^Implement the spec/)
+    expect(last(w).prompt).toMatch(/Skill\(factory:builder\)[^\n]*\n\nImplement the spec/)
   })
 
   test('/factory rework sends the change back with your words, once the run waits for you', async ($, on) => {
@@ -858,18 +858,56 @@ describe('later rounds, the person sending it back, and role skills', () => {
     expect(await bandText($)).toMatch(/reworking it as you asked/)
   })
 
-  test('skills: each role loads its own first, and gets the Skill tool', { options: { skills: 'spec=spec-pack; code=org:code-review, unit-test; nobody=x' } } as never, async ($: Engine, on: On) => {
+  test('skills: each role loads its own first, and gets the Skill tool', { options: { skills: 'spec=spec-pack; code=org:code-review, unit-test; security=none; nobody=x' } } as never, async ($: Engine, on: On) => {
     const w = engine(on)
     await toReviews($)
     expect(w.spawned[0]!.prompt).toMatch(/^Before anything else, load this skill with the Skill tool and follow it for this job: Skill\(spec-pack\)\./)
     expect(w.spawned.find(s => s.subagentType === 'factory:code-reviewer')!.prompt).toMatch(/^Before anything else, load these skills[^\n]*Skill\(org:code-review\), Skill\(unit-test\)/)
-    expect(w.spawned.find(s => s.subagentType === 'factory:builder')!.prompt).toMatch(/^Implement the spec/)
+    // Not named in the option: the factory's own skill. Named none: no skill at all.
+    expect(w.spawned.find(s => s.subagentType === 'factory:builder')!.prompt).toMatch(/^Before anything else, load this skill[^\n]*Skill\(factory:builder\)/)
+    expect(w.spawned.find(s => s.subagentType === 'factory:security-reviewer')!.prompt).toMatch(/^Review the change/)
     expect(w.registered.find(r => r.name === 'spec-writer')!.tools).toContain('Skill')
+    expect(w.registered.find(r => r.name === 'approver')!.tools).toContain('Skill')
     expect(w.registered.find(r => r.name === 'security-reviewer')!.tools).not.toContain('Skill')
   })
 
   test('the skills option, read', () => {
     expect(parseSkills('spec=spec-pack; builder = unit-test , architecture;code=;x=y; approver=org:approve')).toEqual({ spec: ['spec-pack'], builder: ['unit-test', 'architecture'], approver: ['org:approve'] })
     expect(parseSkills('')).toEqual({})
+    expect(parseSkills('security=none')).toEqual({ security: [] })
+  })
+})
+
+describe('what the factory did, and the PR asked in the conversation', () => {
+  test("every step's words go to the run's record beside the worktree; the pane says what changed", async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    const files = Object.keys(w.written).filter(p => p.startsWith('/repo/.factory/rate-limiter.record/')).map(p => p.split('/').pop())
+    expect(files).toEqual(['01-spec-writer.md', '02-builder-round-1.md', '03-changes-after-builder-round-1.md', '04-checks.md'])
+    expect(w.written['/repo/.factory/rate-limiter.record/02-builder-round-1.md']).toBe('# builder, round 1\n\nbuilt\n')
+    expect(w.written['/repo/.factory/rate-limiter.record/04-checks.md']).toMatch(/^# checks\n\n✓ npm test/)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/Changed: 1 file changed · built \| What each step said: \/repo\/\.factory\/rate-limiter\.record\//)
+    await pane.unmount()
+  })
+
+  test('approved: the PR is asked in a dialog with what changed; Open the PR opens it', async ($, on) => {
+    const w = engine(on, { answers: ['Open the PR'] })
+    await toReviews($)
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    await answer($, 'a5', 'DECISION: APPROVE\nREASON: spec met')
+    expect(w.asked.at(-1)).toMatch(/^The factory's change for "Rate limiter" was approved[\s\S]*Changed: 1 file changed · built[\s\S]*Branch factory\/rate-limiter; what each step said is in \/repo\/\.factory\/rate-limiter\.record\//)
+    expect(w.sent.at(-1)).toMatch(/factory\/rate-limiter/)
+  })
+
+  test("escalated: the dialog's Other text sends it back to the builder", async ($, on) => {
+    const w = engine(on, { delivers: true, answers: ['Keep the memory store, add a TODO for Redis'] })
+    await toReviews($)
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    await answer($, 'a5', 'DECISION: ESCALATE\nREASON: the spec asks for Redis, the build uses memory')
+    expect(w.asked.at(-1)).toMatch(/was escalated by the approver[\s\S]*Approve it anyway\?/)
+    expect(w.sends.at(-1)!.text).toContain('The person sent the change back: Keep the memory store, add a TODO for Redis')
   })
 })

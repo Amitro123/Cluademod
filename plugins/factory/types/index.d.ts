@@ -44,6 +44,12 @@ export type Run = {
   // The builder that built this run: each later round goes back to it (it keeps what it read and
   // why), until it fails and a fresh one is started.
   builderId?: string
+  // Where the run keeps what each step said (its record), and how many entries it has written.
+  record?: string
+  recorded?: number
+  // What the builder says it changed (its closing summary), and git's count of the change.
+  summary?: string
+  stat?: string
   steps: Record<'spec' | 'builder' | 'checks' | 'approver', { state: StepState; tokens: number }>
   checks: Check[]
   reviews: Review[]
