@@ -397,7 +397,11 @@ async function setUp($: EngineInterface, r: Run, files: string[]): Promise<boole
 }
 
 // The files that decide what an auto-detected command does: its scripts, its install, its test hooks.
-const CHECK_CONFIGS = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'pyproject.toml', 'setup.cfg', 'pytest.ini', 'go.mod', 'Cargo.toml', ':(glob)**/conftest.py']
+const CHECK_CONFIGS = [
+  'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '.npmrc', '.pnpmfile.cjs',
+  'pyproject.toml', 'setup.cfg', 'setup.py', 'pytest.ini', 'tox.ini', 'noxfile.py', 'Makefile', 'go.mod', 'Cargo.toml',
+  ':(glob)**/conftest.py', ':(glob)**/jest.config.*', ':(glob)**/vitest.config.*', ':(glob)**/babel.config.*',
+]
 const RUN_THEM = 'Run them'
 
 // Commands the factory found itself run outside the session's permission prompts, in a worktree the
@@ -414,9 +418,11 @@ async function approveAuto($: EngineInterface, r: Run, cmds: string[][]): Promis
     ...cmds.map(c => `$ ${c.join(' ')}`),
     ...(touched.length ? ['', `The builder changed what these run: ${touched.join(', ')}. Look at that diff before you let them run.`] : []),
     '',
-    'They run outside your permission prompts. Run them? (The checks and setup options set them for good.)',
+    "They run the code the builder wrote, its tests and config included, outside your permission prompts, and in every later round of this run with whatever the builder changes, until the files that define them change. Run them? (The checks and setup options set them for good.)",
   ].join('\n')
   let answer = ''
+  // Asked inside the run's serial queue, so nothing else of the run moves until it's answered: during
+  // the checks no agent of the run is working, so nothing waits on it.
   try {
     answer = await $.ui.ask(question, { header: 'Factory checks', options: [RUN_THEM, NOT_NOW] })
   } catch {

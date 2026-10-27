@@ -1095,6 +1095,19 @@ describe('commands the factory found run only once you let them', () => {
     expect(w.asked.at(-1)).toMatch(/The builder changed what these run: package\.json\. Look at that diff/)
   })
 
+  test('the question says it runs the code the builder wrote; .npmrc or a jest config changed asks again', async ($, on) => {
+    const w = engine(on, { delivers: true })
+    await toReviews($)
+    expect(w.asked.find(q => q.startsWith('Before the factory runs'))).toMatch(/They run the code the builder wrote, its tests and config included, outside your permission prompts/)
+    const asked = () => w.asked.filter(q => q.startsWith('Before the factory runs')).length
+    expect(w.ran.find(c => c.startsWith('git log -1 --format=%H HEAD --'))).toMatch(/ \.npmrc .*:\(glob\)\*\*\/jest\.config\.\*/)
+    await answer($, 'a3', CHANGES)
+    await answer($, 'a4', PASS)
+    w.setConfig('npmrc-changed')
+    await answer($, 'a2', 'Fixed.')
+    expect(asked()).toBe(2)
+  })
+
   test('with the checks and setup options set, nothing is asked', { options: { checks: 'npm test', setup: 'npm ci' } } as never, async ($: Engine, on: On) => {
     const w = engine(on)
     await toReviews($)
