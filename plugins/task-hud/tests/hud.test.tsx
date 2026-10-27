@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { activityOf, modelName } from '../hooks/register'
+import { activityOf, keepAgents, modelName } from '../hooks/register'
 
 const BAND = {
   plugin: 'task-hud',
@@ -424,5 +424,14 @@ describe('reload', () => {
     engine(on)
     await $.turn.start({ turnId: 'u1', text: 'Plan the launch video' } as never)
     expect(prompts).toContain('Plan the launch video')
+  })
+})
+
+describe('the agents kept in the list', () => {
+  test('over the limit the oldest finished go first; a running one stays however old', () => {
+    const a = (id: string, state: 'running' | 'done') => ({ id, state }) as never
+    const list = [a('r1', 'running'), a('d1', 'done'), a('d2', 'done'), a('r2', 'running'), a('d3', 'done')]
+    expect(keepAgents(list, 3).map(x => (x as { id: string }).id)).toEqual(['r1', 'r2', 'd3'])
+    expect(keepAgents(list, 10)).toBe(list)
   })
 })

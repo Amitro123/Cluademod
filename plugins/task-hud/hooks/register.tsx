@@ -113,6 +113,13 @@ async function ensureTicking($: EngineInterface) {
   }))
 }
 
+// Over the limit, the oldest finished agents go first: a running one stays listed however old.
+export function keepAgents(list: Agent[], keep = KEEP_AGENTS): Agent[] {
+  let over = list.length - keep
+  if (over <= 0) return list
+  return list.filter(a => (over > 0 && a.state !== 'running' ? (over--, false) : true))
+}
+
 // `next` is the new list, or a change to the current one (applied atomically, so two calls at once both land).
 async function setTodos($: EngineInterface, next: Todo[] | ((list: Todo[]) => Todo[])) {
   const before = await read($, todos)
@@ -215,7 +222,7 @@ export const register: Register = on => {
       tokens: 0,
       activity: [],
     }
-    await update($, agents, l => [...l, agent].slice(-KEEP_AGENTS))
+    await update($, agents, l => keepAgents([...l, agent]))
     await update($, tick, () => t)
     await ensureTicking($)
     void $.ui.open({ id: PANE, title: PANE_TITLE })
