@@ -31,6 +31,7 @@ import {
   tok,
   tokensOf,
   untrackedOf,
+  leftOut,
   waitsOnPerson,
   modelOf,
   modelsFor,
@@ -339,10 +340,10 @@ async function startBuild($: EngineInterface, findings: Finding[], failed: Check
 async function onBuilt($: EngineInterface) {
   const r = await read($, run)
   if (!r) return
-  const status = await git($, ['status', '--porcelain'], r.worktree)
+  const status = await git($, ['status', '--porcelain', '-z', '-uall'], r.worktree)
   if (status.exitCode === 0 && status.stdout.trim()) {
     const untracked = untrackedOf(status.stdout)
-    const skipped = untracked.filter(neverCommit)
+    const skipped = leftOut(untracked.filter(neverCommit))
     const fresh = untracked.filter(p => !neverCommit(p))
     let out = await git($, ['add', '-u'], r.worktree)
     if (out.exitCode === 0 && fresh.length) out = await git($, ['add', '--', ...fresh], r.worktree)

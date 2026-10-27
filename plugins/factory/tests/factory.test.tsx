@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cleanFeature, detectChecks, detectSetup, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
+import { cleanFeature, detectChecks, detectSetup, leftOut, neverCommit, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
 import { factoryArgs, goalPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -80,6 +80,8 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     }
     if (cmd.startsWith('git diff --stat')) return ok(' src/mw.ts | 40 +++\n 1 file changed')
     if (cmd === 'git status --porcelain') return ok(dirty ? ' M src/mw.ts\n?? src/limit/new.ts\n?? node_modules/\n?? .env\n?? certs/server.key\n' : '')
+    // -z -uall: each untracked file on its own, NUL-separated, unquoted (a new folder's .env too).
+    if (cmd === 'git status --porcelain -z -uall') return ok(dirty ? [' M src/mw.ts', '?? src/limit/new.ts', '?? src/limit/שלום.ts', '?? app/.env', '?? app/index.js', '?? node_modules/x/a.js', '?? .env', '?? certs/server.key', 'R  src/b.ts', 'src/a.ts', ''].join('\0') : '')
     if (cmd === 'git diff --cached --quiet') return { value: { exitCode: dirty ? 1 : 0, stdout: '', stderr: '' } } as never
     if (cmd === 'git rev-parse --git-path info/exclude') return ok('.git/info/exclude\n')
     if (cmd.startsWith('git commit') && commitFails) return { value: { exitCode: 1, stdout: '', stderr: 'Please tell me who you are.' } } as never
@@ -289,15 +291,16 @@ describe('a run from the feature to the PR', () => {
     await toReviews($)
     const at = (c: string) => w.ran.indexOf(c)
     expect(at('git add -u')).toBeGreaterThan(-1)
-    expect(w.ran).toContain('git add -- src/limit/new.ts')
+    // Each new file on its own, a Hebrew name as it is: the .env inside the new app/ folder stays out.
+    expect(w.ran).toContain('git add -- src/limit/new.ts src/limit/שלום.ts app/index.js')
     expect(w.ran.some(c => /add .*(node_modules|\.env|server\.key)/.test(c))).toBe(false)
     expect(w.ran).not.toContain('git add -A')
-    expect(at('git commit -m factory: Rate limiter')).toBeGreaterThan(at('git add -- src/limit/new.ts'))
+    expect(at('git commit -m factory: Rate limiter')).toBeGreaterThan(at('git add -- src/limit/new.ts src/limit/שלום.ts app/index.js'))
     expect(at('npm test')).toBeGreaterThan(at('git commit -m factory: Rate limiter'))
     expect(last(w).subagentType).toBe('factory:code-reviewer')
     // The person and the PR prompt hear what was left out.
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
-    expect(await texts(pane)).toMatch(/Left out of the commits: node_modules\/, \.env, certs\/server\.key/)
+    expect(await texts(pane)).toMatch(/Left out of the commits: app\/\.env, node_modules\/, \.env, certs\/server\.key/)
     await pane.unmount()
     await answer($, 'a3', PASS)
     await answer($, 'a4', PASS)
@@ -1013,5 +1016,22 @@ describe('a builder that stopped carries on, instead of starting over', () => {
       "A builder before you started this job and stopped; its work is in this worktree. Start from it, check it against the spec, and do what is left; don't redo it.",
       'Its commits (newest first):', '- abc123 add bucket', 'Uncommitted changes:', '- M src/a.ts', '- ?? src/b.ts',
     ].join('\n'))
+  })
+})
+
+describe("git's view of the builder's new files", () => {
+  test('-z -uall: each file on its own, unquoted, a rename\'s old path skipped', () => {
+    expect(untrackedOf(['?? app/.env', '?? app/index.js', 'R  new.ts', 'old.ts', '?? שלום.ts', ' M x.ts', ''].join('\0'))).toEqual(['app/.env', 'app/index.js', 'שלום.ts'])
+    expect(untrackedOf('')).toEqual([])
+  })
+
+  test('in a new folder, the .env is left out and the rest kept', () => {
+    const files = untrackedOf('?? app/.env\0?? app/index.js\0')
+    expect(files.filter(f => !neverCommit(f))).toEqual(['app/index.js'])
+    expect(files.filter(neverCommit)).toEqual(['app/.env'])
+  })
+
+  test('what was left out reads by folder', () => {
+    expect(leftOut(['node_modules/a/b.js', 'node_modules/c.js', 'app/.env', 'web/dist/x.js', 'key.pem'])).toEqual(['node_modules/', 'app/.env', 'web/dist/', 'key.pem'])
   })
 })
