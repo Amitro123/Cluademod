@@ -108,7 +108,7 @@ async function ensureTicking($: EngineInterface) {
     const t = await $.clock.now()
     await update($, tick, () => t)
     const list = await update($, agents, l =>
-      l.some(a => isStale(a, t)) ? l.map(a => (isStale(a, t) ? { ...a, state: 'failed', endedAt: a.updatedAt ?? a.startedAt, isSilent: true } : a)) : l)
+      l.some(a => isStale(a, t)) ? l.map(a => (isStale(a, t) ? { ...a, state: 'failed' as const, endedAt: a.updatedAt ?? a.startedAt, isSilent: true } : a)) : l)
     if (!list.some(a => a.state === 'running')) stopTicking()
   }))
 }
