@@ -417,9 +417,9 @@ describe('work started from the followups to-do list', () => {
   })
 
   test("reads the items of followups' Start prompt, one or several", () => {
-    expect(parseStartPrompt(START)).toEqual([{ id: 'fu-1', title: 'Rotate the dev key', isBug: true }])
+    expect(parseStartPrompt(START)).toEqual([{ id: 'fu-1', title: 'Rotate the dev key', isBug: true, detail: 'A real-looking key is committed', where: '.env.example:3' }])
     const many = ['Start these 2 items from my to-do list, one after the other:', '- id a: First', '- id b: Second — why it matters', 'Do the work.'].join('\n')
-    expect(parseStartPrompt(many)).toEqual([{ id: 'a', title: 'First' }, { id: 'b', title: 'Second' }])
+    expect(parseStartPrompt(many)).toEqual([{ id: 'a', title: 'First' }, { id: 'b', title: 'Second', detail: 'why it matters' }])
     expect(parseStartPrompt('just a prompt')).toEqual([])
   })
 

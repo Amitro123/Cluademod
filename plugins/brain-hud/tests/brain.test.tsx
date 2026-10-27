@@ -95,9 +95,17 @@ describe('reading the memory', () => {
 
   test("followups' Start prompt: ids, titles and bugs", () => {
     expect(parseStartPrompt('Work on:\n- id k1-a: Fix the upload (bug) — fails 1 in 5 [where: up.ts:4]\n- id k2-b: Update the docs')).toEqual([
-      { id: 'k1-a', title: 'Fix the upload', isBug: true },
+      { id: 'k1-a', title: 'Fix the upload', isBug: true, detail: 'fails 1 in 5', where: 'up.ts:4' },
       { id: 'k2-b', title: 'Update the docs' },
     ])
+  })
+
+  test('a start line reads back whole, whatever its title holds', () => {
+    for (const title of ['Fix A — B — C', 'Handle " (bug)" in names', 'Read [where: x] lines', 'Quote "this" \\ and that']) {
+      const item = { id: 'k1', title, kind: 'bug', detail: 'why — it matters', where: 'src/a.ts:3' }
+      expect(parseStartPrompt(startLine(item))).toEqual([{ id: 'k1', title, isBug: true, detail: 'why — it matters', where: 'src/a.ts:3' }])
+      expect(parseStartPrompt(startLine({ id: 'k2', title }))).toEqual([{ id: 'k2', title }])
+    }
   })
 })
 

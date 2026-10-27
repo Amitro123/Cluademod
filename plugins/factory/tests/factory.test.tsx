@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { cleanFeature, detectChecks, detectSetup, leftOut, neverCommit, slugOf, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
-import { factoryArgs, goalPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
+import { factoryArgs, goalPrompt, startLine, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 
@@ -613,6 +613,16 @@ describe('goals and to-do items run through the factory by themselves', () => {
     await settled()
     const second = goalPrompt('Second')
     expect(String((await $.prompt.submit({ text: second, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(second)
+    expect(w.spawned).toHaveLength(1)
+  })
+
+  test('a quoted title with " — " in it keeps it whole in the feature', async ($, on) => {
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const line = startLine({ id: 'q1', title: 'Fix A — B', kind: 'bug', detail: 'detail here', where: 'src/a.ts' })
+    const r = await $.prompt.submit({ text: START([line]), origin: { kind: 'plugin', name: 'followups' } } as never)
+    await settled()
+    expect(String(r.text)).toMatch(/took this over: "Fix A — B — detail here \(src\/a\.ts\)"/)
     expect(w.spawned).toHaveLength(1)
   })
 

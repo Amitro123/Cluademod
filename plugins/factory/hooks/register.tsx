@@ -178,8 +178,7 @@ export function takeOverArgs(text: string, origin?: { kind: string; name?: strin
   const items = parseStartPrompt(text)
   if (items.length !== 1) return null
   const it = items[0]!
-  const line = new RegExp(`^- id ${it.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: (.*)$`, 'm').exec(text)?.[1] ?? it.title
-  return factoryArgs(line.replace(/ \(bug\)/, '').replace(/ \[where: ([^\]]*)\]$/, ' ($1)'), it.id)
+  return factoryArgs(`${it.title}${it.detail ? ` — ${it.detail}` : ''}${it.where ? ` (${it.where})` : ''}`, it.id)
 }
 
 async function start($: EngineInterface, args: string): Promise<string> {

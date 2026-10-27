@@ -528,7 +528,7 @@ describe('statuses, bugs, start and done', () => {
     ])
     expect(out).toContain('- [ ] A _(bug)_ _(in progress)_')
     expect(out).toContain('- [x] B')
-    expect(startPrompt([{ ...base, id: 'z9', title: 'T', where: 'a.ts:1', status: 'open' }])).toMatch(/id z9: T \[where: a\.ts:1\]/)
+    expect(startPrompt([{ ...base, id: 'z9', title: 'T', where: 'a.ts:1', status: 'open' }])).toMatch(/id z9: "T" \[where: a\.ts:1\]/)
   })
 })
 
