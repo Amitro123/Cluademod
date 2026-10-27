@@ -378,6 +378,8 @@ let hasFactory = false
 // An item run through the factory: /factory with what the item says, its id carried along so the
 // run's PR prompt has Claude mark it done. In progress meanwhile; back to open if it can't start.
 async function toFactory($: EngineInterface, i: Item) {
+  // Started here, by the factory: no "Start again" beside it while the factory builds it.
+  await update($, startedHere, l => (l.includes(i.id) ? l : [...l, i.id]))
   await setStatus($, new Set([i.id]), 'in_progress')
   const feature = [i.title, i.detail, i.where && `(${i.where})`].filter(Boolean).join(' — ')
   void $.command.run({ command: 'factory', args: factoryArgs(feature, i.id) }).catch(async () => {

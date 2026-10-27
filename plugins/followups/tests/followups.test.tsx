@@ -965,6 +965,8 @@ describe('one list per repository, and items through the factory', () => {
     expect(ran).toEqual([`Add a rate limiter [followup:${id}]`])
     expect(items()[0]!.status).toBe('in_progress')
     expect(await pane.find({ key: `f-${id}` } as never)).toBeFalsy()
+    // The factory builds it: no Start again beside it, which would start it in the main loop too.
+    expect(await pane.find({ key: `s-${id}` } as never)).toBeFalsy()
     await pane.unmount()
 
     fail = true
