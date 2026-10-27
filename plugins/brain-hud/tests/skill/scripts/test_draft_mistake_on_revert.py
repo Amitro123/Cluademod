@@ -127,3 +127,19 @@ def test_checkout_and_clean_still_count():
     assert hook.matches_revert("git checkout -- app.py")
     assert hook.matches_revert("git clean -fd")
     assert not hook.matches_revert("echo 'git restore a.py'")
+
+
+def test_a_drafted_command_has_its_secrets_redacted_and_no_backtick():
+    from draft_mistake_on_revert import safe_for_markdown
+
+    cmd = (
+        "git checkout -- a.ts && curl -H 'Authorization: Bearer abcdefghijklmnop' "
+        "https://user:hunter2@example.com/x?token=s3cr3t ghp_abcdefghijklmnopqrstuvwxyz0123 "
+        "sk-ant-abcdefghijklmnopqrst AKIAABCDEFGHIJKLMNOP echo `date`"
+    )
+    out = safe_for_markdown(cmd)
+    for secret in ("abcdefghijklmnop", "hunter2", "s3cr3t", "ghp_", "sk-ant-", "AKIAABCDEFGHIJKLMNOP"):
+        assert secret not in out, secret
+    assert "`" not in out
+    assert out.startswith("git checkout -- a.ts")
+    assert len(out) <= 200

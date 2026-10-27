@@ -88,6 +88,27 @@ def matches_revert(command: str) -> bool:
     )
 
 
+# Values that look like secrets, replaced before a command is written into MISTAKES.md, a tracked
+# file: a token in a URL or flag, a bearer header, GitHub, OpenAI/Anthropic-style and AWS keys.
+_SECRETS = [
+    (re.compile(r"(?i)\b(token|password|passwd|secret|api[_-]?key|access[_-]?key)(=|:\s*)\S+"), r"\1\2[redacted]"),
+    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 [redacted]"),
+    (re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"), "[redacted]"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "[redacted]"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[redacted]"),
+    (re.compile(r"(https?://)[^/\s:@]+:[^/\s@]+@"), r"\1[redacted]@"),
+]
+
+
+def safe_for_markdown(command: str) -> str:
+    """The command as it goes into a code span in MISTAKES.md: one line, secrets redacted, at most
+    200 characters, and no backtick to end the span early."""
+    text = command.strip().replace("\n", " ")
+    for pattern, repl in _SECRETS:
+        text = pattern.sub(repl, text)
+    return text.replace("`", "'")[:200]
+
+
 def strip_quoted_spans(command: str) -> str:
     """Remove content inside single- or double-quoted spans before matching.
 
@@ -129,7 +150,7 @@ def main() -> int:
         return 0
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    safe_command = command.strip().replace("\n", " ")[:200]
+    safe_command = safe_for_markdown(command)
 
     entry_block = (
         f"## [{now}] [auto-draft] Revert-like command detected: `{safe_command}`\n"
