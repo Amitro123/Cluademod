@@ -174,18 +174,24 @@ async function append($: EngineInterface, entry: JournalEntry) {
 async function writeJournal($: EngineInterface, entries: readonly JournalEntry[]) {
   const id = await $.session.id()
   await $.fs.write(await rootPath($, journalFile(id)), journalDoc(id, entries)).catch(() => {})
-  if (entries.length === 1) await keepOutOfGit($)
+  if (!excluded) excluded = await keepOutOfGit($)
 }
 
-async function keepOutOfGit($: EngineInterface) {
+// Whether .claude/brain/ is in git's exclude file: tried with each write until it is.
+let excluded = false
+
+// True once nothing is left to do: listed, or not a git repository. A git that didn't run, or a
+// write that failed, is tried again with the next entry.
+async function keepOutOfGit($: EngineInterface): Promise<boolean> {
   const root = await $.session.root()
   const found = await $.process.run(['git', 'rev-parse', '--git-path', 'info/exclude'], { cwd: root, timeoutMs: 10_000 }).catch(() => null)
-  if (!found || found.exitCode !== 0 || !found.stdout.trim()) return
+  if (!found) return false
+  if (found.exitCode !== 0 || !found.stdout.trim()) return true
   const rel = found.stdout.trim()
   const path = /^([a-zA-Z]:)?[\\/]/.test(rel) ? rel : `${root.replace(/[\\/]$/, '')}/${rel}`
   const text = await $.fs.read(path).then(t => String(t), () => '')
-  if (text.split('\n').some(l => l.trim() === `${JOURNAL_DIR}/`)) return
-  await $.fs.write(path, `${text}${text && !text.endsWith('\n') ? '\n' : ''}${JOURNAL_DIR}/\n`).catch(() => {})
+  if (text.split('\n').some(l => l.trim() === `${JOURNAL_DIR}/`)) return true
+  return $.fs.write(path, `${text}${text && !text.endsWith('\n') ? '\n' : ''}${JOURNAL_DIR}/\n`).then(() => true, () => false)
 }
 
 // A subagent's answer: the routed-worker's report, or any other agent's last word.
@@ -349,6 +355,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     for (const timer of timers.splice(0)) timer.cancel()
     journaled.clear()
+    excluded = false
     spawns.clear()
     anim?.cancel()
     anim = null

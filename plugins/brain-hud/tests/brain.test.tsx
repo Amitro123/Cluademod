@@ -265,7 +265,7 @@ const buttons = async (ui: { findAll: (q: never) => Promise<unknown[]> }) =>
 
 // The engine beneath: a project in memory (files by path under /repo, each write bumps its time),
 // a clock, and the side calls the mod makes.
-function engine(on: On, files: Record<string, string>, { commands = ['followup'] as string[], failSubmit = false, closesGoal = '' } = {}) {
+function engine(on: On, files: Record<string, string>, { commands = ['followup'] as string[], failSubmit = false, closesGoal = '', gitFails = 0 } = {}) {
   const w = { sent: [] as string[], contexts: [] as string[][], ran: [] as string[], opened: [] as string[], times: {} as Record<string, number>, pulses: 0, offers: 0, git: [] as string[], stats: 0 }
   on('state.set', (_, e, next) => {
     const { key, value } = e as { key?: string; value?: unknown }
@@ -317,8 +317,10 @@ function engine(on: On, files: Record<string, string>, { commands = ['followup']
     write(rel(e.path), e.text)
     return { value: undefined } as never
   })
+  let failing = gitFails
   on('process.run', (_, e) => {
     w.git.push(e.argv.join(' '))
+    if (failing-- > 0) throw new Error('git did not run')
     return { value: { exitCode: 0, stdout: '.git/info/exclude\n', stderr: '' } } as never
   })
   on('tool.register', (_, e) => ({ value: { tool: `mcp__brain-hud__${e.name}` } }) as never)
@@ -871,5 +873,23 @@ describe('the poll in a project with no memory', () => {
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
     expect(await texts(pane)).toMatch(/🧠 34 lessons/)
     await pane.unmount()
+  })
+})
+
+describe("the journal's git exclude", () => {
+  test('a git that did not run is tried again with the next entry, then not again', async ($, on) => {
+    const files = project()
+    const w = engine(on, files, { gitFails: 1 })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const report = async (d: string) => {
+      const id = String((await $.agent.spawn({ prompt: 'p', description: d, subagentType: 'Explore' } as never) as { agentId?: string }).agentId)
+      await $.turn.complete({ answer: 'Findings:\n- ok', agentId: id, reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as never)
+    }
+    await report('one')
+    expect(files['.git/info/exclude']).toBeUndefined()
+    await report('two')
+    expect(files['.git/info/exclude']).toBe('.claude/brain/\n')
+    await report('three')
+    expect(w.git).toHaveLength(2)
   })
 })
