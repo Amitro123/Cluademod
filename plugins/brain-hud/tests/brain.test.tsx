@@ -869,7 +869,7 @@ describe('the poll in a project with no memory', () => {
     w.write('MISTAKES.md', files['MISTAKES.md']!)
     await $.turn.complete({ answer: 'set it up', reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as never)
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
-    expect(await texts(pane)).not.toMatch(/Set up memory/)
+    expect(await texts(pane)).toMatch(/🧠 34 lessons/)
     await pane.unmount()
   })
 })
