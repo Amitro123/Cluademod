@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cleanFeature, detectChecks, detectSetup, modelsFor, parseDecision, parseSize, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
+import { cleanFeature, detectChecks, detectSetup, modelsFor, parseDecision, parseSize, parseSkills, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
 import { factoryArgs, goalPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -29,7 +29,7 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[] } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '' } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
   const sent: string[] = []
@@ -44,7 +44,17 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('command.register', (_, e) => ({ value: { command: e.name } }) as never)
   on('tool.register', (_, e) => ({ value: { tool: `mcp__factory__${e.name}` } }) as never)
-  on('agent.register', (_, e) => ({ value: { agent: `factory:${e.name}` } }) as never)
+  const registered: { name: string; tools?: string[] }[] = []
+  on('agent.register', (_, e) => {
+    registered.push({ name: e.name, ...(e.tools ? { tools: [...e.tools] } : {}) })
+    return { value: { agent: `factory:${e.name}` } } as never
+  })
+  // A message to an agent of the session: delivered (it resumes), or not, when `delivers` is off.
+  const sends: { to: unknown; text: string }[] = []
+  on('session.send', (_, e) => {
+    sends.push({ to: e.to, text: e.text })
+    return (delivers ? { isDelivered: true } : { isDelivered: false, reason: 'no such agent' }) as never
+  })
   on('command.list', () => ({ value: goalRun ? [{ name: 'session-goal', description: 'g', source: 'plugin' }] : [] }) as never)
   // The mod's own spawn arrives in the Agent tool's words (subagent_type).
   on('agent.spawn', (_, e) => {
@@ -121,7 +131,7 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
-  return { spawned, ran, sent, toasts, written, release, asked, clock }
+  return { spawned, ran, sent, toasts, written, release, asked, clock, sends, registered }
 }
 
 const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<unknown[]> }) =>
@@ -806,5 +816,60 @@ describe('a reviewer or the approver that fails is retried, never approved past'
     await command($, 'retry')
     expect(sec()).toBe(before + 1)
     expect(w.spawned.filter(s => s.subagentType === 'factory:code-reviewer')).toHaveLength(1)
+  })
+})
+
+describe('later rounds, the person sending it back, and role skills', () => {
+  test('round 2 goes back to the builder that built it, with only what to fix', async ($, on) => {
+    const w = engine(on, { delivers: true })
+    await toReviews($)
+    await answer($, 'a3', CHANGES)
+    await answer($, 'a4', PASS)
+    expect(w.spawned.filter(s => s.subagentType === 'factory:builder')).toHaveLength(1)
+    expect(w.sends).toHaveLength(1)
+    expect(w.sends[0]!.to).toBe('a2')
+    expect(w.sends[0]!.text).toMatch(/^Another round on the change you built for: Rate limiter[\s\S]*\[major\] src\/mw\.ts:12 Retry-After is in ms/)
+    expect(w.sends[0]!.text).not.toContain('Implement the spec')
+    // Its answer is the same agent's: the run goes on to the checks and a second review round.
+    await answer($, 'a2', 'Fixed, committed.')
+    expect(w.spawned.slice(-2).map(s => s.subagentType)).toEqual(['factory:security-reviewer', 'factory:code-reviewer'])
+  })
+
+  test('a builder that cannot take the message: a new one gets the whole job', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    await answer($, 'a3', CHANGES)
+    await answer($, 'a4', PASS)
+    expect(w.sends).toHaveLength(1)
+    expect(last(w)).toMatchObject({ id: 'a5', subagentType: 'factory:builder' })
+    expect(last(w).prompt).toMatch(/^Implement the spec/)
+  })
+
+  test('/factory rework sends the change back with your words, once the run waits for you', async ($, on) => {
+    const w = engine(on, { delivers: true })
+    await toReviews($)
+    expect(await command($, 'rework use seconds')).toMatch(/^Not now: the run is/)
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    await answer($, 'a5', 'DECISION: APPROVE\nREASON: ok')
+    expect(await command($, 'rework')).toBe('Say what to change: /factory rework <what to change>')
+    expect(await command($, 'rework Retry-After must be in seconds')).toBe('Sent back to the builder: Retry-After must be in seconds')
+    expect(w.sends.at(-1)!.text).toContain('The person sent the change back: Retry-After must be in seconds')
+    expect(await bandText($)).toMatch(/reworking it as you asked/)
+  })
+
+  test('skills: each role loads its own first, and gets the Skill tool', { options: { skills: 'spec=spec-pack; code=org:code-review, unit-test; nobody=x' } } as never, async ($: Engine, on: On) => {
+    const w = engine(on)
+    await toReviews($)
+    expect(w.spawned[0]!.prompt).toMatch(/^Before anything else, load this skill with the Skill tool and follow it for this job: Skill\(spec-pack\)\./)
+    expect(w.spawned.find(s => s.subagentType === 'factory:code-reviewer')!.prompt).toMatch(/^Before anything else, load these skills[^\n]*Skill\(org:code-review\), Skill\(unit-test\)/)
+    expect(w.spawned.find(s => s.subagentType === 'factory:builder')!.prompt).toMatch(/^Implement the spec/)
+    expect(w.registered.find(r => r.name === 'spec-writer')!.tools).toContain('Skill')
+    expect(w.registered.find(r => r.name === 'security-reviewer')!.tools).not.toContain('Skill')
+  })
+
+  test('the skills option, read', () => {
+    expect(parseSkills('spec=spec-pack; builder = unit-test , architecture;code=;x=y; approver=org:approve')).toEqual({ spec: ['spec-pack'], builder: ['unit-test', 'architecture'], approver: ['org:approve'] })
+    expect(parseSkills('')).toEqual({})
   })
 })

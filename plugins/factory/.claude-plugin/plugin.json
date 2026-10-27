@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "A software factory: /factory <feature> writes a spec, has you approve its plan (in goal-run when it's installed), builds it on a branch, runs the checks and parallel reviews, and has an approver agent decide; you then press Open PR and Claude opens it. Its pane draws where the run is",
   "author": {
     "name": "Amit Rosen",
@@ -62,6 +62,12 @@
         "auto",
         "fixed"
       ]
+    },
+    "skills": {
+      "type": "string",
+      "title": "Skills per role",
+      "description": "Skills each role loads before its job, as role=skill,skill; role=skill (roles: spec, builder, security, code, approver), e.g. spec=spec-pack; security=security; code=code-review. Empty: the roles' short default instructions only",
+      "default": ""
     }
   }
 }

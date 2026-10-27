@@ -55,6 +55,26 @@ export function modelsFor(size: Size | null, mode: 'auto' | 'fixed'): Record<Rol
   return out
 }
 
+// The skills option: which skills each role loads before its job, as "role=skill,skill; role=skill"
+// (spec, builder, security, code, approver). A skill can be a plugin's, plugin:name. Unknown roles
+// and empty names are left out.
+export function parseSkills(text: string): Partial<Record<Role, string[]>> {
+  const out: Partial<Record<Role, string[]>> = {}
+  for (const part of text.split(';')) {
+    const at = part.indexOf('=')
+    if (at < 0) continue
+    const role = part.slice(0, at).trim().toLowerCase() as Role
+    if (!(role in ROLES)) continue
+    const names = part.slice(at + 1).split(',').map(x => x.trim()).filter(Boolean)
+    if (names.length) out[role] = [...(out[role] ?? []), ...names]
+  }
+  return out
+}
+
+// What a role is told first when it has skills: load them, and follow them for this job.
+export const skillsLine = (names: readonly string[]) =>
+  `Before anything else, load ${names.length === 1 ? 'this skill' : 'these skills'} with the Skill tool and follow ${names.length === 1 ? 'it' : 'them'} for this job: ${names.map(n => `Skill(${n})`).join(', ')}. If one isn't installed, say so in your answer and go on without it.`
+
 export const modelOf = (run: Pick<Run, 'models'> | null | undefined, role: Role) => run?.models?.[role] ?? ROLES[role].model
 
 // A reviewer ends with:  VERDICT: PASS | CHANGES  and  FINDINGS:  "- [major] path:line what and why".
@@ -147,13 +167,21 @@ export function specPrompt(run: Run, feedback = ''): string {
   ].join('\n')
 }
 
-export function buildPrompt(run: Run, findings: Finding[], failed: Check[]): string {
+// The builder's prompt: the whole job for a new builder; for the builder that built it before
+// (`again`), only what to fix this round. A note is the person's own, sent back with /factory rework.
+export function buildPrompt(run: Run, findings: Finding[], failed: Check[], { again = false, note = '' } = {}): string {
   const tasks = run.tasks.map((t, i) => `- t${i + 1}: ${t.title}`)
+  const head = again
+    ? [`Another round on the change you built for: ${run.feature.split('\n')[0]}`, `Same branch ${run.branch} and worktree. Fix what follows, keep the rest as it is, and commit.`]
+    : [
+        `Implement the spec in ${run.specFile} for: ${run.feature}`,
+        `You are on branch ${run.branch}, in its own worktree. Commit your work to this branch when done.`,
+        'The tasks (in the session goal, if goal-run is installed: mark each with mcp__goal-run__update as in_progress, then done):',
+        ...tasks,
+      ]
   return [
-    `Implement the spec in ${run.specFile} for: ${run.feature}`,
-    `You are on branch ${run.branch}, in its own worktree. Commit your work to this branch when done.`,
-    'The tasks (in the session goal, if goal-run is installed: mark each with mcp__goal-run__update as in_progress, then done):',
-    ...tasks,
+    ...head,
+    ...(note ? ['', `The person sent the change back: ${note}`] : []),
     ...(failed.length
       ? ['', 'The checks failed on your last pass. Fix them:', ...failed.map(c => `$ ${c.cmd}\n${c.tail}`)]
       : []),
