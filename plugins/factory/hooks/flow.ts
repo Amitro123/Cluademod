@@ -161,8 +161,16 @@ export function titleOf(feature: string, n = 60): string {
   return sentence.length > n ? `${sentence.slice(0, n - 1).trimEnd()}…` : sentence
 }
 
-export const slugOf = (feature: string) =>
-  feature.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'feature'
+// A branch and folder name from the feature: its Latin letters and digits. A feature written partly
+// or wholly in another script (Hebrew, say) keeps too little of itself that way, so it gets a short
+// stable hash of the whole text, and two such features don't share a name.
+export function slugOf(feature: string): string {
+  const latin = feature.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40).replace(/-$/, '')
+  if (latin && !/[^\x00-\x7f]/.test(feature)) return latin
+  let h = 0x811c9dc5
+  for (const c of feature.trim()) h = Math.imul(h ^ c.codePointAt(0)!, 0x01000193) >>> 0
+  return `${latin || 'feature'}-${h.toString(36).padStart(7, '0').slice(-7)}`
+}
 
 export function specPrompt(run: Run, feedback = ''): string {
   return [
@@ -304,9 +312,38 @@ export function lastLines(text: string, n: number): string {
 const NEVER_COMMIT = [/(^|\/)(node_modules|\.venv|venv|__pycache__|dist|build)(\/|$)/, /(^|\/)\.env(\.[^/]*)?$/, /\.(pem|key|p12|pfx)$/i]
 export const neverCommit = (path: string) => NEVER_COMMIT.some(re => re.test(path))
 
-// The untracked paths in `git status --porcelain` output (a folder ends in /).
-export const untrackedOf = (porcelain: string) =>
-  porcelain.split('\n').filter(l => l.startsWith('?? ')).map(l => l.slice(3).replace(/^"(.*)"$/, '$1'))
+// The files left out, as a person reads them: a file inside an excluded folder (node_modules/, dist/)
+// as that folder, once, so a whole install doesn't list file by file.
+export function leftOut(paths: readonly string[]): string[] {
+  const out: string[] = []
+  for (const p of paths) {
+    const parts = p.split('/')
+    let shown = p
+    for (let i = 1; i < parts.length; i++) {
+      const dir = `${parts.slice(0, i).join('/')}/`
+      if (neverCommit(dir)) {
+        shown = dir
+        break
+      }
+    }
+    if (!out.includes(shown)) out.push(shown)
+  }
+  return out
+}
+
+// The untracked files in `git status --porcelain -z -uall` output: each file on its own (never a
+// folder, which would stage the .env or node_modules inside it), unquoted, non-ASCII names as they
+// are. A rename or copy entry carries its old path as the next field, skipped here.
+export function untrackedOf(porcelainZ: string): string[] {
+  const fields = porcelainZ.split('\0')
+  const out: string[] = []
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i]!
+    if (f.startsWith('?? ')) out.push(f.slice(3))
+    else if (/^[RC]/.test(f)) i++
+  }
+  return out
+}
 
 export function newRun(feature: string, at: number, base: string, root: string, slug = slugOf(feature)): Run {
   const step = (): { state: StepState; tokens: number } => ({ state: 'wait', tokens: 0 })

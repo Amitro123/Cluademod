@@ -120,6 +120,8 @@ Tests: `claude plugin test plugins/task-hud`.
 
 <sub>A mock-up of version 0.5.0, not a screenshot. The dialog is Claude Code's own question dialog, so it looks like the one in your app rather than exactly like this. The pane follows the mod's drawing: orange open, blue in progress, green done, 🐞 for a bug, and an item offered from a sub-agent's open questions. A dialog closed without an answer leaves the item in a band above the prompt (Add to to-do / Skip / Add all), which isn't shown here.</sub>
 
+> **With factory installed:** pressing ▶ Start on a single to-do item hands it to the factory (spec, worktree, build, reviews, PR), not to the main conversation. Set factory's `takeOver` option to `off` to keep Start as it was.
+
 While Claude works, it often notices things outside the task: a flaky test, a stale doc, a bug in nearby code. Those get lost unless somebody writes them down. This mod writes them down.
 
 ```text
@@ -171,6 +173,8 @@ Tests: `claude plugin test plugins/rtl-toggle`.
 ![goal-run: the question a session opens with, and the Goal pane at 40%, with each task's priority and tokens](assets/goal-run.png)
 
 <sub>Mock-ups, not screenshots: the track and the runner are drawn by the mod's own `art.ts`, and the band, the pane and the dialogs follow its layout. The dialogs are Claude Code's own, so yours will look like your app's.</sub>
+
+> **With factory installed:** a new goal, set here or planned by Claude, goes to the factory (spec, worktree, build, reviews, PR) instead of being worked in the main conversation. Set factory's `takeOver` option to `off` to keep goals here.
 
 ```text
 /plugin install goal-run@claudemod
@@ -293,6 +297,8 @@ Tests: `claude plugin test plugins/brain-hud` (the mod) and `python -m pytest pl
 <sub>The diagram and the terminal lines are the mod's own output (`art.ts`) for a sample run; the windows around them are mock-ups.</sub>
 
 A feature goes in and a reviewed PR comes out. Each step is a sub-agent with its own role and model, and the mod runs the order as code, so no step is skipped: the reviews always happen, every reviewer is waited for, and the round limit holds. It's aimed at backend work, so it runs no UI checks.
+
+> **It takes over goals and to-do items by default.** With the `takeOver` option on (the default), a new goal in goal-run and a single to-do item started in followups run through the factory instead of the main conversation. Set it to `off` if you want the factory only when you ask for it (`/factory`, the start tool, the 🏭 buttons).
 
 ```text
 /plugin install factory@claudemod

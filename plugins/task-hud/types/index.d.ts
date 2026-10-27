@@ -28,6 +28,8 @@ declare module 'claude-code' {
       todos: Todo[]
       title: string
       lastPrompt: string
+      // A new main-loop prompt came since the title was last set: a new list may retitle the band.
+      retitle: boolean
       agents: Agent[]
       tick: number
     }

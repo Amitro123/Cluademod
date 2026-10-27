@@ -79,14 +79,19 @@ export type PlanItem = { title: string; priority: Priority; dependsOn: number[] 
 // dependsOn the 1-based places of other tasks in the same list.
 export function planItems(raw: unknown): PlanItem[] {
   if (!Array.isArray(raw)) return []
-  return raw.slice(0, MAX_TASKS).map(r => {
+  const all = raw.slice(0, MAX_TASKS).map(r => {
     const o = (r && typeof r === 'object' ? r : { title: r }) as { title?: unknown; priority?: unknown; dependsOn?: unknown }
     return {
       title: clip(String(o.title ?? '').trim(), 120),
       priority: isPriority(o.priority) ? o.priority : 'medium',
       dependsOn: Array.isArray(o.dependsOn) ? o.dependsOn.map(Number).filter(n => Number.isInteger(n)) : [],
     }
-  }).filter(it => it.title)
+  })
+  // dependsOn counts places in the list as given: a blank task dropped shifts the places after it,
+  // so they are renumbered, and a dependency on a dropped task goes with it.
+  const place = new Map<number, number>()
+  all.forEach((it, i) => it.title && place.set(i + 1, place.size + 1))
+  return all.filter(it => it.title).map(it => ({ ...it, dependsOn: it.dependsOn.flatMap(n => (place.has(n) ? [place.get(n)!] : [])) }))
 }
 
 // The order the work runs in: the highest priority whose dependencies are done goes next, ties in
@@ -227,7 +232,68 @@ const storeKey = async ($: EngineInterface) => `goal:${await projectOf($)}`
 // Where a goal was saved before the key was the repository: the session's own root.
 const legacyKey = async ($: EngineInterface) => `goal:${await $.session.root()}`
 
+// Two sessions working the same goal (the same setAt): each one's changes since the copy both last
+// agreed on (`base`) are kept. Per field, a change here wins, else theirs is taken; token counts add
+// both sides' growth. A task one side added is kept; one a side dropped since the base stays dropped.
+export function mergeGoal(base: Goal | null, mine: Goal, theirs: Goal): Goal {
+  const b = base && (base.setAt ?? 0) === (mine.setAt ?? 0) ? base : theirs
+  const same = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y)
+  const pick = <T,>(m: T, bb: T, t: T): T => (same(m, bb) ? t : m)
+  const sum = (m = 0, bb = 0, t = 0) => Math.max(m, t, m + t - bb)
+  const byId = (g: Goal) => new Map(g.tasks.map(x => [x.id, x]))
+  const bt = byId(b)
+  const mt = byId(mine)
+  const tt = byId(theirs)
+  const ids = [...mine.tasks.map(x => x.id), ...theirs.tasks.map(x => x.id).filter(id => !mt.has(id))]
+    .filter(id => (mt.has(id) && (tt.has(id) || !bt.has(id))) || (!mt.has(id) && !bt.has(id)))
+  const tasks = ids.map(id => {
+    const m = mt.get(id)
+    const t = tt.get(id)
+    if (!m || !t) return (m ?? t)!
+    const o = bt.get(id) ?? t
+    return {
+      ...t,
+      title: pick(m.title, o.title, t.title),
+      status: pick(m.status, o.status, t.status),
+      priority: pick(m.priority, o.priority, t.priority),
+      needs: pick(m.needs, o.needs, t.needs),
+      tokens: sum(m.tokens, bt.has(id) ? o.tokens : 0, t.tokens),
+    }
+  })
+  const allDone = tasks.length > 0 && tasks.every(x => x.status === 'done')
+  const status = pick(mine.status, b.status, theirs.status)
+  return {
+    ...theirs,
+    text: pick(mine.text, b.text, theirs.text),
+    source: pick(mine.source, b.source, theirs.source),
+    pace: pick(mine.pace, b.pace, theirs.pace),
+    activeId: pick(mine.activeId, b.activeId, theirs.activeId),
+    tasks,
+    status: status === 'active' && allDone ? 'done' : status,
+    other: sum(mine.other, b.other, theirs.other),
+    outside: sum(mine.outside, b.outside, theirs.outside) || undefined,
+  }
+}
+
+const parsed = (json: string): Goal | null => {
+  try {
+    return JSON.parse(json) as Goal | null
+  } catch {
+    return null
+  }
+}
+
+// Token counts from each model step change only the goal in memory: saved once a main-loop turn
+// ends (or the session does), not at every step, sub-agents' included.
+let unsaved = false
+
+async function addTokens($: EngineInterface, fn: (g: Goal | null) => Goal | null) {
+  await update($, goal, fn)
+  unsaved = true
+}
+
 async function save($: EngineInterface) {
+  unsaved = false
   const key = await storeKey($)
   const g = await read($, goal)
   const saved = (await $.store.get(key)) as Goal | null | undefined
@@ -239,9 +305,15 @@ async function save($: EngineInterface) {
     }
     return
   }
-  await $.store.set(key, g)
-  await update($, heldAt, () => g?.setAt ?? 0)
-  await update($, seen, () => JSON.stringify(g ?? null))
+  // The same goal, changed in another session since this one last saw it: both sides' changes kept.
+  let out = g
+  if (g && saved && typeof saved === 'object' && (saved.setAt ?? 0) === (g.setAt ?? 0) && JSON.stringify(saved) !== (await read($, seen))) {
+    out = mergeGoal(parsed(await read($, seen)), g, saved)
+    await update($, goal, () => out)
+  }
+  await $.store.set(key, out)
+  await update($, heldAt, () => out?.setAt ?? 0)
+  await update($, seen, () => JSON.stringify(out ?? null))
   if (await read($, superseded)) await update($, superseded, () => false)
 }
 
@@ -277,6 +349,17 @@ async function sync($: EngineInterface) {
   const stored = saved && typeof saved === 'object' ? (saved as Goal) : null
   const there = JSON.stringify(stored)
   if (there === (await read($, seen))) return
+  // The same goal: what this session changed since it last saved (token counts not saved yet, say)
+  // is kept on top of the other session's, and saved at the turn's end.
+  const mine = await read($, goal)
+  if (mine && stored && (mine.setAt ?? 0) === (stored.setAt ?? 0)) {
+    const merged = mergeGoal(parsed(await read($, seen)), mine, stored)
+    await update($, goal, () => merged)
+    await update($, seen, () => there)
+    if (JSON.stringify(merged) !== there) unsaved = true
+    if (await read($, superseded)) await update($, superseded, () => false)
+    return
+  }
   await update($, goal, () => stored)
   await update($, heldAt, () => stored?.setAt ?? 0)
   await update($, seen, () => there)
@@ -490,8 +573,15 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId === undefined && unsaved) await save($)
+    return r
+  }).catch(($, e, next) => next(e))
+
   on('session.end', async ($, e, next) => {
     for (const timer of timers.splice(0)) timer.cancel()
+    if (unsaved) await save($).catch(() => {})
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -571,7 +661,8 @@ export const register: Register = (on, options) => {
     const status = input.status
     await setGoal($, cur => (cur ? withStatus(cur, id, status) : cur))
     const now = (await read($, goal))!
-    if (now.status === 'done') $.ui.toast(goalReachedToast(now.text))
+    // Once, as the goal is reached: an update to a task of a goal already done says nothing new.
+    if (now.status === 'done' && g.status !== 'done') $.ui.toast(goalReachedToast(now.text))
     const where = `${id} is ${status.replace('_', ' ')}. ${now.tasks.filter(t => t.status === 'done').length}/${now.tasks.length} tasks done (${percentOf(now)}%).`
     const next = now.tasks.find(t => t.status === 'pending')
     if (now.status === 'done') return { result: `${where} ${GOAL_REACHED}` }
@@ -628,14 +719,14 @@ export const register: Register = (on, options) => {
       const used = stepTokens(u)
       const into = g.tasks.find(t => sj.taskIds.includes(t.id) && t.status === 'in_progress')
       if (into) {
-        await setGoal($, cur => (cur ? { ...cur, tasks: cur.tasks.map(t => (t.id === into.id ? { ...t, tokens: t.tokens + used } : t)) } : cur))
+        await addTokens($, cur => (cur ? { ...cur, tasks: cur.tasks.map(t => (t.id === into.id ? { ...t, tokens: t.tokens + used } : t)) } : cur))
       } else {
         await update($, side, cur => (cur ? { ...cur, tokens: cur.tokens + used } : cur))
-        await setGoal($, cur => (cur ? { ...cur, outside: (cur.outside ?? 0) + used } : cur))
+        await addTokens($, cur => (cur ? { ...cur, outside: (cur.outside ?? 0) + used } : cur))
       }
     } else if (u && g && g.status !== 'done') {
       const used = stepTokens(u)
-      await setGoal($, cur => {
+      await addTokens($, cur => {
         if (!cur) return cur
         const active = cur.tasks.find(t => t.id === cur.activeId && t.status === 'in_progress')
         return active

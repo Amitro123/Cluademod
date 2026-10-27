@@ -2,17 +2,28 @@
 // start prompt, reached-goal toast and result. Edit it here, then run `node tools/sync-texts.mjs`:
 // a mod can import nothing outside its own folder, so each one keeps a copy in hooks/texts.ts.
 
-export type StartItem = { id: string; title: string; isBug?: boolean }
+export type StartItem = { id: string; title: string; isBug?: boolean; detail?: string; where?: string }
 
 // followups: one line per item it hands Claude when the person presses Start.
+// The title is JSON-quoted, so one holding " — ", " (bug)" or "[where:" reads back whole.
 export const startLine = (i: { id: string; title: string; kind?: string; detail?: string; where?: string }) =>
-  `- id ${i.id}: ${i.title}${i.kind === 'bug' ? ' (bug)' : ''}${i.detail ? ` — ${i.detail}` : ''}${i.where ? ` [where: ${i.where}]` : ''}`
+  `- id ${i.id}: ${JSON.stringify(i.title)}${i.kind === 'bug' ? ' (bug)' : ''}${i.detail ? ` — ${i.detail}` : ''}${i.where ? ` [where: ${i.where}]` : ''}`
 
 export function parseStartPrompt(text: string): StartItem[] {
   const out: StartItem[] = []
   for (const line of text.split('\n')) {
-    const m = /^- id (\S+): (.+?)( \(bug\))?(?: — .*?)?(?: \[where: .*\])?$/.exec(line.trim())
-    if (m) out.push({ id: m[1]!, title: m[2]!.trim().slice(0, 120), ...(m[3] ? { isBug: true } : {}) })
+    // A quoted title; else the unquoted one a start prompt from before had.
+    const m = /^- id (\S+): ("(?:[^"\\]|\\.)*")( \(bug\))?(?: — (.*?))?(?: \[where: (.*)\])?$/.exec(line.trim()) ?? /^- id (\S+): (.+?)( \(bug\))?(?: — (.*?))?(?: \[where: (.*)\])?$/.exec(line.trim())
+    if (!m) continue
+    let title = m[2]!
+    if (title.startsWith('"')) {
+      try {
+        title = String(JSON.parse(title))
+      } catch {
+        continue
+      }
+    }
+    out.push({ id: m[1]!, title: title.trim().slice(0, 120), ...(m[3] ? { isBug: true } : {}), ...(m[4] ? { detail: m[4] } : {}), ...(m[5] ? { where: m[5] } : {}) })
   }
   return out
 }

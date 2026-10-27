@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { activityOf, modelName } from '../hooks/register'
+import { activityOf, keepAgents, modelName } from '../hooks/register'
 
 const BAND = {
   plugin: 'task-hud',
@@ -87,6 +87,32 @@ describe('band', () => {
       expect(text).toMatch(/Now: Write the script/)
       await ui.unmount()
     }
+  })
+
+  test("a new prompt's new list retitles the band; ticking off the same list keeps its title", async ($, on) => {
+    engine(on)
+    on('ui.render', ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return <Box />
+    })
+    const write = (names: string[], done = 0) => $.tool.call({ tool: 'TodoWrite', todos: names.map((n, i) => ({ content: n, activeForm: n, status: i < done ? 'completed' : 'pending' })) } as never)
+    const band = async () => {
+      const ui = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+      const t = await texts(ui)
+      await ui.unmount()
+      return t
+    }
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+    await $.turn.start({ text: 'Video prep', turnId: 't1' })
+    await write(['A', 'B'])
+    await $.turn.start({ text: 'keep going', turnId: 't2' })
+    await write(['A', 'B'], 1)
+    expect(await band()).toMatch(/Video prep/)
+    await $.turn.start({ text: 'Now the release notes', turnId: 't3' })
+    await write(['Draft', 'Review'])
+    expect(await band()).toMatch(/Now the release notes/)
+    await write(['Draft', 'Review', 'Publish'])
+    expect(await band()).toMatch(/Now the release notes/)
   })
 
   test('stays out of the way with no to-dos', async ($, on) => {
@@ -424,5 +450,21 @@ describe('reload', () => {
     engine(on)
     await $.turn.start({ turnId: 'u1', text: 'Plan the launch video' } as never)
     expect(prompts).toContain('Plan the launch video')
+  })
+})
+
+describe('the agents kept in the list', () => {
+  test('over the limit the oldest finished go first; a running one stays however old', () => {
+    const a = (id: string, state: 'running' | 'done') => ({ id, state }) as never
+    const list = [a('r1', 'running'), a('d1', 'done'), a('d2', 'done'), a('r2', 'running'), a('d3', 'done')]
+    expect(keepAgents(list, 3).map(x => (x as { id: string }).id)).toEqual(['r1', 'r2', 'd3'])
+    expect(keepAgents(list, 10)).toBe(list)
+  })
+})
+
+describe('a Skill call with no skill named', () => {
+  test("reads as a skill, not 'undefined skill'", () => {
+    expect(activityOf('Skill', {}).now).toBe('Reading a skill')
+    expect(activityOf('Skill', { skill: 'pdf' }).now).toBe('Reading the pdf skill')
   })
 })

@@ -205,11 +205,13 @@ def main() -> int:
         return 0
 
     if _draft_entry(project_dir, event_type, description):
+        # Stop's additionalContext reaches the model with the next turn, once this one has ended:
+        # the note says so, rather than asking for something before a turn that is already over.
         _emit(
-            f"[mistake-brain] auto-drafted a MISTAKES.md entry for: `{description}`\n"
+            f"[mistake-brain] At the end of the last turn, a revert was auto-drafted into MISTAKES.md: `{description}`\n"
             "1 unrouted entry now in the inbox. "
-            "Fill in the [auto-draft] placeholders and run /brain-hud:mistake-brain route "
-            "to classify it into PARA memory before completing the turn."
+            "Before going on with this reply, fill in its [auto-draft] placeholders and run "
+            "/brain-hud:mistake-brain route to classify it into PARA memory."
         )
     return 0
 

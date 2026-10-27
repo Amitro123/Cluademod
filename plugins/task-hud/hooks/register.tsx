@@ -12,6 +12,7 @@ const todos = atom({ plugin: 'task-hud', key: 'todos' } as const, [] as Todo[])
 const title = atom({ plugin: 'task-hud', key: 'title' } as const, '')
 // The prompt that started the work, named on the band once a to-do list shows up.
 const lastPrompt = atom({ plugin: 'task-hud', key: 'lastPrompt' } as const, '')
+const retitle = atom({ plugin: 'task-hud', key: 'retitle' } as const, false)
 const agents = atom({ plugin: 'task-hud', key: 'agents' } as const, [] as Agent[])
 const tick = atom({ plugin: 'task-hud', key: 'tick' } as const, 0)
 
@@ -67,7 +68,7 @@ export function activityOf(tool: string, input: Record<string, unknown>): Activi
       try { host = new URL(host).host } catch { /* keep it as given */ }
       return say('Fetching', 'Fetched', host)
     }
-    case 'Skill': return say('Reading the', 'Read the', `${input.skill} skill`)
+    case 'Skill': return input.skill ? say('Reading the', 'Read the', `${input.skill} skill`) : say('Reading', 'Read', 'a skill')
     case 'Agent': return say('Sending out', 'Sent out', String(input.description ?? 'a sub-agent'))
     case 'TodoWrite': {
       const list = (input.todos ?? []) as { status: string; activeForm: string; content: string }[]
@@ -108,16 +109,28 @@ async function ensureTicking($: EngineInterface) {
     const t = await $.clock.now()
     await update($, tick, () => t)
     const list = await update($, agents, l =>
-      l.some(a => isStale(a, t)) ? l.map(a => (isStale(a, t) ? { ...a, state: 'failed', endedAt: a.updatedAt ?? a.startedAt, isSilent: true } : a)) : l)
+      l.some(a => isStale(a, t)) ? l.map(a => (isStale(a, t) ? { ...a, state: 'failed' as const, endedAt: a.updatedAt ?? a.startedAt, isSilent: true } : a)) : l)
     if (!list.some(a => a.state === 'running')) stopTicking()
   }))
 }
 
+// Over the limit, the oldest finished agents go first: a running one stays listed however old.
+export function keepAgents(list: Agent[], keep = KEEP_AGENTS): Agent[] {
+  let over = list.length - keep
+  if (over <= 0) return list
+  return list.filter(a => (over > 0 && a.state !== 'running' ? (over--, false) : true))
+}
+
 // `next` is the new list, or a change to the current one (applied atomically, so two calls at once both land).
+// The band is titled by the prompt the list was made for: a new list (empty before, or other tasks)
+// written in a new turn takes that turn's prompt; status changes and later writes keep the title.
 async function setTodos($: EngineInterface, next: Todo[] | ((list: Todo[]) => Todo[])) {
   const before = await read($, todos)
   const after = await update($, todos, list => (typeof next === 'function' ? next(list) : next))
-  if (before.length || !after.length) return
+  if (!after.length) return
+  const isNew = !before.length || ((await read($, retitle)) && after.map(t => t.subject).join('\n') !== before.map(t => t.subject).join('\n'))
+  if (!isNew) return
+  await update($, retitle, () => false)
   const prompt = await read($, lastPrompt)
   await update($, title, () => clip(firstLine(prompt), 48))
 }
@@ -147,6 +160,7 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId !== undefined || !e.text) return next(e)
     await update($, lastPrompt, () => e.text)
+    await update($, retitle, () => true)
     const list = await read($, todos)
     if (list.length && list.every(t => t.status === 'completed')) await update($, todos, () => [])
     return next(e)
@@ -215,7 +229,7 @@ export const register: Register = on => {
       tokens: 0,
       activity: [],
     }
-    await update($, agents, l => [...l, agent].slice(-KEEP_AGENTS))
+    await update($, agents, l => keepAgents([...l, agent]))
     await update($, tick, () => t)
     await ensureTicking($)
     void $.ui.open({ id: PANE, title: PANE_TITLE })

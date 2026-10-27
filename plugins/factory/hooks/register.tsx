@@ -31,6 +31,7 @@ import {
   tok,
   tokensOf,
   untrackedOf,
+  leftOut,
   waitsOnPerson,
   modelOf,
   modelsFor,
@@ -167,14 +168,17 @@ export function whyEnded(e: { reason: string; answer: string; refusal?: { explan
 
 // What a goal prompt or a one-item Start prompt hands the factory: /factory's arguments, else null.
 // Several items started together stay the main Claude's.
-export function takeOverArgs(text: string): string | null {
-  const goal = parseGoalPrompt(text)
+// Only the mods' own prompts: a message the person types that happens to hold a line like
+// "My goal for this session:" or "- id x:" goes on as typed.
+export function takeOverArgs(text: string, origin?: { kind: string; name?: string }): string | null {
+  if (origin?.kind !== 'plugin') return null
+  const goal = origin.name === 'goal-run' ? parseGoalPrompt(text) : null
   if (goal) return goal
+  if (origin.name !== 'followups') return null
   const items = parseStartPrompt(text)
   if (items.length !== 1) return null
   const it = items[0]!
-  const line = new RegExp(`^- id ${it.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: (.*)$`, 'm').exec(text)?.[1] ?? it.title
-  return factoryArgs(line.replace(/ \(bug\)/, '').replace(/ \[where: ([^\]]*)\]$/, ' ($1)'), it.id)
+  return factoryArgs(`${it.title}${it.detail ? ` — ${it.detail}` : ''}${it.where ? ` (${it.where})` : ''}`, it.id)
 }
 
 async function start($: EngineInterface, args: string): Promise<string> {
@@ -204,6 +208,7 @@ async function start($: EngineInterface, args: string): Promise<string> {
   await keepOutOfGit($, root)
   await readTheme($)
   await update($, run, () => created)
+  await ensureTicking($)
   void $.ui.open({ id: PANE, title: PANE_TITLE })
   await serial(async () => void (await spawnRole($, 'spec', specPrompt(created))))
   return `Factory run started: ${titleOf(created.feature, 120)}. Branch ${created.branch}, worktree ${created.worktree}; the spec-writer is writing ${created.specFile}.`
@@ -339,10 +344,10 @@ async function startBuild($: EngineInterface, findings: Finding[], failed: Check
 async function onBuilt($: EngineInterface) {
   const r = await read($, run)
   if (!r) return
-  const status = await git($, ['status', '--porcelain'], r.worktree)
+  const status = await git($, ['status', '--porcelain', '-z', '-uall'], r.worktree)
   if (status.exitCode === 0 && status.stdout.trim()) {
     const untracked = untrackedOf(status.stdout)
-    const skipped = untracked.filter(neverCommit)
+    const skipped = leftOut(untracked.filter(neverCommit))
     const fresh = untracked.filter(p => !neverCommit(p))
     let out = await git($, ['add', '-u'], r.worktree)
     if (out.exitCode === 0 && fresh.length) out = await git($, ['add', '--', ...fresh], r.worktree)
@@ -391,6 +396,40 @@ async function setUp($: EngineInterface, r: Run, files: string[]): Promise<boole
   return true
 }
 
+// The files that decide what an auto-detected command does: its scripts, its install, its test hooks.
+const CHECK_CONFIGS = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'pyproject.toml', 'setup.cfg', 'pytest.ini', 'go.mod', 'Cargo.toml', ':(glob)**/conftest.py']
+const RUN_THEM = 'Run them'
+
+// Commands the factory found itself run outside the session's permission prompts, in a worktree the
+// builder just wrote: the person lets them run first, and again whenever the files that define them
+// change. Commands set in the checks and setup options are the person's own and aren't asked about.
+async function approveAuto($: EngineInterface, r: Run, cmds: string[][]): Promise<boolean> {
+  const last = await git($, ['log', '-1', '--format=%H', 'HEAD', '--', ...CHECK_CONFIGS], r.worktree)
+  const key = `${cmds.map(c => c.join(' ')).join('; ')} @ ${last.stdout.trim()}`
+  if (r.autoApproved === key) return true
+  const changed = await git($, ['diff', '--name-only', r.base, 'HEAD', '--', ...CHECK_CONFIGS], r.worktree)
+  const touched = changed.exitCode === 0 ? changed.stdout.trim().split('\n').filter(Boolean) : []
+  const question = [
+    `Before the factory runs the checks it found in the project, in ${r.worktree}:`,
+    ...cmds.map(c => `$ ${c.join(' ')}`),
+    ...(touched.length ? ['', `The builder changed what these run: ${touched.join(', ')}. Look at that diff before you let them run.`] : []),
+    '',
+    'They run outside your permission prompts. Run them? (The checks and setup options set them for good.)',
+  ].join('\n')
+  let answer = ''
+  try {
+    answer = await $.ui.ask(question, { header: 'Factory checks', options: [RUN_THEM, NOT_NOW] })
+  } catch {
+    answer = ''
+  }
+  if (answer === RUN_THEM) {
+    await patch($, cur => ({ ...cur, autoApproved: key }))
+    return true
+  }
+  await block($, { on: 'checks' }, 'The checks wait for your OK to run the commands the factory found: Retry asks again, or set the checks and setup options.', cur => ({ ...cur, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: 'wait' } } }))
+  return false
+}
+
 async function stillIn($: EngineInterface, phase: Run['phase']) {
   return (await read($, run))?.phase === phase
 }
@@ -403,6 +442,11 @@ async function runChecks($: EngineInterface) {
   }))
   if (!r) return
   const files = await namesIn($, r.worktree)
+  const auto = [
+    ...(!r.setupDone && !setupOption.trim() ? [detectSetup(files)].filter((c): c is string[] => c !== null) : []),
+    ...(!checksOption.trim() ? await checkCommands($, r.worktree, files) : []),
+  ]
+  if (auto.length && !(await approveAuto($, r, auto))) return
   if (!(await setUp($, r, files))) return
   const cmds = await checkCommands($, r.worktree, files)
   await patch($, cur => ({ ...cur, note: 'running the checks' }))
@@ -602,9 +646,16 @@ function actions($: EngineInterface, r: Run): { key: string; label: string; pres
   return [{ key: 'retry', label: 'Retry', press: () => retryNow($) }]
 }
 
+// The diagram's frame timer runs only while a run is live: started with one, stopped once it ends.
 async function tick($: EngineInterface) {
   const r = await read($, run)
-  if (r && isLive(r.phase) && !waitsOnPerson(r.phase)) await update($, frame, f => f + 1)
+  if (!r || !isLive(r.phase)) return void timers.splice(0).forEach(t => t.cancel())
+  if (!waitsOnPerson(r.phase)) await update($, frame, f => f + 1)
+}
+
+async function ensureTicking($: EngineInterface) {
+  const r = await read($, run)
+  if (r && isLive(r.phase) && !timers.length) timers.push($.clock.every(FRAME_MS, () => tick($)))
 }
 
 export const register: Register = (on, options) => {
@@ -641,7 +692,7 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
       .catch(() => {})
-    timers.push($.clock.every(FRAME_MS, () => tick($)))
+    await ensureTicking($)
     return next(e)
   })
 
@@ -657,7 +708,7 @@ export const register: Register = (on, options) => {
   // run instead of the main Claude doing the work; the prompt that goes on tells it so.
   on('prompt.submit', async ($, e, next) => {
     if (!takeOver) return next(e)
-    const args = takeOverArgs(e.text)
+    const args = takeOverArgs(e.text, e.origin as { kind: string; name?: string })
     if (!args) return next(e)
     const cur = await read($, run)
     if (cur && isLive(cur.phase)) return next(e)

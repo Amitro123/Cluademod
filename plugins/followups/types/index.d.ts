@@ -16,6 +16,9 @@ declare module 'claude-code' {
       skipped: string[]
       // The list as this session last loaded or saved it, to merge with another session's saves.
       base: Item[]
+      // The items this session started: one still in progress that it didn't start (an earlier
+      // session's, whose start may never have run) can be started again.
+      startedHere: string[]
     }
   }
 }

@@ -37,6 +37,8 @@ const MISTAKES = 'MISTAKES.md'
 const MEMORY_PATHS = ['.agent-brain/shared/MEMORY.md', '.claude/agent-memory/claude/MEMORY.md']
 const PARA_ROOT = '.agent-brain/shared'
 const POLL_MS = 4_000
+// In a project with no memory yet, the poll looks this often instead: a turn's end checks too.
+const IDLE_POLL_MS = 32_000
 const PULSE_MS = 6_000
 const FRAME_MS = 160
 const INBOX_SHOWN = 3
@@ -172,18 +174,24 @@ async function append($: EngineInterface, entry: JournalEntry) {
 async function writeJournal($: EngineInterface, entries: readonly JournalEntry[]) {
   const id = await $.session.id()
   await $.fs.write(await rootPath($, journalFile(id)), journalDoc(id, entries)).catch(() => {})
-  if (entries.length === 1) await keepOutOfGit($)
+  if (!excluded) excluded = await keepOutOfGit($)
 }
 
-async function keepOutOfGit($: EngineInterface) {
+// Whether .claude/brain/ is in git's exclude file: tried with each write until it is.
+let excluded = false
+
+// True once nothing is left to do: listed, or not a git repository. A git that didn't run, or a
+// write that failed, is tried again with the next entry.
+async function keepOutOfGit($: EngineInterface): Promise<boolean> {
   const root = await $.session.root()
   const found = await $.process.run(['git', 'rev-parse', '--git-path', 'info/exclude'], { cwd: root, timeoutMs: 10_000 }).catch(() => null)
-  if (!found || found.exitCode !== 0 || !found.stdout.trim()) return
+  if (!found) return false
+  if (found.exitCode !== 0 || !found.stdout.trim()) return true
   const rel = found.stdout.trim()
   const path = /^([a-zA-Z]:)?[\\/]/.test(rel) ? rel : `${root.replace(/[\\/]$/, '')}/${rel}`
   const text = await $.fs.read(path).then(t => String(t), () => '')
-  if (text.split('\n').some(l => l.trim() === `${JOURNAL_DIR}/`)) return
-  await $.fs.write(path, `${text}${text && !text.endsWith('\n') ? '\n' : ''}${JOURNAL_DIR}/\n`).catch(() => {})
+  if (text.split('\n').some(l => l.trim() === `${JOURNAL_DIR}/`)) return true
+  return $.fs.write(path, `${text}${text && !text.endsWith('\n') ? '\n' : ''}${JOURNAL_DIR}/\n`).then(() => true, () => false)
 }
 
 // A subagent's answer: the routed-worker's report, or any other agent's last word.
@@ -347,6 +355,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     for (const timer of timers.splice(0)) timer.cancel()
     journaled.clear()
+    excluded = false
     spawns.clear()
     anim?.cancel()
     anim = null
@@ -364,7 +373,9 @@ export const register: Register = (on, options) => {
     }
     await readTheme($)
     await refresh($)
+    let ticks = 0
     timers.push($.clock.every(POLL_MS, async () => {
+      if (!(await read($, brain)) && ++ticks % (IDLE_POLL_MS / POLL_MS)) return
       if ((await stamp($)) !== mtimes) await refresh($)
     }))
     return next(e)
@@ -412,6 +423,8 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId !== undefined && e.reason === 'answer') await workerDone($, e.agentId, e.answer)
+    // A memory set up during the turn (init) shows once it ends, whatever the poll's pace.
+    if (e.agentId === undefined && (await stamp($)) !== mtimes) await refresh($)
     return r
   }).catch(($, e, next) => next(e))
 

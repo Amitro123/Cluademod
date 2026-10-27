@@ -45,6 +45,9 @@ export type Run = {
   // The builder that built this run: each later round goes back to it (it keeps what it read and
   // why), until it fails and a fresh one is started.
   builderId?: string
+  // The commands the factory found in the project (no checks or setup option) that the person let
+  // run, with the last commit of the files that define them: a change there asks again.
+  autoApproved?: string
   // Where the run keeps what each step said (its record), and how many entries it has written.
   record?: string
   recorded?: number

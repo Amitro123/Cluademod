@@ -2,8 +2,8 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cleanFeature, detectChecks, detectSetup, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
-import { factoryArgs, goalPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
+import { cleanFeature, detectChecks, detectSetup, leftOut, neverCommit, slugOf, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
+import { factoryArgs, goalPrompt, startLine, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 
@@ -29,9 +29,11 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, checksOk = 'Run them' as string | null } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
+  // The last commit of the files that define the checks: a test moves it to change them.
+  let configCommit = 'c0'
   const sent: string[] = []
   const toasts: string[] = []
   const written: Record<string, string> = {}
@@ -80,6 +82,10 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     }
     if (cmd.startsWith('git diff --stat')) return ok(' src/mw.ts | 40 +++\n 1 file changed')
     if (cmd === 'git status --porcelain') return ok(dirty ? ' M src/mw.ts\n?? src/limit/new.ts\n?? node_modules/\n?? .env\n?? certs/server.key\n' : '')
+    // -z -uall: each untracked file on its own, NUL-separated, unquoted (a new folder's .env too).
+    if (cmd === 'git status --porcelain -z -uall') return ok(dirty ? [' M src/mw.ts', '?? src/limit/new.ts', '?? src/limit/שלום.ts', '?? app/.env', '?? app/index.js', '?? node_modules/x/a.js', '?? .env', '?? certs/server.key', 'R  src/b.ts', 'src/a.ts', ''].join('\0') : '')
+    if (cmd.startsWith('git log -1 --format=%H HEAD --')) return ok(`${configCommit}\n`)
+    if (cmd.startsWith('git diff --name-only abc123 HEAD --')) return ok(configCommit === 'c0' ? '' : 'package.json\n')
     if (cmd === 'git diff --cached --quiet') return { value: { exitCode: dirty ? 1 : 0, stdout: '', stderr: '' } } as never
     if (cmd === 'git rev-parse --git-path info/exclude') return ok('.git/info/exclude\n')
     if (cmd.startsWith('git commit') && commitFails) return { value: { exitCode: 1, stdout: '', stderr: 'Please tell me who you are.' } } as never
@@ -123,7 +129,8 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
   on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
     const q = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
     asked.push(q)
-    const a = answers.shift()
+    // The checks question has its own answer, so the other dialogs' answers stay in order.
+    const a = q.startsWith('Before the factory runs the checks') ? (checksOk ?? undefined) : answers.shift()
     if (a === undefined) throw new Error('dismissed')
     return { result: { questions: (e as unknown as { questions: unknown }).questions, answers: { [q]: a } } } as never
   })
@@ -131,7 +138,7 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
-  return { spawned, ran, sent, toasts, written, release, asked, clock, sends, registered }
+  return { spawned, ran, sent, toasts, written, release, asked, clock, sends, registered, setConfig: (c: string) => void (configCommit = c) }
 }
 
 const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<unknown[]> }) =>
@@ -289,15 +296,16 @@ describe('a run from the feature to the PR', () => {
     await toReviews($)
     const at = (c: string) => w.ran.indexOf(c)
     expect(at('git add -u')).toBeGreaterThan(-1)
-    expect(w.ran).toContain('git add -- src/limit/new.ts')
+    // Each new file on its own, a Hebrew name as it is: the .env inside the new app/ folder stays out.
+    expect(w.ran).toContain('git add -- src/limit/new.ts src/limit/שלום.ts app/index.js')
     expect(w.ran.some(c => /add .*(node_modules|\.env|server\.key)/.test(c))).toBe(false)
     expect(w.ran).not.toContain('git add -A')
-    expect(at('git commit -m factory: Rate limiter')).toBeGreaterThan(at('git add -- src/limit/new.ts'))
+    expect(at('git commit -m factory: Rate limiter')).toBeGreaterThan(at('git add -- src/limit/new.ts src/limit/שלום.ts app/index.js'))
     expect(at('npm test')).toBeGreaterThan(at('git commit -m factory: Rate limiter'))
     expect(last(w).subagentType).toBe('factory:code-reviewer')
     // The person and the PR prompt hear what was left out.
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
-    expect(await texts(pane)).toMatch(/Left out of the commits: node_modules\/, \.env, certs\/server\.key/)
+    expect(await texts(pane)).toMatch(/Left out of the commits: app\/\.env, node_modules\/, \.env, certs\/server\.key/)
     await pane.unmount()
     await answer($, 'a3', PASS)
     await answer($, 'a4', PASS)
@@ -571,7 +579,7 @@ describe('goals and to-do items run through the factory by themselves', () => {
   test("goal-run's goal prompt starts a run, and the main Claude is told the factory has it", async ($, on) => {
     const w = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-    const r = await $.prompt.submit({ text: goalPrompt('Rate limiter for the API'), origin: { kind: 'plugin' } } as never)
+    const r = await $.prompt.submit({ text: goalPrompt('Rate limiter for the API'), origin: { kind: 'plugin', name: 'goal-run' } } as never)
     await settled()
     expect(String(r.text)).toMatch(/^The factory took this over: "Rate limiter for the API"/)
     expect(last(w)).toMatchObject({ subagentType: 'factory:spec-writer' })
@@ -582,7 +590,7 @@ describe('goals and to-do items run through the factory by themselves', () => {
   test("a single to-do item's Start becomes a run that marks the item done once the PR is open", async ($, on) => {
     const w = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-    const r = await $.prompt.submit({ text: START(['- id k3x-1a2b3: Add a rate limiter (bug) — bursts must pass [where: src/mw.ts]']) } as never)
+    const r = await $.prompt.submit({ text: START(['- id k3x-1a2b3: Add a rate limiter (bug) — bursts must pass [where: src/mw.ts]']), origin: { kind: 'plugin', name: 'followups' } } as never)
     await settled()
     expect(String(r.text)).toMatch(/factory took this over: "Add a rate limiter — bursts must pass \(src\/mw\.ts\)"/)
     expect(last(w).prompt).toContain('Feature: Add a rate limiter — bursts must pass (src/mw.ts)')
@@ -600,19 +608,41 @@ describe('goals and to-do items run through the factory by themselves', () => {
     const w = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
     const two = START(['- id a1: One', '- id a2: Two'])
-    expect(String((await $.prompt.submit({ text: two } as never)).text)).toBe(two)
-    await $.prompt.submit({ text: goalPrompt('First') } as never)
+    expect(String((await $.prompt.submit({ text: two, origin: { kind: 'plugin', name: 'followups' } } as never)).text)).toBe(two)
+    await $.prompt.submit({ text: goalPrompt('First'), origin: { kind: 'plugin', name: 'goal-run' } } as never)
     await settled()
     const second = goalPrompt('Second')
-    expect(String((await $.prompt.submit({ text: second } as never)).text)).toBe(second)
+    expect(String((await $.prompt.submit({ text: second, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(second)
     expect(w.spawned).toHaveLength(1)
+  })
+
+  test('a quoted title with " — " in it keeps it whole in the feature', async ($, on) => {
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const line = startLine({ id: 'q1', title: 'Fix A — B', kind: 'bug', detail: 'detail here', where: 'src/a.ts' })
+    const r = await $.prompt.submit({ text: START([line]), origin: { kind: 'plugin', name: 'followups' } } as never)
+    await settled()
+    expect(String(r.text)).toMatch(/took this over: "Fix A — B — detail here \(src\/a\.ts\)"/)
+    expect(w.spawned).toHaveLength(1)
+  })
+
+  test('the same text typed by the person, or from another mod, goes on as typed', async ($, on) => {
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const typed = `Notes from the meeting:\n${goalPrompt('Rate limiter')}`
+    expect(String((await $.prompt.submit({ text: typed, origin: { kind: 'user' } } as never)).text)).toBe(typed)
+    const one = START(['- id a1: One'])
+    expect(String((await $.prompt.submit({ text: one } as never)).text)).toBe(one)
+    expect(String((await $.prompt.submit({ text: one, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(one)
+    expect(String((await $.prompt.submit({ text: goalPrompt('x'), origin: { kind: 'plugin', name: 'followups' } } as never)).text)).toBe(goalPrompt('x'))
+    expect(w.spawned).toHaveLength(0)
   })
 
   test('with takeOver off nothing is taken over', { options: { takeOver: 'off' } }, async ($, on) => {
     const w = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
     const text = goalPrompt('Rate limiter')
-    expect(String((await $.prompt.submit({ text } as never)).text)).toBe(text)
+    expect(String((await $.prompt.submit({ text, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(text)
     expect(w.spawned).toHaveLength(0)
   })
 
@@ -1013,5 +1043,97 @@ describe('a builder that stopped carries on, instead of starting over', () => {
       "A builder before you started this job and stopped; its work is in this worktree. Start from it, check it against the spec, and do what is left; don't redo it.",
       'Its commits (newest first):', '- abc123 add bucket', 'Uncommitted changes:', '- M src/a.ts', '- ?? src/b.ts',
     ].join('\n'))
+  })
+})
+
+describe("git's view of the builder's new files", () => {
+  test('-z -uall: each file on its own, unquoted, a rename\'s old path skipped', () => {
+    expect(untrackedOf(['?? app/.env', '?? app/index.js', 'R  new.ts', 'old.ts', '?? שלום.ts', ' M x.ts', ''].join('\0'))).toEqual(['app/.env', 'app/index.js', 'שלום.ts'])
+    expect(untrackedOf('')).toEqual([])
+  })
+
+  test('in a new folder, the .env is left out and the rest kept', () => {
+    const files = untrackedOf('?? app/.env\0?? app/index.js\0')
+    expect(files.filter(f => !neverCommit(f))).toEqual(['app/index.js'])
+    expect(files.filter(neverCommit)).toEqual(['app/.env'])
+  })
+
+  test('what was left out reads by folder', () => {
+    expect(leftOut(['node_modules/a/b.js', 'node_modules/c.js', 'app/.env', 'web/dist/x.js', 'key.pem'])).toEqual(['node_modules/', 'app/.env', 'web/dist/', 'key.pem'])
+  })
+})
+
+describe('commands the factory found run only once you let them', () => {
+  test('asked before the first checks, with the exact commands; not now: the run waits, Retry asks again', async ($, on) => {
+    const w = engine(on, { files: ['package.json'], checksOk: null })
+    await toReviews($)
+    expect(w.asked.at(-1)).toMatch(/^Before the factory runs the checks it found in the project, in \/repo\/\.factory\/rate-limiter:\n\$ npm install\n\$ npm test\n/)
+    expect(w.ran).not.toContain('npm install')
+    expect(w.ran).not.toContain('npm test')
+    expect(await bandText($)).toMatch(/The checks wait for your OK/)
+    expect(w.spawned.map(s => s.subagentType)).not.toContain('factory:code-reviewer')
+  })
+
+  test('let run once, not asked again until the builder changes what they run', async ($, on) => {
+    const w = engine(on, { delivers: true })
+    await toReviews($)
+    expect(w.asked.filter(q => q.startsWith('Before the factory runs')).length).toBe(1)
+    expect(w.ran).toContain('npm test')
+    // Round 2 with nothing changed in what the checks run: not asked.
+    await answer($, 'a3', CHANGES)
+    await answer($, 'a4', PASS)
+    await answer($, 'a2', 'Fixed.')
+    expect(w.asked.filter(q => q.startsWith('Before the factory runs')).length).toBe(1)
+    // The person sends it back, and this time the builder changes package.json: asked again.
+    await answer($, 'a5', PASS)
+    await answer($, 'a6', PASS)
+    await answer($, 'a7', 'DECISION: APPROVE\nREASON: ok')
+    w.setConfig('c1')
+    await command($, 'rework use seconds')
+    await answer($, 'a2', 'Fixed again.')
+    expect(w.asked.filter(q => q.startsWith('Before the factory runs')).length).toBe(2)
+    expect(w.asked.at(-1)).toMatch(/The builder changed what these run: package\.json\. Look at that diff/)
+  })
+
+  test('with the checks and setup options set, nothing is asked', { options: { checks: 'npm test', setup: 'npm ci' } } as never, async ($: Engine, on: On) => {
+    const w = engine(on)
+    await toReviews($)
+    expect(w.asked.filter(q => q.startsWith('Before the factory runs'))).toEqual([])
+    expect(w.ran).toContain('npm test')
+  })
+})
+
+describe('a run\'s name from a feature in any script', () => {
+  test('Latin as before; Hebrew gets a stable hash, different features different names, git-ref-safe', () => {
+    expect(slugOf('Rate limiter for the API')).toBe('rate-limiter-for-the-api')
+    const a = slugOf('תקן את הראוטר')
+    const b = slugOf('הוסף מטמון')
+    expect(a).toMatch(/^feature-[0-9a-z]{7}$/)
+    expect(a).toBe(slugOf('תקן את הראוטר'))
+    expect(a).not.toBe(b)
+    expect(slugOf('תקן את model-router לפי ROUTER_ISSUES.md')).toMatch(/^model-router-router-issues-md-[0-9a-z]{7}$/)
+    expect(slugOf('x'.repeat(100) + ' שלום').length).toBeLessThanOrEqual(48)
+  })
+})
+
+describe('the frame timer', () => {
+  test('runs only while a run is live', async ($, on) => {
+    let frames = 0
+    on('state.set', (_, e, next) => {
+      if ((e as { key?: string }).key === 'frame') frames++
+      return next(e)
+    })
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await w.clock.advance(5_000)
+    expect(frames).toBe(0)
+    await command($, 'Rate limiter')
+    await w.clock.advance(1_400)
+    expect(frames).toBeGreaterThan(0)
+    await command($, 'stop')
+    await w.clock.advance(1_400)
+    const after = frames
+    await w.clock.advance(5_000)
+    expect(frames).toBe(after)
   })
 })
