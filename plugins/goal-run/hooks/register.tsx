@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
-import { FACTORY_PLAN_APPROVED_ARG, FACTORY_SOURCE, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
+import { FACTORY_PLAN_APPROVED_ARG, FACTORY_SOURCE, factoryTakesGoal, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
 // The goal-run tests import the start-prompt parser from here, as before it was shared.
 export { parseStartPrompt }
 
@@ -251,6 +251,13 @@ let hasFactory = false
 // The goal goes to the factory: marked as the factory's, so the spec's plan replaces it (instead of
 // being kept apart as the person's own), then /factory runs with its text. A refused command puts
 // the goal back as it was.
+// factory's own takeOver option (on by default): whether a goal planned here goes to the factory.
+async function factoryTakesOver($: EngineInterface): Promise<boolean> {
+  if (!hasFactory) return false
+  const row = (await $.config.list().catch(() => [])).find(r => r.key === 'factory.takeOver')
+  return String(row?.value ?? 'on') !== 'off'
+}
+
 async function runAsFactory($: EngineInterface) {
   const g = await read($, goal)
   if (!g) return
@@ -510,6 +517,14 @@ export const register: Register = (on, options) => {
     const items = planItems(input.tasks)
     if (!items.length) return { deny: 'A plan needs at least one task.' }
     const before = await read($, goal)
+    // A new goal from the main conversation, with the factory taking goals over: it builds it.
+    const isNew = !before || before.status === 'done' || before.status === 'planning'
+    if (!isFactory && isNew && (e as { agentId?: string }).agentId === undefined && (await factoryTakesOver($))) {
+      // A command can't run from inside a tool call, so Claude starts the run with the factory's
+      // tool. A goal still being planned stays: the factory's plan replaces it.
+      const goalText = clip(String(input.goal ?? '').trim() || before?.text || items.map(i => i.title).join('; '), 400)
+      return { result: factoryTakesGoal(goalText) }
+    }
     // A factory plan never takes over the person's own goal under way, and doesn't inherit its done
     // tasks. A goal still being planned (no plan approved yet) is the one the factory took over.
     if (isFactory && before && before.source !== FACTORY_SOURCE && before.status !== 'done' && before.status !== 'planning') return { result: PLAN_KEPT_FOR_FACTORY }

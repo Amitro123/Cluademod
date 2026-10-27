@@ -1,6 +1,6 @@
 {
   "name": "brain-hud",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Agent memory that works on its own: the mistake-brain skill and its hooks ship inside (log, route, promote, dream, recall), and a pixel Claude with a brain reacts to each MISTAKES.md entry while a pane draws the PARA memory as a graph. Offers finished follow-ups and reached goals to memory. Keeps a session journal (each worker's report, memory entries, finished to-dos, goal steps) that Claude reads through a tool, and drafts a handoff for what the session leaves open.",
   "author": {
     "name": "Amit Rosen",

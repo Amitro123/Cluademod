@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import { runnerX, trackText } from '../hooks/art'
 import { addSide, insertTask, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan, stepTokens } from '../hooks/register'
 import type { Goal } from '../types'
-import { doneResult, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory, projectFrom } from '../hooks/texts'
+import { doneResult, factoryTakesGoal, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory, projectFrom } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 const UPDATE = 'mcp__goal-run__update'
@@ -757,6 +757,8 @@ describe('a goal run through the factory', () => {
   test('Run as factory hands the goal to /factory, and the factory plan replaces it', async ($, on) => {
     const ran: string[] = []
     on('command.list', () => ({ value: [{ name: 'factory', description: 'f', source: 'plugin' }] }) as never)
+    // The factory doesn't take goals over here: the person sends this one with the button.
+    on('config.list', () => ({ value: [{ key: 'factory.takeOver', value: 'off' }] }) as never)
     on('command.run', (_, e) => {
       ran.push(`${e.command} ${e.args ?? ''}`.trim())
       return { text: '' } as never
@@ -775,6 +777,48 @@ describe('a goal run through the factory', () => {
     const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks: [{ title: 'Bucket', priority: 'high' }] } as never)
     expect(String(r.result)).toBe(PLAN_APPROVED_FOR_FACTORY)
     expect((w.saved['goal:/repo'] as Goal).tasks.map(t => t.title)).toEqual(['Bucket'])
+  })
+
+  const withFactory = (on: On, takeOver?: string, said = 'Factory run started: Ship it. Branch factory/ship-it.') => {
+    const ran: string[] = []
+    on('command.list', () => ({ value: [{ name: 'factory', description: 'f', source: 'plugin' }] }) as never)
+    on('config.list', () => ({ value: takeOver ? [{ key: 'factory.takeOver', value: takeOver }] : [] }) as never)
+    on('command.run', (_, e) => {
+      ran.push(`${e.command} ${e.args ?? ''}`.trim())
+      return { text: e.command === 'factory' ? said : '' } as never
+    })
+    return ran
+  }
+
+  test('a new goal Claude plans goes to the factory when it takes goals over: no plan, no dialog', async ($, on) => {
+    const ran = withFactory(on)
+    const w = engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const r = await $.tool.call({ tool: PLAN, goal: 'Ship it', tasks: ['One', 'Two'] } as never)
+    expect(String(r.result)).toBe(factoryTakesGoal('Ship it'))
+    expect(String(r.result)).toMatch(/Call mcp__factory__start now with feature "Ship it"/)
+    expect(ran).toEqual([])
+    expect(w.asked).toEqual([])
+    expect(w.saved['goal:/repo']).toBeUndefined()
+  })
+
+  test("with the factory's takeOver off, or a goal already under way, Claude's plan stays a plan", async ($, on) => {
+    const ran = withFactory(on, 'off')
+    const w = engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.tool.call({ tool: PLAN, goal: 'Ship it', tasks: ['One', 'Two'] } as never)
+    expect(ran.filter(c => c.startsWith('factory'))).toEqual([])
+    expect(w.asked).toHaveLength(1)
+  })
+
+  test('a goal under way: re-planning it stays here, even with the factory taking goals over', async ($, on) => {
+    withFactory(on)
+    const active: Goal = { text: 'Ship it', status: 'active', tasks: [{ id: 't1', title: 'One', status: 'done', tokens: 10 }, { id: 't2', title: 'Two', status: 'pending', tokens: 0 }], activeId: null, other: 0 }
+    const w = engine(on, { saved: { 'goal:/repo': active }, answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const r = await $.tool.call({ tool: PLAN, tasks: ['One', 'Two', 'Three'] } as never)
+    expect(String(r.result)).not.toMatch(/mcp__factory__start/)
+    expect(w.asked).toHaveLength(1)
   })
 
   test('without the factory installed there is no button', async ($, on) => {

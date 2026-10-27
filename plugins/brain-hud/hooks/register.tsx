@@ -360,7 +360,7 @@ export const register: Register = (on, options) => {
           properties: { last: { type: 'integer', description: `Optional: only the newest N entries (default ${JOURNAL_LAST})` } },
         },
         isDeferred: false,
-      })
+      }).catch(() => {})
     }
     await readTheme($)
     await refresh($)
