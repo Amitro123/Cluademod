@@ -89,6 +89,32 @@ describe('band', () => {
     }
   })
 
+  test("a new prompt's new list retitles the band; ticking off the same list keeps its title", async ($, on) => {
+    engine(on)
+    on('ui.render', ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return <Box />
+    })
+    const write = (names: string[], done = 0) => $.tool.call({ tool: 'TodoWrite', todos: names.map((n, i) => ({ content: n, activeForm: n, status: i < done ? 'completed' : 'pending' })) } as never)
+    const band = async () => {
+      const ui = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+      const t = await texts(ui)
+      await ui.unmount()
+      return t
+    }
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+    await $.turn.start({ text: 'Video prep', turnId: 't1' })
+    await write(['A', 'B'])
+    await $.turn.start({ text: 'keep going', turnId: 't2' })
+    await write(['A', 'B'], 1)
+    expect(await band()).toMatch(/Video prep/)
+    await $.turn.start({ text: 'Now the release notes', turnId: 't3' })
+    await write(['Draft', 'Review'])
+    expect(await band()).toMatch(/Now the release notes/)
+    await write(['Draft', 'Review', 'Publish'])
+    expect(await band()).toMatch(/Now the release notes/)
+  })
+
   test('stays out of the way with no to-dos', async ($, on) => {
     engine(on)
     on('ui.render', ($, e) => {
