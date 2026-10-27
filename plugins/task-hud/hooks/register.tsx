@@ -68,7 +68,7 @@ export function activityOf(tool: string, input: Record<string, unknown>): Activi
       try { host = new URL(host).host } catch { /* keep it as given */ }
       return say('Fetching', 'Fetched', host)
     }
-    case 'Skill': return say('Reading the', 'Read the', `${input.skill} skill`)
+    case 'Skill': return input.skill ? say('Reading the', 'Read the', `${input.skill} skill`) : say('Reading', 'Read', 'a skill')
     case 'Agent': return say('Sending out', 'Sent out', String(input.description ?? 'a sub-agent'))
     case 'TodoWrite': {
       const list = (input.todos ?? []) as { status: string; activeForm: string; content: string }[]

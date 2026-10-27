@@ -461,3 +461,10 @@ describe('the agents kept in the list', () => {
     expect(keepAgents(list, 10)).toBe(list)
   })
 })
+
+describe('a Skill call with no skill named', () => {
+  test("reads as a skill, not 'undefined skill'", () => {
+    expect(activityOf('Skill', {}).now).toBe('Reading a skill')
+    expect(activityOf('Skill', { skill: 'pdf' }).now).toBe('Reading the pdf skill')
+  })
+})
