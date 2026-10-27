@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { runnerX, trackText } from '../hooks/art'
-import { addSide, insertTask, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan, stepTokens } from '../hooks/register'
+import { addSide, insertTask, mergeGoal, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan, stepTokens } from '../hooks/register'
 import type { Goal } from '../types'
 import { doneResult, factoryTakesGoal, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory, projectFrom } from '../hooks/texts'
 
@@ -904,5 +904,57 @@ describe('tokens are saved once a turn, not at every step', () => {
     await step($, w, 500)
     await $.session.end({ reason: 'other', sessionId: 's', resume: {} } as never)
     expect((w.saved['goal:/repo'] as Goal).tasks[0]!.tokens).toBe(500)
+  })
+})
+
+describe('two sessions on the same goal keep both sides\' progress', () => {
+  const task = (id: string, status: 'pending' | 'in_progress' | 'done', tokens: number) => ({ id, title: id, status, tokens })
+  const base: Goal = { text: 'Ship it', status: 'active', setAt: 5, tasks: [task('t1', 'pending', 0), task('t2', 'pending', 0), task('t3', 'pending', 0)], activeId: null, other: 100 }
+
+  test('each side changed a different task: both changes stay; tokens add both sides\' growth', () => {
+    const mine: Goal = { ...base, tasks: [task('t1', 'done', 300), task('t2', 'pending', 0), task('t3', 'pending', 0)], other: 150 }
+    const theirs: Goal = { ...base, tasks: [task('t1', 'pending', 0), task('t2', 'in_progress', 200), task('t3', 'pending', 0)], activeId: 't2', other: 120 }
+    const m = mergeGoal(base, mine, theirs)
+    expect(m.tasks.map(t => [t.id, t.status, t.tokens])).toEqual([['t1', 'done', 300], ['t2', 'in_progress', 200], ['t3', 'pending', 0]])
+    expect(m.activeId).toBe('t2')
+    expect(m.other).toBe(170)
+  })
+
+  test('both changed the same task: this side wins; every task done closes the goal; added tasks are kept', () => {
+    const mine: Goal = { ...base, tasks: [task('t1', 'done', 10), task('t2', 'done', 0), task('t3', 'done', 0)] }
+    const theirs: Goal = { ...base, tasks: [task('t1', 'in_progress', 5), task('t2', 'pending', 0), task('t3', 'pending', 0), task('t4', 'pending', 0)] }
+    const m = mergeGoal(base, mine, theirs)
+    expect(m.tasks.map(t => [t.id, t.status, t.tokens])).toEqual([['t1', 'done', 15], ['t2', 'done', 0], ['t3', 'done', 0], ['t4', 'pending', 0]])
+    expect(m.status).toBe('active')
+    expect(mergeGoal(base, mine, { ...theirs, tasks: theirs.tasks.slice(0, 3) }).status).toBe('done')
+  })
+
+  test('in a session: another session marked t2 done meanwhile; marking t1 here keeps both', async ($, on) => {
+    const w = engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two', 'Three'] } as never)
+    const stored = w.saved['goal:/repo'] as Goal
+    w.saved['goal:/repo'] = { ...stored, tasks: stored.tasks.map(t => (t.id === 't2' ? { ...t, status: 'done', tokens: 900 } : t)) }
+    await $.tool.call({ tool: 'mcp__goal-run__update', id: 't1', status: 'done' } as never)
+    const after = w.saved['goal:/repo'] as Goal
+    expect(after.tasks.map(t => [t.id, t.status])).toEqual([['t1', 'done'], ['t2', 'done'], ['t3', 'pending']])
+    expect(after.tasks[1]!.tokens).toBe(900)
+  })
+
+  test("a new prompt takes in the other session's change without losing tokens counted here and not saved yet", async ($, on) => {
+    const w = engine(on, { answers: ['Approve, run through'] })
+    on('turn.start', (_, e) => ({ turnId: e.turnId }) as never)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
+    await $.tool.call({ tool: 'mcp__goal-run__update', id: 't1', status: 'in_progress' } as never)
+    await step($, w, 1000)
+    const stored = w.saved['goal:/repo'] as Goal
+    w.saved['goal:/repo'] = { ...stored, tasks: stored.tasks.map(t => (t.id === 't2' ? { ...t, status: 'done', tokens: 700 } : t)) }
+    await $.turn.start({ text: 'go on', turnId: 'n1' } as never)
+    await $.turn.complete({ answer: 'ok', reason: 'answer', durationMs: 1, isAborted: false, turnId: 'n1' } as never)
+    const after = w.saved['goal:/repo'] as Goal
+    expect(after.tasks.map(t => [t.id, t.status, t.tokens])).toEqual([['t1', 'in_progress', 1000], ['t2', 'done', 700]])
   })
 })
