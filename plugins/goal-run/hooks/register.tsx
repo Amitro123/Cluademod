@@ -227,7 +227,17 @@ const storeKey = async ($: EngineInterface) => `goal:${await projectOf($)}`
 // Where a goal was saved before the key was the repository: the session's own root.
 const legacyKey = async ($: EngineInterface) => `goal:${await $.session.root()}`
 
+// Token counts from each model step change only the goal in memory: saved once a main-loop turn
+// ends (or the session does), not at every step, sub-agents' included.
+let unsaved = false
+
+async function addTokens($: EngineInterface, fn: (g: Goal | null) => Goal | null) {
+  await update($, goal, fn)
+  unsaved = true
+}
+
 async function save($: EngineInterface) {
+  unsaved = false
   const key = await storeKey($)
   const g = await read($, goal)
   const saved = (await $.store.get(key)) as Goal | null | undefined
@@ -490,8 +500,15 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId === undefined && unsaved) await save($)
+    return r
+  }).catch(($, e, next) => next(e))
+
   on('session.end', async ($, e, next) => {
     for (const timer of timers.splice(0)) timer.cancel()
+    if (unsaved) await save($).catch(() => {})
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -628,14 +645,14 @@ export const register: Register = (on, options) => {
       const used = stepTokens(u)
       const into = g.tasks.find(t => sj.taskIds.includes(t.id) && t.status === 'in_progress')
       if (into) {
-        await setGoal($, cur => (cur ? { ...cur, tasks: cur.tasks.map(t => (t.id === into.id ? { ...t, tokens: t.tokens + used } : t)) } : cur))
+        await addTokens($, cur => (cur ? { ...cur, tasks: cur.tasks.map(t => (t.id === into.id ? { ...t, tokens: t.tokens + used } : t)) } : cur))
       } else {
         await update($, side, cur => (cur ? { ...cur, tokens: cur.tokens + used } : cur))
-        await setGoal($, cur => (cur ? { ...cur, outside: (cur.outside ?? 0) + used } : cur))
+        await addTokens($, cur => (cur ? { ...cur, outside: (cur.outside ?? 0) + used } : cur))
       }
     } else if (u && g && g.status !== 'done') {
       const used = stepTokens(u)
-      await setGoal($, cur => {
+      await addTokens($, cur => {
         if (!cur) return cur
         const active = cur.tasks.find(t => t.id === cur.activeId && t.status === 'in_progress')
         return active

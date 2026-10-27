@@ -32,11 +32,15 @@ function engine(on: On, { saved = {} as Record<string, unknown>, answers = [] as
   const asked: string[] = []
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 24, 9) })
   on('store.get', (_, e) => ({ value: saved[e.key] }) as never)
+  const writes: string[] = []
   on('store.set', (_, e) => {
+    writes.push(e.key)
     saved[e.key] = e.value
     return { value: undefined } as never
   })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('turn.complete', (_, e) => ({ text: e.answer }) as never)
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }) as never)
   on('session.root', () => ({ value: '/repo' }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__goal-run__${e.name}` } }) as never)
   on('command.register', (_, e) => ({ value: { command: e.name } }) as never)
@@ -66,7 +70,7 @@ function engine(on: On, { saved = {} as Record<string, unknown>, answers = [] as
     return <Box />
   })
   const steps: number[] = []
-  return { sent, toasts, clock, saved, steps, asked }
+  return { sent, toasts, clock, saved, steps, asked, writes }
 }
 
 const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<unknown[]> }) =>
@@ -234,8 +238,11 @@ describe('a new session', () => {
     const w = engine(on, { saved: { 'goal:/repo': unfinished } })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     w.saved['goal:/repo'] = { ...unfinished, text: 'Their goal', setAt: Date.UTC(2026, 9, 24, 8) }
-    await step($, w, 1_000)
-    await step($, w, 1_000)
+    // Saved at each turn's end: the newer goal stays, and the person hears it once.
+    for (let i = 0; i < 2; i++) {
+      await step($, w, 1_000)
+      await $.turn.complete({ answer: 'x', reason: 'answer', durationMs: 1, isAborted: false, turnId: `t${i}` } as never)
+    }
     expect((w.saved['goal:/repo'] as Goal).text).toBe('Their goal')
     expect(w.toasts.filter(t => /newer goal was set in another session/.test(t))).toHaveLength(1)
   })
@@ -864,5 +871,38 @@ describe("another session's changes to the goal reach this one", () => {
     w.saved['goal:/repo'] = { ...there, text: 'Write the docs', setAt: (there.setAt ?? 0) + 1000 }
     await $.turn.start({ turnId: 't9', text: 'next' } as never)
     expect(await shownGoal($)).toMatch(/^Goal: Write the docs/)
+  })
+})
+
+describe('tokens are saved once a turn, not at every step', () => {
+  test("steps (a sub-agent's too) count in memory; the main loop's turn end saves them once", async ($, on) => {
+    const w = engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
+    await $.tool.call({ tool: 'mcp__goal-run__update', id: 't1', status: 'in_progress' } as never)
+    const before = w.writes.length
+    await step($, w, 1000)
+    await step($, w, 2000, 'a1')
+    await step($, w, 3000)
+    expect(w.writes.length).toBe(before)
+    await $.turn.complete({ answer: 'x', agentId: 'a1', reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as never)
+    expect(w.writes.length).toBe(before)
+    await $.turn.complete({ answer: 'done', reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as never)
+    expect(w.writes.length).toBe(before + 1)
+    expect((w.saved['goal:/repo'] as Goal).tasks[0]!.tokens).toBe(6000)
+    await $.turn.complete({ answer: 'again', reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as never)
+    expect(w.writes.length).toBe(before + 1)
+  })
+
+  test('the session ending saves what the last steps counted', async ($, on) => {
+    const w = engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One'] } as never)
+    await $.tool.call({ tool: 'mcp__goal-run__update', id: 't1', status: 'in_progress' } as never)
+    await step($, w, 500)
+    await $.session.end({ reason: 'other', sessionId: 's', resume: {} } as never)
+    expect((w.saved['goal:/repo'] as Goal).tasks[0]!.tokens).toBe(500)
   })
 })
