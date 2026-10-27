@@ -579,7 +579,7 @@ describe('goals and to-do items run through the factory by themselves', () => {
   test("goal-run's goal prompt starts a run, and the main Claude is told the factory has it", async ($, on) => {
     const w = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-    const r = await $.prompt.submit({ text: goalPrompt('Rate limiter for the API'), origin: { kind: 'plugin' } } as never)
+    const r = await $.prompt.submit({ text: goalPrompt('Rate limiter for the API'), origin: { kind: 'plugin', name: 'goal-run' } } as never)
     await settled()
     expect(String(r.text)).toMatch(/^The factory took this over: "Rate limiter for the API"/)
     expect(last(w)).toMatchObject({ subagentType: 'factory:spec-writer' })
@@ -590,7 +590,7 @@ describe('goals and to-do items run through the factory by themselves', () => {
   test("a single to-do item's Start becomes a run that marks the item done once the PR is open", async ($, on) => {
     const w = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-    const r = await $.prompt.submit({ text: START(['- id k3x-1a2b3: Add a rate limiter (bug) — bursts must pass [where: src/mw.ts]']) } as never)
+    const r = await $.prompt.submit({ text: START(['- id k3x-1a2b3: Add a rate limiter (bug) — bursts must pass [where: src/mw.ts]']), origin: { kind: 'plugin', name: 'followups' } } as never)
     await settled()
     expect(String(r.text)).toMatch(/factory took this over: "Add a rate limiter — bursts must pass \(src\/mw\.ts\)"/)
     expect(last(w).prompt).toContain('Feature: Add a rate limiter — bursts must pass (src/mw.ts)')
@@ -608,19 +608,31 @@ describe('goals and to-do items run through the factory by themselves', () => {
     const w = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
     const two = START(['- id a1: One', '- id a2: Two'])
-    expect(String((await $.prompt.submit({ text: two } as never)).text)).toBe(two)
-    await $.prompt.submit({ text: goalPrompt('First') } as never)
+    expect(String((await $.prompt.submit({ text: two, origin: { kind: 'plugin', name: 'followups' } } as never)).text)).toBe(two)
+    await $.prompt.submit({ text: goalPrompt('First'), origin: { kind: 'plugin', name: 'goal-run' } } as never)
     await settled()
     const second = goalPrompt('Second')
-    expect(String((await $.prompt.submit({ text: second } as never)).text)).toBe(second)
+    expect(String((await $.prompt.submit({ text: second, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(second)
     expect(w.spawned).toHaveLength(1)
+  })
+
+  test('the same text typed by the person, or from another mod, goes on as typed', async ($, on) => {
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const typed = `Notes from the meeting:\n${goalPrompt('Rate limiter')}`
+    expect(String((await $.prompt.submit({ text: typed, origin: { kind: 'user' } } as never)).text)).toBe(typed)
+    const one = START(['- id a1: One'])
+    expect(String((await $.prompt.submit({ text: one } as never)).text)).toBe(one)
+    expect(String((await $.prompt.submit({ text: one, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(one)
+    expect(String((await $.prompt.submit({ text: goalPrompt('x'), origin: { kind: 'plugin', name: 'followups' } } as never)).text)).toBe(goalPrompt('x'))
+    expect(w.spawned).toHaveLength(0)
   })
 
   test('with takeOver off nothing is taken over', { options: { takeOver: 'off' } }, async ($, on) => {
     const w = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
     const text = goalPrompt('Rate limiter')
-    expect(String((await $.prompt.submit({ text } as never)).text)).toBe(text)
+    expect(String((await $.prompt.submit({ text, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(text)
     expect(w.spawned).toHaveLength(0)
   })
 

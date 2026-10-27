@@ -168,9 +168,13 @@ export function whyEnded(e: { reason: string; answer: string; refusal?: { explan
 
 // What a goal prompt or a one-item Start prompt hands the factory: /factory's arguments, else null.
 // Several items started together stay the main Claude's.
-export function takeOverArgs(text: string): string | null {
-  const goal = parseGoalPrompt(text)
+// Only the mods' own prompts: a message the person types that happens to hold a line like
+// "My goal for this session:" or "- id x:" goes on as typed.
+export function takeOverArgs(text: string, origin?: { kind: string; name?: string }): string | null {
+  if (origin?.kind !== 'plugin') return null
+  const goal = origin.name === 'goal-run' ? parseGoalPrompt(text) : null
   if (goal) return goal
+  if (origin.name !== 'followups') return null
   const items = parseStartPrompt(text)
   if (items.length !== 1) return null
   const it = items[0]!
@@ -697,7 +701,7 @@ export const register: Register = (on, options) => {
   // run instead of the main Claude doing the work; the prompt that goes on tells it so.
   on('prompt.submit', async ($, e, next) => {
     if (!takeOver) return next(e)
-    const args = takeOverArgs(e.text)
+    const args = takeOverArgs(e.text, e.origin as { kind: string; name?: string })
     if (!args) return next(e)
     const cur = await read($, run)
     if (cur && isLive(cur.phase)) return next(e)
