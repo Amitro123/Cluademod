@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cleanFeature, detectChecks, detectSetup, modelsFor, parseDecision, parseSize, parseSkills, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
+import { cleanFeature, detectChecks, detectSetup, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
 import { factoryArgs, goalPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -951,5 +951,67 @@ describe("the builder marks goal-run's tasks only when they are the factory's", 
     const w = engine(on)
     await toReviews($)
     expect(w.spawned.find(s => s.subagentType === 'factory:builder')!.prompt).toContain('mark each with mcp__goal-run__update')
+  })
+})
+
+describe('the code map: what the spec-writer read, passed on', () => {
+  test('the spec ends with a code map; the builder and the reviewers start from it', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    expect(w.spawned[0]!.prompt).toMatch(/End the spec file with a "## Code map" section[^\n]*path:start-end[^\n]*signatures of the types/)
+    expect(w.spawned.find(s => s.subagentType === 'factory:builder')!.prompt).toMatch(/Start from the spec's "Code map"[^\n]*never read a large file[^\n]*whole/)
+    for (const t of ['factory:security-reviewer', 'factory:code-reviewer']) {
+      expect(w.spawned.find(s => s.subagentType === t)!.prompt).toMatch(/Start from the diff and the spec's "Code map"/)
+    }
+  })
+})
+
+describe('a builder that stopped carries on, instead of starting over', () => {
+  const LIMIT = "You've hit your individual spend limit · visit https://claude.ai/admin-settings/usage to raise it"
+  const toBuilder = async ($: Engine) => {
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    await command($, 'approve')
+  }
+
+  test('a spend limit: no switch to another model; Retry sends the same builder on', async ($, on) => {
+    const w = engine(on, { delivers: true })
+    await toBuilder($)
+    expect(last(w)).toMatchObject({ id: 'a2', subagentType: 'factory:builder' })
+    await answer($, 'a2', LIMIT, 'error')
+    expect(w.spawned).toHaveLength(2)
+    expect(await bandText($)).toMatch(/Retry once the limit is lifted: the same builder carries on/)
+    await command($, 'retry')
+    expect(w.spawned).toHaveLength(2)
+    expect(w.sends.at(-1)).toMatchObject({ to: 'a2' })
+    expect(w.sends.at(-1)!.text).toMatch(/^You stopped before finishing \(an API error ended it: You've hit your individual spend limit[^)]*\)\. Carry on from where you stopped: check `git status` and `git log`/)
+    await answer($, 'a2', 'Done, committed.')
+    expect(w.spawned.slice(-2).map(s => s.subagentType)).toEqual(['factory:security-reviewer', 'factory:code-reviewer'])
+  })
+
+  test("a builder that can't be sent on: the new one is told what is already in the worktree", async ($, on) => {
+    const w = engine(on, { dirty: true })
+    await toBuilder($)
+    await answer($, 'a2', LIMIT, 'error')
+    await command($, 'retry')
+    expect(last(w)).toMatchObject({ id: 'a3', subagentType: 'factory:builder' })
+    expect(last(w).prompt).toMatch(/A builder before you started this job and stopped[\s\S]*Uncommitted changes:\n- M src\/mw\.ts[\s\S]*Implement the spec/)
+  })
+
+  test("another API error still tries the session's model once, with the skill line once", async ($, on) => {
+    const w = engine(on)
+    await toBuilder($)
+    await answer($, 'a2', 'model not available', 'error')
+    expect(last(w)).toMatchObject({ id: 'a3', subagentType: 'factory:builder' })
+    expect(last(w).model).toBeUndefined()
+    expect(last(w).prompt.match(/Before anything else/g)).toHaveLength(1)
+  })
+
+  test('the progress note, from git', () => {
+    expect(progressNote('', '')).toBe('')
+    expect(progressNote('abc123 add bucket\n', ' M src/a.ts\n?? src/b.ts\n')).toBe([
+      "A builder before you started this job and stopped; its work is in this worktree. Start from it, check it against the spec, and do what is left; don't redo it.",
+      'Its commits (newest first):', '- abc123 add bucket', 'Uncommitted changes:', '- M src/a.ts', '- ?? src/b.ts',
+    ].join('\n'))
   })
 })

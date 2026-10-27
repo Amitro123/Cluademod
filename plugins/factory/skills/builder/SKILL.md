@@ -8,9 +8,20 @@ description: "How the factory's builder implements a spec on its branch: read fi
 Your prompt gives the spec file, the branch and worktree, the tasks, and on a later round what to fix.
 The prompt wins over anything here.
 
+## Reading, the costliest part of a run
+
+Every file read stays in your context and is paid again at each later step. So:
+
+- Start from the spec's Code map: it names the files, the line ranges and the type signatures.
+- Search first (Grep, Glob), then read only what the search points to.
+- Read by range (offset and limit) around what you need. Never read whole a large file: type
+  definitions (`*.d.ts`), generated code, lockfiles, minified or vendored files, fixtures.
+- Don't read a file again unless it changed; keep a note of what you learned instead.
+- Read several independent files in one step, not one per step.
+
 ## First round
 
-1. Read the spec whole, then the code it names. Follow the conventions you find there and the
+1. Read the spec whole, then the code its Code map names, by the ranges it gives. Follow the conventions you find there and the
    project's rules (CLAUDE.md, `.claude/rules/`).
 2. Work task by task, in the order the dependencies allow. For each one:
    - change only what the task needs; no refactors, renames or formatting beyond it;
