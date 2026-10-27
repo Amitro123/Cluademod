@@ -141,12 +141,17 @@ def test_end_to_end_main_drafts_on_revert(tmp_path):
     assert result.returncode == 0
     assert "auto-drafted" in result.stdout
     assert "[auto-draft]" in (repo / "MISTAKES.md").read_text(encoding="utf-8")
-    # Stop's additionalContext reaches the model with the next turn: the note asks for the routing
-    # before that reply goes on, not "before completing" a turn that is already over.
+    # Stop's additionalContext reaches the model at once, and the turn goes on for a reply to it.
     out = json.loads(result.stdout)["hookSpecificOutput"]
     assert out["hookEventName"] == "Stop"
-    assert "Before going on with this reply" in out["additionalContext"]
-    assert "before completing the turn" not in out["additionalContext"]
+    assert "Before you finish" in out["additionalContext"]
+    # Once per revert: a third run with nothing new says nothing.
+    again = subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        input=json.dumps({"cwd": str(repo)}),
+        capture_output=True, text=True, cwd=repo,
+    )
+    assert again.stdout.strip() == ""
 
 
 def _after(repo: Path, *commands: list[str]):
