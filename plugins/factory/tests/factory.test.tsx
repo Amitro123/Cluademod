@@ -1115,3 +1115,25 @@ describe('a run\'s name from a feature in any script', () => {
     expect(slugOf('x'.repeat(100) + ' שלום').length).toBeLessThanOrEqual(48)
   })
 })
+
+describe('the frame timer', () => {
+  test('runs only while a run is live', async ($, on) => {
+    let frames = 0
+    on('state.set', (_, e, next) => {
+      if ((e as { key?: string }).key === 'frame') frames++
+      return next(e)
+    })
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await w.clock.advance(5_000)
+    expect(frames).toBe(0)
+    await command($, 'Rate limiter')
+    await w.clock.advance(1_400)
+    expect(frames).toBeGreaterThan(0)
+    await command($, 'stop')
+    await w.clock.advance(1_400)
+    const after = frames
+    await w.clock.advance(5_000)
+    expect(frames).toBe(after)
+  })
+})

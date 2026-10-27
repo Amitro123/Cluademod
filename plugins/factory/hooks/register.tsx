@@ -208,6 +208,7 @@ async function start($: EngineInterface, args: string): Promise<string> {
   await keepOutOfGit($, root)
   await readTheme($)
   await update($, run, () => created)
+  await ensureTicking($)
   void $.ui.open({ id: PANE, title: PANE_TITLE })
   await serial(async () => void (await spawnRole($, 'spec', specPrompt(created))))
   return `Factory run started: ${titleOf(created.feature, 120)}. Branch ${created.branch}, worktree ${created.worktree}; the spec-writer is writing ${created.specFile}.`
@@ -645,9 +646,16 @@ function actions($: EngineInterface, r: Run): { key: string; label: string; pres
   return [{ key: 'retry', label: 'Retry', press: () => retryNow($) }]
 }
 
+// The diagram's frame timer runs only while a run is live: started with one, stopped once it ends.
 async function tick($: EngineInterface) {
   const r = await read($, run)
-  if (r && isLive(r.phase) && !waitsOnPerson(r.phase)) await update($, frame, f => f + 1)
+  if (!r || !isLive(r.phase)) return void timers.splice(0).forEach(t => t.cancel())
+  if (!waitsOnPerson(r.phase)) await update($, frame, f => f + 1)
+}
+
+async function ensureTicking($: EngineInterface) {
+  const r = await read($, run)
+  if (r && isLive(r.phase) && !timers.length) timers.push($.clock.every(FRAME_MS, () => tick($)))
 }
 
 export const register: Register = (on, options) => {
@@ -684,7 +692,7 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
       .catch(() => {})
-    timers.push($.clock.every(FRAME_MS, () => tick($)))
+    await ensureTicking($)
     return next(e)
   })
 
