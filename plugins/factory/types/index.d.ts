@@ -41,6 +41,9 @@ export type Run = {
   // The spec-writer's judgment of the feature, and the model each role runs on in this run.
   size?: Size
   models?: Partial<Record<Role, string>>
+  // The builder that built this run: each later round goes back to it (it keeps what it read and
+  // why), until it fails and a fresh one is started.
+  builderId?: string
   steps: Record<'spec' | 'builder' | 'checks' | 'approver', { state: StepState; tokens: number }>
   checks: Check[]
   reviews: Review[]

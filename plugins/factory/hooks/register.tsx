@@ -34,6 +34,8 @@ import {
   modelOf,
   modelsFor,
   parseSize,
+  parseSkills,
+  skillsLine,
 } from './flow'
 import { FACTORY_PLAN_APPROVED_ARG, FACTORY_START_TOOL, factoryArgs, parseFactoryArgs, parseGoalPrompt, parsePlanOutcome, parseStartPrompt, toolText } from './texts'
 
@@ -65,6 +67,7 @@ let autoPr = false
 // A goal set in goal-run, or a to-do item started in followups, becomes a factory run.
 let takeOver = true
 let modelsOption: 'auto' | 'fixed' = 'auto'
+let skillsOption: Partial<Record<Role, string[]>> = {}
 // Transitions run one at a time: two reviewers finishing together must not both start the approver.
 // Every spawn and every agent's completion goes through this queue, so a completion is handled only
 // after the job that spawned its agent has recorded the agent's id.
@@ -111,6 +114,8 @@ async function spawnRole($: EngineInterface, role: Role, prompt: string, { onSes
   const r = await read($, run)
   if (!r || !isLive(r.phase)) return false
   const spec = ROLES[role]
+  const skills = skillsOption[role]
+  if (skills?.length) prompt = `${skillsLine(skills)}\n\n${prompt}`
   const base = { prompt, description: `factory · ${describe(role, r)}`, ...(onSessionModel ? {} : { model: modelOf(r, role) }), cwd: r.worktree }
   let res = await $.agent.spawn({ ...base, subagentType: `factory:${spec.name}` }).catch(err => ({ deny: String(err) }) as { deny: string })
   if ('deny' in res && res.deny) {
@@ -129,6 +134,7 @@ async function spawnRole($: EngineInterface, role: Role, prompt: string, { onSes
   await patch($, cur => ({
     ...cur,
     agents: { ...cur.agents, [id]: role },
+    ...(role === 'builder' ? { builderId: id } : {}),
     reviews: cur.reviews.map(x => (x.role === role ? { ...x, agentId: id } : x)),
   }))
   spawns.set(id, { role, prompt, hasModel: !onSessionModel, isRetry: onSessionModel })
@@ -265,10 +271,22 @@ async function respec($: EngineInterface, feedback = '') {
   if (r) await spawnRole($, 'spec', specPrompt(r, feedback))
 }
 
-async function startBuild($: EngineInterface, findings: Finding[], failed: Check[]) {
-  const note = failed.length ? 'fixing the checks' : findings.length ? `fixing ${findings.length} finding${findings.length === 1 ? '' : 's'}` : 'building'
+async function startBuild($: EngineInterface, findings: Finding[], failed: Check[], said = '') {
+  const note = said ? 'reworking it as you asked' : failed.length ? 'fixing the checks' : findings.length ? `fixing ${findings.length} finding${findings.length === 1 ? '' : 's'}` : 'building'
   const r = await patch($, cur => ({ ...moveTo(cur, 'build', note), steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'run' } } }))
-  if (r) await spawnRole($, 'builder', buildPrompt(r, findings, failed))
+  if (!r) return
+  // A later round goes back to the builder that built it: it keeps what it read and why, and its
+  // prompt cache. A message it can't take (gone, refused) starts a new builder with the whole job.
+  if (r.builderId) {
+    const prompt = buildPrompt(r, findings, failed, { again: true, note: said })
+    const sent = await $.session.send({ to: { agentId: r.builderId }, text: prompt }).then(x => x.isDelivered, () => false)
+    if (sent) {
+      const before = spawns.get(r.builderId)
+      spawns.set(r.builderId, { role: 'builder', prompt: buildPrompt(r, findings, failed, { note: said }), hasModel: before?.hasModel ?? true, isRetry: false })
+      return
+    }
+  }
+  await spawnRole($, 'builder', buildPrompt(r, findings, failed, { note: said }))
 }
 
 // What the builder left uncommitted is committed by the factory: reviewers and the PR see the same
@@ -402,13 +420,13 @@ async function onApprover($: EngineInterface, answer: string, why: string) {
   const { decision, reason } = parseDecision(answer)
   if (decision === 'ESCALATE') {
     await block($, { on: 'escalate' }, reason, r => ({ ...r, steps: { ...r.steps, approver: { ...r.steps.approver, state: 'changes' } } }))
-    $.ui.toast('The factory needs you: Approve PR, or /factory stop')
+    $.ui.toast('The factory needs you: Approve PR, /factory rework <what to change>, or /factory stop')
     return
   }
   // The approver is an agent: the PR, outward-facing, waits for the person unless autoPr is on.
   if (autoPr) return finish($, reason)
   await patch($, r => ({ ...moveTo(r, 'ready', `approved${reason ? `: ${reason}` : ''}. Open the PR when you're ready`), steps: { ...r.steps, approver: { ...r.steps.approver, state: 'pass' } } }))
-  $.ui.toast('The approver approved the change: Open PR in the factory band, or /factory approve')
+  $.ui.toast('The approver approved the change: Open PR in the factory band, /factory approve, or /factory rework <what to change>')
 }
 
 // Approved by the person (or by the approver, with autoPr on): the main Claude opens the PR.
@@ -434,7 +452,7 @@ async function onAgentDone($: EngineInterface, agentId: string, answer: string, 
   if (role === 'spec') return r.phase === 'spec' ? onSpec($, answer, why) : undefined
   if (role === 'builder') {
     if (r.phase !== 'build') return
-    if (why) return block($, { on: 'builder' }, `The builder stopped: ${why}.`, cur => ({ ...cur, steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'fail' } } }))
+    if (why) return block($, { on: 'builder' }, `The builder stopped: ${why}.`, cur => ({ ...cur, builderId: undefined, steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'fail' } } }))
     return onBuilt($)
   }
   if (role === 'approver') return r.phase === 'approve' ? onApprover($, answer, why) : undefined
@@ -494,6 +512,18 @@ async function retryNow($: EngineInterface): Promise<string> {
   return `Retrying: ${b.on === 'start' ? `starting the ${describe(b.role, r)}` : b.on === 'setup' ? 'the setup and the checks' : b.on === 'checks' ? 'the checks' : `the ${b.on === 'spec' ? 'spec-writer' : 'builder'}`}.`
 }
 
+// The person sends the change back to the builder with their own words: once the run waits for
+// them (the PR ready, an escalation, a step that stopped after the build).
+async function reworkNow($: EngineInterface, said: string): Promise<string> {
+  const r = await read($, run)
+  if (!r || !isLive(r.phase)) return 'No factory run to rework.'
+  if (!said) return 'Say what to change: /factory rework <what to change>'
+  if (r.phase !== 'ready' && r.phase !== 'needs-human') return `Not now: the run is ${r.note}. /factory rework sends it back once it waits for you.`
+  if (r.steps.builder.state === 'wait') return 'Nothing is built yet: /factory retry runs the step that stopped.'
+  void serial(() => startBuild($, [], [], said))
+  return `Sent back to the builder: ${said}`
+}
+
 async function stopNow($: EngineInterface): Promise<string> {
   const r = await patch($, cur => (isLive(cur.phase) ? moveTo(cur, 'stopped', 'stopped by the person') : cur))
   if (r) await update($, stoppedAgents, ids => [...ids.filter(id => !r.agents[id]), ...Object.keys(r.agents)].slice(-MAX_STOPPED))
@@ -521,14 +551,15 @@ export const register: Register = (on, options) => {
   autoPr = String(options.autoPr ?? 'off') === 'on'
   takeOver = String(options.takeOver ?? 'on') !== 'off'
   modelsOption = String(options.models ?? 'auto') === 'fixed' ? 'fixed' : 'auto'
+  skillsOption = parseSkills(String(options.skills ?? ''))
 
   on('session.start', async ($, e, next) => {
     for (const t of timers.splice(0)) t.cancel()
-    await $.command.register({ name: 'factory', description: 'Run a feature through the software factory: spec, plan, build, checks, reviews, approval', argumentHint: '<feature> | approve | retry | stop' })
+    await $.command.register({ name: 'factory', description: 'Run a feature through the software factory: spec, plan, build, checks, reviews, approval', argumentHint: '<feature> | approve | retry | rework <note> | stop' })
     for (const role of Object.keys(ROLES) as Role[]) {
       const spec = ROLES[role]
       await $.agent
-        .register({ name: spec.name, description: `The factory's ${spec.label}: started by /factory runs only.`, prompt: ROLE_PROMPTS[role], model: spec.model, ...(spec.tools ? { tools: spec.tools } : {}) })
+        .register({ name: spec.name, description: `The factory's ${spec.label}: started by /factory runs only.`, prompt: ROLE_PROMPTS[role], model: spec.model, ...(spec.tools ? { tools: skillsOption[role]?.length ? [...spec.tools, 'Skill'] : spec.tools } : {}) })
         .catch(() => {})
     }
     // Last, and allowed to fail: the rest of the start must not depend on it.
@@ -597,6 +628,7 @@ export const register: Register = (on, options) => {
     if (arg === 'approve' || arg === FACTORY_PLAN_APPROVED_ARG) return { text: await approveNow($) }
     if (arg === 'retry') return { text: await retryNow($) }
     if (arg === 'stop') return { text: await stopNow($) }
+    if (arg === 'rework' || arg.startsWith('rework ')) return { text: await reworkNow($, arg.slice(6).trim()) }
     if (!arg) {
       await $.ui.open({ id: PANE, title: PANE_TITLE })
       const r = await read($, run)
