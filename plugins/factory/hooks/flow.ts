@@ -181,6 +181,28 @@ export function specPrompt(run: Run, feedback = ''): string {
   ].join('\n')
 }
 
+// What a builder that stopped mid-job is told when it's sent on: it keeps its own context, so only
+// to pick up where it was, after checking what it already left in the worktree.
+export const resumePrompt = (why: string) =>
+  `You stopped before finishing${why ? ` (${why})` : ''}. Carry on from where you stopped: check \`git status\` and \`git log\` in this worktree for what you already did, and don't redo it. Commit when done, and end with the two-line summary of what you changed.`
+
+// A new builder on a worktree that already has work in it (the one before stopped and couldn't be
+// sent on): what is there, from git, so it starts from it instead of reading its way back.
+export function progressNote(log: string, status: string): string {
+  const commits = log.trim().split('\n').filter(Boolean)
+  const changed = status.trim().split('\n').filter(Boolean)
+  if (!commits.length && !changed.length) return ''
+  return [
+    'A builder before you started this job and stopped; its work is in this worktree. Start from it, check it against the spec, and do what is left; don\'t redo it.',
+    ...(commits.length ? [`Its commits (newest first):`, ...commits.slice(0, 20).map(c => `- ${c}`)] : []),
+    ...(changed.length ? [`Uncommitted changes:`, ...changed.slice(0, 30).map(c => `- ${c.trim()}`)] : []),
+  ].join('\n')
+}
+
+// An API error no other model gets past (a spend or rate limit, quota, overload): the run waits for
+// the person's Retry instead of trying the session's model at once.
+export const isLimitError = (why: string) => /spend limit|rate limit|usage limit|quota|overloaded|429|529|credit/i.test(why)
+
 // The builder's prompt: the whole job for a new builder; for the builder that built it before
 // (`again`), only what to fix this round. A note is the person's own, sent back with /factory rework.
 export function buildPrompt(run: Run, findings: Finding[], failed: Check[], { again = false, note = '' } = {}): string {

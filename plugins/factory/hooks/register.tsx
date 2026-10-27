@@ -39,6 +39,9 @@ import {
   skillsLine,
   builtinSkill,
   lastLines,
+  isLimitError,
+  progressNote,
+  resumePrompt,
 } from './flow'
 import { FACTORY_PLAN_APPROVED_ARG, FACTORY_START_TOOL, factoryArgs, parseFactoryArgs, parseGoalPrompt, parsePlanOutcome, parseStartPrompt, toolText } from './texts'
 
@@ -119,6 +122,13 @@ async function spawnRole($: EngineInterface, role: Role, prompt: string, { onSes
   const r = await read($, run)
   if (!r || !isLive(r.phase)) return false
   const spec = ROLES[role]
+  const job = prompt
+  // A builder started on a worktree that already has work: told what is there, from git.
+  if (role === 'builder') {
+    const [log, status] = await Promise.all([git($, ['log', '--oneline', `${r.base}..HEAD`], r.worktree), git($, ['status', '--porcelain'], r.worktree)])
+    const note = progressNote(log.exitCode === 0 ? log.stdout : '', status.exitCode === 0 ? status.stdout : '')
+    if (note) prompt = `${note}\n\n${prompt}`
+  }
   const skills = skillsOf(role)
   if (skills.length) prompt = `${skillsLine(skills)}\n\n${prompt}`
   const base = { prompt, description: `factory · ${describe(role, r)}`, ...(onSessionModel ? {} : { model: modelOf(r, role) }), cwd: r.worktree }
@@ -142,7 +152,7 @@ async function spawnRole($: EngineInterface, role: Role, prompt: string, { onSes
     ...(role === 'builder' ? { builderId: id } : {}),
     reviews: cur.reviews.map(x => (x.role === role ? { ...x, agentId: id } : x)),
   }))
-  spawns.set(id, { role, prompt, hasModel: !onSessionModel, isRetry: onSessionModel })
+  spawns.set(id, { role, prompt: job, hasModel: !onSessionModel, isRetry: onSessionModel })
   return true
 }
 
@@ -304,14 +314,15 @@ async function respec($: EngineInterface, feedback = '') {
   if (r) await spawnRole($, 'spec', specPrompt(r, feedback))
 }
 
-async function startBuild($: EngineInterface, findings: Finding[], failed: Check[], said = '') {
-  const note = said ? 'reworking it as you asked' : failed.length ? 'fixing the checks' : findings.length ? `fixing ${findings.length} finding${findings.length === 1 ? '' : 's'}` : 'building'
+async function startBuild($: EngineInterface, findings: Finding[], failed: Check[], said = '', resume = '') {
+  const note = resume ? 'the builder carries on' : said ? 'reworking it as you asked' : failed.length ? 'fixing the checks' : findings.length ? `fixing ${findings.length} finding${findings.length === 1 ? '' : 's'}` : 'building'
   const r = await patch($, cur => ({ ...moveTo(cur, 'build', note), steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'run' } } }))
   if (!r) return
   // A later round goes back to the builder that built it: it keeps what it read and why, and its
   // prompt cache. A message it can't take (gone, refused) starts a new builder with the whole job.
   if (r.builderId) {
-    const prompt = buildPrompt(r, findings, failed, { again: true, note: said })
+    // A builder that stopped mid-job carries on; one that finished a round gets the next.
+    const prompt = resume ? resumePrompt(resume) : buildPrompt(r, findings, failed, { again: true, note: said })
     const sent = await $.session.send({ to: { agentId: r.builderId }, text: prompt }).then(x => x.isDelivered, () => false)
     if (sent) {
       const before = spawns.get(r.builderId)
@@ -495,7 +506,7 @@ async function onAgentDone($: EngineInterface, agentId: string, answer: string, 
   // An API error on the role's own model (one the account can't use, say): once, the same agent
   // again on the session's model.
   const spawn = spawns.get(agentId)
-  if (isApiError && spawn && spawn.hasModel && !spawn.isRetry) {
+  if (isApiError && spawn && spawn.hasModel && !spawn.isRetry && !isLimitError(why)) {
     await patch($, cur => ({ ...cur, note: `the ${describe(role, cur)} failed on ${modelOf(cur, role)} (${why}); trying the session's model` }))
     if (await spawnRole($, role, spawn.prompt, { onSessionModel: true })) return
   }
@@ -504,7 +515,7 @@ async function onAgentDone($: EngineInterface, agentId: string, answer: string, 
   if (role === 'builder') {
     if (r.phase !== 'build') return
     if (!why && answer.trim()) await patch($, cur => ({ ...cur, summary: lastLines(answer, 2) }))
-    if (why) return block($, { on: 'builder' }, `The builder stopped: ${why}.`, cur => ({ ...cur, builderId: undefined, steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'fail' } } }))
+    if (why) return block($, { on: 'builder', why }, `The builder stopped: ${why}.${isLimitError(why) ? ' Retry once the limit is lifted: the same builder carries on.' : ''}`, cur => ({ ...cur, steps: { ...cur.steps, builder: { ...cur.steps.builder, state: 'fail' } } }))
     return onBuilt($)
   }
   if (role === 'approver') return r.phase === 'approve' ? onApprover($, answer, why) : undefined
@@ -547,7 +558,7 @@ async function retryNow($: EngineInterface): Promise<string> {
   const b = r.blocked
   void serial(async () => {
     if (b.on === 'spec') return respec($)
-    if (b.on === 'builder') return startBuild($, openFindings(r.reviews.filter(x => x.round === r.round)), r.checks.filter(c => !c.ok))
+    if (b.on === 'builder') return startBuild($, openFindings(r.reviews.filter(x => x.round === r.round)), r.checks.filter(c => !c.ok), '', b.why ?? '')
     if (b.on === 'checks' || b.on === 'setup') {
       await patch($, cur => ({ ...cur, checkRound: 0 }))
       return runChecks($)

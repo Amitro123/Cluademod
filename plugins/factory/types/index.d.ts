@@ -19,7 +19,8 @@ export type Phase = 'spec' | 'plan' | 'build' | 'checks' | 'review' | 'approve' 
 export type Blocked =
   | { on: 'escalate' }
   | { on: 'spec' }
-  | { on: 'builder' }
+  // why: the builder stopped mid-job (not just failed to commit): Retry sends it on.
+  | { on: 'builder'; why?: string }
   | { on: 'checks' }
   | { on: 'setup' }
   | { on: 'start'; role: Role }
