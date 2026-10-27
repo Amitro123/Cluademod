@@ -161,8 +161,16 @@ export function titleOf(feature: string, n = 60): string {
   return sentence.length > n ? `${sentence.slice(0, n - 1).trimEnd()}…` : sentence
 }
 
-export const slugOf = (feature: string) =>
-  feature.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'feature'
+// A branch and folder name from the feature: its Latin letters and digits. A feature written partly
+// or wholly in another script (Hebrew, say) keeps too little of itself that way, so it gets a short
+// stable hash of the whole text, and two such features don't share a name.
+export function slugOf(feature: string): string {
+  const latin = feature.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40).replace(/-$/, '')
+  if (latin && !/[^\x00-\x7f]/.test(feature)) return latin
+  let h = 0x811c9dc5
+  for (const c of feature.trim()) h = Math.imul(h ^ c.codePointAt(0)!, 0x01000193) >>> 0
+  return `${latin || 'feature'}-${h.toString(36).padStart(7, '0').slice(-7)}`
+}
 
 export function specPrompt(run: Run, feedback = ''): string {
   return [

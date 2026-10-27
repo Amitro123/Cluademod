@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cleanFeature, detectChecks, detectSetup, leftOut, neverCommit, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
+import { cleanFeature, detectChecks, detectSetup, leftOut, neverCommit, slugOf, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
 import { factoryArgs, goalPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -1090,5 +1090,18 @@ describe('commands the factory found run only once you let them', () => {
     await toReviews($)
     expect(w.asked.filter(q => q.startsWith('Before the factory runs'))).toEqual([])
     expect(w.ran).toContain('npm test')
+  })
+})
+
+describe('a run\'s name from a feature in any script', () => {
+  test('Latin as before; Hebrew gets a stable hash, different features different names, git-ref-safe', () => {
+    expect(slugOf('Rate limiter for the API')).toBe('rate-limiter-for-the-api')
+    const a = slugOf('תקן את הראוטר')
+    const b = slugOf('הוסף מטמון')
+    expect(a).toMatch(/^feature-[0-9a-z]{7}$/)
+    expect(a).toBe(slugOf('תקן את הראוטר'))
+    expect(a).not.toBe(b)
+    expect(slugOf('תקן את model-router לפי ROUTER_ISSUES.md')).toMatch(/^model-router-router-issues-md-[0-9a-z]{7}$/)
+    expect(slugOf('x'.repeat(100) + ' שלום').length).toBeLessThanOrEqual(48)
   })
 })
