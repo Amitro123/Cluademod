@@ -151,7 +151,15 @@ export const cleanFeature = (text: string) =>
 
 // To the main Claude, when the factory takes over a goal or a to-do item: the work is the factory's.
 export const takeOverNote = (feature: string) =>
-  `The factory took this over: "${feature.split('\n')[0]!.slice(0, 200)}". Its spec-writer writes the spec and its builder does the work, in a worktree of its own. Don't start the work or propose a plan yourself; answer in one line that the factory is on it.`
+  `The factory took this over: "${titleOf(feature, 200)}". Its spec-writer writes the spec and its builder does the work, in a worktree of its own. Don't start the work or propose a plan yourself; answer in one line that the factory is on it.`
+
+// A run's name where a line is all there is (the band, a dialog's first line): the feature's first
+// sentence, clipped. A feature is often a whole paragraph of instructions.
+export function titleOf(feature: string, n = 60): string {
+  const line = feature.trim().split('\n')[0]!.trim()
+  const sentence = /^(.+?[.!?])(\s|$)/.exec(line)?.[1] ?? line
+  return sentence.length > n ? `${sentence.slice(0, n - 1).trimEnd()}…` : sentence
+}
 
 export const slugOf = (feature: string) =>
   feature.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'feature'
@@ -177,11 +185,13 @@ export function specPrompt(run: Run, feedback = ''): string {
 export function buildPrompt(run: Run, findings: Finding[], failed: Check[], { again = false, note = '' } = {}): string {
   const tasks = run.tasks.map((t, i) => `- t${i + 1}: ${t.title}`)
   const head = again
-    ? [`Another round on the change you built for: ${run.feature.split('\n')[0]}`, `Same branch ${run.branch} and worktree. Fix what follows, keep the rest as it is, and commit.`]
+    ? [`Another round on the change you built for: ${titleOf(run.feature, 200)}`, `Same branch ${run.branch} and worktree. Fix what follows, keep the rest as it is, and commit.`]
     : [
         `Implement the spec in ${run.specFile} for: ${run.feature}`,
         `You are on branch ${run.branch}, in its own worktree. Commit your work to this branch when done.`,
-        'The tasks (in the session goal, if goal-run is installed: mark each with mcp__goal-run__update as in_progress, then done):',
+        // Marked in goal-run only when its plan is the session goal: when goal-run kept the person's own
+        // goal, its t1, t2... are the person's tasks, not these.
+        run.gate === 'goal-run' ? 'The tasks (in the session goal: mark each with mcp__goal-run__update as in_progress, then done):' : 'The tasks:',
         ...tasks,
       ]
   return [

@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cleanFeature, detectChecks, detectSetup, modelsFor, parseDecision, parseSize, parseSkills, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
+import { cleanFeature, detectChecks, detectSetup, modelsFor, parseDecision, parseSize, parseSkills, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
 import { factoryArgs, goalPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -29,7 +29,7 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '' } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
   const sent: string[] = []
@@ -116,7 +116,7 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: { model: 'm', input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as never
   })
   // goal-run's plan tool, as it answers for a factory plan the person approved.
-  on('tool.call', { tool: PLAN }, () => ({ result: PLAN_APPROVED_FOR_FACTORY }) as never)
+  on('tool.call', { tool: PLAN }, () => ({ result: keepsGoal ? PLAN_KEPT_FOR_FACTORY : PLAN_APPROVED_FOR_FACTORY }) as never)
   on('tool.call', { tool: 'Edit' }, () => ({ result: 'edited' }) as never)
   // The engine's question dialog: the next answer, or dismissed when none is left.
   const asked: string[] = []
@@ -909,5 +909,47 @@ describe('what the factory did, and the PR asked in the conversation', () => {
     await answer($, 'a5', 'DECISION: ESCALATE\nREASON: the spec asks for Redis, the build uses memory')
     expect(w.asked.at(-1)).toMatch(/was escalated by the approver[\s\S]*Approve it anyway\?/)
     expect(w.sends.at(-1)!.text).toContain('The person sent the change back: Keep the memory store, add a TODO for Redis')
+  })
+})
+
+describe('a long feature reads as a short title', () => {
+  const LONG = 'Fix the 9 model-router issues in ROUTER_ISSUES.md, in both register.tsx and register-router.tsx. Regression tests for each fix, then regenerate the plugin and run the checks. Do not commit or push.'
+
+  test('its first sentence, clipped; a short one as it is', () => {
+    expect(titleOf(LONG)).toBe('Fix the 9 model-router issues in ROUTER_ISSUES.md, in both…')
+    expect(titleOf('Rate limiter')).toBe('Rate limiter')
+    expect(titleOf('Add a cache. Then more.')).toBe('Add a cache.')
+  })
+
+  test('the band shows the title on one line; the pane has the whole request under it', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await $.command.run({ command: 'factory', args: LONG } as never)
+    await settled()
+    const t = await bandText($)
+    expect(t).toMatch(/^🏭 Fix the 9 model-router issues in ROUTER_ISSUES\.md, in both… \| · writing the spec/)
+    expect(t).not.toContain('Do not commit')
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toContain('Do not commit or push.')
+    await pane.unmount()
+  })
+})
+
+describe("the builder marks goal-run's tasks only when they are the factory's", () => {
+  test('goal-run kept your own goal: the builder is not told to mark its t1, t2...', async ($, on) => {
+    const w = engine(on, { answers: ['Approve and build'], keepsGoal: true })
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks: [{ title: 'x', priority: 'high' }] } as never)
+    await settled()
+    expect(last(w)).toMatchObject({ subagentType: 'factory:builder' })
+    expect(last(w).prompt).not.toContain('mcp__goal-run__update')
+    expect(last(w).prompt).toContain('The tasks:\n- t1: Token bucket core')
+  })
+
+  test("the factory's plan is the session goal: the builder marks its tasks", async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    expect(w.spawned.find(s => s.subagentType === 'factory:builder')!.prompt).toContain('mark each with mcp__goal-run__update')
   })
 })

@@ -23,6 +23,7 @@ import {
   ROLE_PROMPTS,
   ROLES,
   slugOf,
+  titleOf,
   specPrompt,
   splitChecks,
   tailOf,
@@ -172,7 +173,7 @@ async function start($: EngineInterface, args: string): Promise<string> {
   const followupId = parsed.followupId
   if (!feature) return 'What should the factory build? /factory <feature>'
   const cur = await read($, run)
-  if (cur && isLive(cur.phase)) return `A factory run is already going: ${cur.feature}. /factory stop ends it.`
+  if (cur && isLive(cur.phase)) return `A factory run is already going: ${titleOf(cur.feature, 120)}. /factory stop ends it.`
   const top = await git($, ['rev-parse', '--show-toplevel'])
   if (top.exitCode !== 0) return 'The factory needs a git repository: it builds on a branch, in a worktree of its own.'
   const root = top.stdout.trim()
@@ -195,7 +196,7 @@ async function start($: EngineInterface, args: string): Promise<string> {
   await update($, run, () => created)
   void $.ui.open({ id: PANE, title: PANE_TITLE })
   await serial(async () => void (await spawnRole($, 'spec', specPrompt(created))))
-  return `Factory run started: ${created.feature}. Branch ${created.branch}, worktree ${created.worktree}; the spec-writer is writing ${created.specFile}.`
+  return `Factory run started: ${titleOf(created.feature, 120)}. Branch ${created.branch}, worktree ${created.worktree}; the spec-writer is writing ${created.specFile}.`
 }
 
 // The worktrees live in .factory/ of the repository: listed in its exclude file, found through
@@ -248,7 +249,7 @@ async function askPr($: EngineInterface) {
   if (!r || (r.phase !== 'ready' && !escalated)) return
   const yes = escalated ? APPROVE_ANYWAY : OPEN_PR
   const lines = [
-    `The factory's change for "${r.feature.split('\n')[0]!.slice(0, 120)}" ${escalated ? 'was escalated by the approver' : 'was approved'}: ${r.note}`,
+    `The factory's change for "${titleOf(r.feature, 120)}" ${escalated ? 'was escalated by the approver' : 'was approved'}: ${r.note}`,
     ...(r.stat || r.summary ? [`Changed: ${[r.stat, r.summary].filter(Boolean).join(' · ')}`] : []),
     `Branch ${r.branch}${r.recorded ? `; what each step said is in ${r.record}/` : ''}.`,
     '',
@@ -276,7 +277,7 @@ async function askPlan($: EngineInterface) {
   const tasks = r.tasks.map((t, i) => `${i + 1}. [${t.priority}] ${t.title}`).join('\n')
   let answer = ''
   try {
-    answer = await $.ui.ask(`The factory's plan for "${r.feature.split('\n')[0]!.slice(0, 120)}"${r.size ? ` (${r.size})` : ''}, spec in ${r.specFile}:\n${tasks}\n\nApprove it, and the builder starts? To change it, say what under Other.`, { header: 'Factory plan', options: [APPROVE_PLAN, NOT_NOW] })
+    answer = await $.ui.ask(`The factory's plan for "${titleOf(r.feature, 120)}"${r.size ? ` (${r.size})` : ''}, spec in ${r.specFile}:\n${tasks}\n\nApprove it, and the builder starts? To change it, say what under Other.`, { header: 'Factory plan', options: [APPROVE_PLAN, NOT_NOW] })
   } catch {
     return
   }
@@ -335,7 +336,7 @@ async function onBuilt($: EngineInterface) {
     let out = await git($, ['add', '-u'], r.worktree)
     if (out.exitCode === 0 && fresh.length) out = await git($, ['add', '--', ...fresh], r.worktree)
     const staged = out.exitCode === 0 ? await git($, ['diff', '--cached', '--quiet'], r.worktree) : out
-    if (out.exitCode === 0 && staged.exitCode !== 0) out = await git($, ['commit', '-m', `factory: ${r.feature}`], r.worktree)
+    if (out.exitCode === 0 && staged.exitCode !== 0) out = await git($, ['commit', '-m', `factory: ${titleOf(r.feature, 64)}`, ...(titleOf(r.feature, 64) !== r.feature.trim() ? ['-m', r.feature.trim()] : [])], r.worktree)
     if (out.exitCode !== 0) {
       await block($, { on: 'builder' }, `The builder's work could not be committed: ${tailOf(`${out.stdout}\n${out.stderr}`, 2)}`)
       return
@@ -683,7 +684,7 @@ export const register: Register = (on, options) => {
     if (!arg) {
       await $.ui.open({ id: PANE, title: PANE_TITLE })
       const r = await read($, run)
-      if (r && isLive(r.phase)) return { text: `${r.feature}: ${r.note}.` }
+      if (r && isLive(r.phase)) return { text: `${titleOf(r.feature, 120)}: ${r.note}.` }
       // Nothing running: Claude names the work from the conversation and starts it with the tool.
       // From a timer: a prompt submitted while the command's own hook still runs is refused.
       $.clock.after(1, () => void $.prompt.submit({ text: FROM_CONVERSATION }).catch(() => $.ui.toast('/factory <feature> starts a run')))
@@ -739,7 +740,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" gap={1} paddingX={1} alignItems="center">
-          <Text bold color={waitsOnPerson(r.phase) ? '#d97706' : ACCENT}>{`🏭 ${r.feature}`}</Text>
+          <Text bold color={waitsOnPerson(r.phase) ? '#d97706' : ACCENT} wrap="truncate-end">{`🏭 ${titleOf(r.feature)}`}</Text>
           <Text dimColor wrap="truncate-end">{`· ${r.note} · ${tok(tokensOf(r))} tokens`}</Text>
           {r.phase === 'plan' && r.gate === 'factory' ? <Button key="f-approve-plan" label="Approve plan" variant="primary" onPress={() => approveNow($)} /> : null}
           {actions($, r).map(a => <Button key={`f-${a.key}`} label={a.label} variant="primary" onPress={a.press} />)}
@@ -771,7 +772,8 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
-          <Text bold color={ACCENT}>{`🏭 ${r.feature}`}</Text>
+          <Text bold color={ACCENT} wrap="truncate-end">{`🏭 ${titleOf(r.feature)}`}</Text>
+          {titleOf(r.feature) !== r.feature.trim() ? <Text dimColor wrap="wrap">{r.feature.trim()}</Text> : null}
           <Text dimColor wrap="truncate-end">{`${r.note} · ${tok(tokensOf(r))} tokens · spec ${r.specFile}`}</Text>
           {r.stat || r.summary ? <Text wrap="wrap">{`Changed: ${[r.stat, r.summary].filter(Boolean).join(' · ')}`}</Text> : null}
           {r.recorded ? <Text dimColor wrap="truncate-end">{`What each step said: ${r.record}/`}</Text> : null}
