@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cleanFeature, detectChecks, detectSetup, modelsFor, parseDecision, parseSize, parseSkills, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
+import { cleanFeature, detectChecks, detectSetup, modelsFor, parseDecision, parseSize, parseSkills, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
 import { factoryArgs, goalPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -909,5 +909,28 @@ describe('what the factory did, and the PR asked in the conversation', () => {
     await answer($, 'a5', 'DECISION: ESCALATE\nREASON: the spec asks for Redis, the build uses memory')
     expect(w.asked.at(-1)).toMatch(/was escalated by the approver[\s\S]*Approve it anyway\?/)
     expect(w.sends.at(-1)!.text).toContain('The person sent the change back: Keep the memory store, add a TODO for Redis')
+  })
+})
+
+describe('a long feature reads as a short title', () => {
+  const LONG = 'Fix the 9 model-router issues in ROUTER_ISSUES.md, in both register.tsx and register-router.tsx. Regression tests for each fix, then regenerate the plugin and run the checks. Do not commit or push.'
+
+  test('its first sentence, clipped; a short one as it is', () => {
+    expect(titleOf(LONG)).toBe('Fix the 9 model-router issues in ROUTER_ISSUES.md, in both…')
+    expect(titleOf('Rate limiter')).toBe('Rate limiter')
+    expect(titleOf('Add a cache. Then more.')).toBe('Add a cache.')
+  })
+
+  test('the band shows the title on one line; the pane has the whole request under it', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await $.command.run({ command: 'factory', args: LONG } as never)
+    await settled()
+    const t = await bandText($)
+    expect(t).toMatch(/^🏭 Fix the 9 model-router issues in ROUTER_ISSUES\.md, in both… \| · writing the spec/)
+    expect(t).not.toContain('Do not commit')
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toContain('Do not commit or push.')
+    await pane.unmount()
   })
 })
