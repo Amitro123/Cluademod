@@ -31,6 +31,9 @@ import {
   tokensOf,
   untrackedOf,
   waitsOnPerson,
+  modelOf,
+  modelsFor,
+  parseSize,
 } from './flow'
 import { FACTORY_PLAN_APPROVED_ARG, factoryArgs, parseFactoryArgs, parseGoalPrompt, parsePlanOutcome, parseStartPrompt, toolText } from './texts'
 
@@ -58,6 +61,7 @@ let setupOption = ''
 let autoPr = false
 // A goal set in goal-run, or a to-do item started in followups, becomes a factory run.
 let takeOver = true
+let modelsOption: 'auto' | 'fixed' = 'auto'
 // Transitions run one at a time: two reviewers finishing together must not both start the approver.
 // Every spawn and every agent's completion goes through this queue, so a completion is handled only
 // after the job that spawned its agent has recorded the agent's id.
@@ -104,7 +108,7 @@ async function spawnRole($: EngineInterface, role: Role, prompt: string, { onSes
   const r = await read($, run)
   if (!r || !isLive(r.phase)) return false
   const spec = ROLES[role]
-  const base = { prompt, description: `factory · ${describe(role, r)}`, ...(onSessionModel ? {} : { model: spec.model }), cwd: r.worktree }
+  const base = { prompt, description: `factory · ${describe(role, r)}`, ...(onSessionModel ? {} : { model: modelOf(r, role) }), cwd: r.worktree }
   let res = await $.agent.spawn({ ...base, subagentType: `factory:${spec.name}` }).catch(err => ({ deny: String(err) }) as { deny: string })
   if ('deny' in res && res.deny) {
     res = await $.agent.spawn({ ...base, subagentType: 'general-purpose', prompt: `${ROLE_PROMPTS[role]}\n\n${prompt}` }).catch(err => ({ deny: String(err) }) as { deny: string })
@@ -208,9 +212,12 @@ async function onSpec($: EngineInterface, answer: string, why: string) {
   }
   // goal-run is asked again: installed or removed since the run started, the plan goes where it can.
   const viaGoalRun = (await read($, run))?.gate === 'goal-run' && (await goalRunThere($))
+  const size = parseSize(answer)
   const r = await patch($, cur => ({
     ...moveTo(cur, 'plan', 'waiting for you to approve the plan'),
     tasks,
+    ...(size ? { size } : {}),
+    models: { ...modelsFor(size, modelsOption), spec: modelOf(cur, 'spec') },
     gate: viaGoalRun ? 'goal-run' : 'factory',
     steps: { ...cur.steps, spec: { ...cur.steps.spec, state: 'pass' } },
   }))
@@ -388,7 +395,7 @@ async function onAgentDone($: EngineInterface, agentId: string, answer: string, 
   // again on the session's model.
   const spawn = spawns.get(agentId)
   if (isApiError && spawn && spawn.hasModel && !spawn.isRetry) {
-    await patch($, cur => ({ ...cur, note: `the ${describe(role, cur)} failed on ${ROLES[role].model} (${why}); trying the session's model` }))
+    await patch($, cur => ({ ...cur, note: `the ${describe(role, cur)} failed on ${modelOf(cur, role)} (${why}); trying the session's model` }))
     if (await spawnRole($, role, spawn.prompt, { onSessionModel: true })) return
   }
   if (role === 'spec') return r.phase === 'spec' ? onSpec($, answer, why) : undefined
@@ -477,6 +484,7 @@ export const register: Register = (on, options) => {
   setupOption = String(options.setup ?? '')
   autoPr = String(options.autoPr ?? 'off') === 'on'
   takeOver = String(options.takeOver ?? 'on') !== 'off'
+  modelsOption = String(options.models ?? 'auto') === 'fixed' ? 'fixed' : 'auto'
 
   on('session.start', async ($, e, next) => {
     for (const t of timers.splice(0)) t.cancel()

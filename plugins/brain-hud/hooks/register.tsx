@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, PromptSubmitInput, Register } from 'claude-code'
 
 import type { Brain, EntryType, Folder, Offer, Pulse, PulseKind } from '../types'
 import { faceText, KIND_COLOR, SCENE, sceneSvg } from './art'
@@ -7,6 +7,8 @@ import { GRAPH, graphSvg, routeOf } from './graph'
 import type { Theme } from './graph'
 import { diffBrain, FOLDERS, SKILL, lessonCount, logPrompt, paraStats, parseMemory, parseMistakes, unrouted, withListing } from './brain'
 import type { ParaFile } from './brain'
+import { clockTime, contextLine, HANDOFF_TITLE, hasLoose, handoffEntry, insertBelowMarker, journalDoc, journalFile, JOURNAL_DIR, JOURNAL_LAST, journalText, looseEnds, stampOf, workerEntry } from './journal'
+import type { JournalEntry, JournalKind } from './journal'
 import { GOAL_REACHED, parseDoneResult, parseGoalClosedNote, parseGoalPrompt, parseStartPrompt, toolText } from './texts'
 
 const brain = atom({ plugin: 'brain-hud', key: 'brain' } as const, null as Brain | null)
@@ -21,6 +23,12 @@ const paneShown = atom({ plugin: 'brain-hud', key: 'paneShown' } as const, false
 const more = atom({ plugin: 'brain-hud', key: 'more' } as const, '')
 const theme = atom({ plugin: 'brain-hud', key: 'theme' } as const, 'dark' as Theme)
 const routeLater = atom({ plugin: 'brain-hud', key: 'routeLater' } as const, 0)
+const journal = atom({ plugin: 'brain-hud', key: 'journal' } as const, [] as JournalEntry[])
+// How many journal entries the main agent was last told of, beside a prompt.
+const told = atom({ plugin: 'brain-hud', key: 'told' } as const, 0)
+const doneIds = atom({ plugin: 'brain-hud', key: 'doneIds' } as const, [] as string[])
+const goalReached = atom({ plugin: 'brain-hud', key: 'goalReached' } as const, false)
+const handedOff = atom({ plugin: 'brain-hud', key: 'handedOff' } as const, false)
 
 const PANE = 'brain-hud'
 const PANE_TITLE = 'Brain'
@@ -39,6 +47,9 @@ const ACCENT = '#c96f97'
 const FOLLOWUPS_DONE = 'mcp__followups__done'
 const GOAL_PLAN = 'mcp__goal-run__plan'
 const GOAL_UPDATE = 'mcp__goal-run__update'
+const JOURNAL_TOOL = 'mcp__brain-hud__journal'
+// The journal keeps this many entries; the oldest go first.
+const JOURNAL_MAX = 200
 
 const VERB: Record<PulseKind, string> = {
   mistake: 'Logged a mistake',
@@ -57,6 +68,14 @@ let anim: { cancel: () => void } | null = null
 let mtimes = ''
 // Refreshes run one at a time, so an Edit and the poll that see the same change show it once.
 let refreshing: Promise<void> = Promise.resolve()
+// What each subagent was asked, by its id, for its report's journal line.
+const spawns = new Map<string, { task: string; type: string }>()
+// Tool calls already journaled: a call is seen at tool.call and again at classic.PostToolUse.
+const journaled = new Set<string>()
+let journalOn = true
+let handoffOn = true
+// The journal file is written one write at a time, each with the whole journal.
+let writing: Promise<void> = Promise.resolve()
 
 const lessons = (n: number) => `${n} ${n === 1 ? 'lesson' : 'lessons'}`
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
@@ -125,7 +144,84 @@ async function reread($: EngineInterface) {
   // Routed down below the count Later or Route now saw: the reminder counts from there.
   if (after) await update($, routeLater, n => Math.min(n, unrouted(after)))
   const ev = after ? diffBrain(before, after) : null
-  if (ev) await show($, ev)
+  if (!ev) return
+  await show($, ev)
+  if (ev.title !== HANDOFF_TITLE) await note($, 'memory', `${VERB[ev.kind]}: ${ev.title}`)
+}
+
+// ---------- the session journal ----------
+
+async function note($: EngineInterface, kind: JournalKind, text: string, call?: string) {
+  if (!journalOn || !text) return
+  if (call) {
+    if (journaled.has(call)) return
+    journaled.add(call)
+  }
+  await append($, { at: clockTime(await $.clock.now()), kind, text })
+}
+
+async function append($: EngineInterface, entry: JournalEntry) {
+  await update($, journal, list => [...list, entry].slice(-JOURNAL_MAX))
+  const entries = await read($, journal)
+  writing = writing.then(() => writeJournal($, entries), () => writeJournal($, entries))
+  await writing
+}
+
+// A copy on disk, in the project's .claude/brain/, for a later session or a person to read; kept out
+// of git through the repository's own exclude file.
+async function writeJournal($: EngineInterface, entries: readonly JournalEntry[]) {
+  const id = await $.session.id()
+  await $.fs.write(await rootPath($, journalFile(id)), journalDoc(id, entries)).catch(() => {})
+  if (entries.length === 1) await keepOutOfGit($)
+}
+
+async function keepOutOfGit($: EngineInterface) {
+  const root = await $.session.root()
+  const found = await $.process.run(['git', 'rev-parse', '--git-path', 'info/exclude'], { cwd: root, timeoutMs: 10_000 }).catch(() => null)
+  if (!found || found.exitCode !== 0 || !found.stdout.trim()) return
+  const rel = found.stdout.trim()
+  const path = /^([a-zA-Z]:)?[\\/]/.test(rel) ? rel : `${root.replace(/[\\/]$/, '')}/${rel}`
+  const text = await $.fs.read(path).then(t => String(t), () => '')
+  if (text.split('\n').some(l => l.trim() === `${JOURNAL_DIR}/`)) return
+  await $.fs.write(path, `${text}${text && !text.endsWith('\n') ? '\n' : ''}${JOURNAL_DIR}/\n`).catch(() => {})
+}
+
+// A subagent's answer: the routed-worker's report, or any other agent's last word.
+async function workerDone($: EngineInterface, agentId: string, answer: string) {
+  if (!journalOn) return
+  let s = spawns.get(agentId)
+  if (!s) {
+    // Spawned before a reload: the list still knows what it was asked.
+    const a = (await $.agent.list().catch(() => [])).find(x => x.id === agentId)
+    s = { task: a?.description ?? '', type: a?.type ?? '' }
+  }
+  const entry = workerEntry(clockTime(await $.clock.now()), s.task, s.type, answer)
+  if (entry) await append($, entry)
+}
+
+// One line beside a prompt when the journal grew since the last one, so the main agent knows there
+// is more than its own bottom lines and where to read it.
+async function withJournal($: EngineInterface, e: PromptSubmitInput): Promise<PromptSubmitInput> {
+  if (!journalOn || e.command) return e
+  const entries = await read($, journal)
+  if (entries.length <= (await read($, told))) return e
+  await update($, told, () => entries.length)
+  return { ...e, context: [...(e.context ?? []), contextLine(entries, JOURNAL_TOOL)] }
+}
+
+// At the end, what the session leaves open goes to MISTAKES.md as a handoff draft for the next one.
+async function handOff($: EngineInterface) {
+  if (!journalOn || !handoffOn || (await read($, handedOff))) return
+  const entries = await read($, journal)
+  if (!entries.length) return
+  const loose = looseEnds(entries, await read($, started), await read($, doneIds), { text: await read($, goalText), reached: await read($, goalReached) })
+  if (!hasLoose(loose)) return
+  const text = await readOr($, MISTAKES)
+  if (text === null) return
+  const next = insertBelowMarker(text, handoffEntry(stampOf(await $.clock.now()), entries, loose, journalFile(await $.session.id())))
+  if (next === null) return
+  await update($, handedOff, () => true)
+  await $.fs.write(await rootPath($, MISTAKES), next).catch(() => {})
 }
 
 async function show($: EngineInterface, ev: Omit<Pulse, 'at'>) {
@@ -166,22 +262,31 @@ async function logIt($: EngineInterface, o: Offer, type: EntryType) {
 }
 
 // A follow-up Claude finished may be worth remembering: a bug as a mistake, else a success.
-async function followupDone($: EngineInterface, rawId: unknown, result: string) {
+async function followupDone($: EngineInterface, rawId: unknown, result: string, call?: string) {
   const m = parseDoneResult(result)
   if (!m) return
   const id = String(rawId ?? '')
+  if (id) await update($, doneIds, l => (l.includes(id) ? l : [...l, id].slice(-50)))
+  await note($, 'todo', `${m.title}${m.note ? ` — ${clip(m.note, 160)}` : ''}`, call)
   const item = (await read($, started)).find(x => x.id === id)
   const types: EntryType[] = item?.isBug ? ['mistake', 'success', 'decision'] : ['success', 'decision', 'mistake']
   await offer($, { key: `fu:${id || m.title}`, from: 'followups', title: m.title, detail: m.note, types })
 }
 
-async function goalPlanned($: EngineInterface, rawGoal: unknown) {
+async function goalPlanned($: EngineInterface, rawGoal: unknown, result: string, call?: string) {
   const text = String(rawGoal ?? '').trim()
   if (text) await update($, goalText, () => text)
+  if (/^Approved\./.test(result)) {
+    await update($, goalReached, () => false)
+    await note($, 'goal', `plan approved: ${clip(text || (await read($, goalText)) || 'the session goal', 160)}`, call)
+  }
 }
 
 // A reached goal: a success to repeat, a handoff for what comes next, or the decisions it took.
-async function goalUpdated($: EngineInterface, result: string) {
+async function goalUpdated($: EngineInterface, result: string, call?: string) {
+  // "t2 is done. 3/5 tasks done (60%)." as goal-run answers it; a task started is no news.
+  const step = /^(\S+ is done\. \d+\/\d+ tasks done \(\d+%\)\.)/.exec(result)?.[1]
+  if (step) await note($, 'goal', `${step}${result.includes(GOAL_REACHED) ? ` ${GOAL_REACHED}` : ''}`, call)
   if (result.includes(GOAL_REACHED)) await offerGoal($, (await read($, goalText)) || 'the session goal')
 }
 
@@ -207,6 +312,7 @@ function runSkill($: EngineInterface, sub: string, ask: string) {
 
 // One reached-goal offer at a time, whichever signal comes first.
 async function offerGoal($: EngineInterface, text: string) {
+  await update($, goalReached, () => true)
   await offer($, { key: 'goal', from: 'goal-run', title: `Reached the goal: ${text}`, detail: '', types: ['success', 'handoff', 'decision'] })
 }
 
@@ -234,12 +340,28 @@ async function toggle($: EngineInterface, name: string) {
   await update($, open, l => (l.includes(name) ? l.filter(x => x !== name) : [...l, name]))
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  journalOn = String(options.journal ?? 'on') !== 'off'
+  handoffOn = String(options.handoffDraft ?? 'on') !== 'off'
+
   on('session.start', async ($, e, next) => {
     for (const timer of timers.splice(0)) timer.cancel()
+    journaled.clear()
+    spawns.clear()
     anim?.cancel()
     anim = null
     await $.command.register({ name: 'brain', description: "Show the agent's project memory (mistake-brain)" })
+    if (journalOn) {
+      await $.tool.register({
+        name: 'journal',
+        description: "Read this session's journal: one line per subagent/worker report (what it was asked, its findings, what it changed and where, its open questions), mistake-brain entries logged, to-dos finished and goal steps, with the time of each. Read it when you need what happened earlier in the session (what a worker found, what was fixed) instead of re-reading files or asking a worker again.",
+        inputSchema: {
+          type: 'object',
+          properties: { last: { type: 'integer', description: `Optional: only the newest N entries (default ${JOURNAL_LAST})` } },
+        },
+        isDeferred: false,
+      })
+    }
     await readTheme($)
     await refresh($)
     timers.push($.clock.every(POLL_MS, async () => {
@@ -252,6 +374,7 @@ export const register: Register = on => {
     for (const timer of timers.splice(0)) timer.cancel()
     anim?.cancel()
     anim = null
+    await handOff($).catch(() => {})
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -278,6 +401,25 @@ export const register: Register = on => {
     return r
   }).catch(($, e, next) => next(e))
 
+  // ---------- the session journal ----------
+
+  on('agent.spawn', async ($, e, next) => {
+    const r = await next(e)
+    if (r.agentId) spawns.set(r.agentId, { task: e.description || e.prompt.split('\n')[0] || '', type: e.subagentType ?? '' })
+    return r
+  }).catch(($, e, next) => next(e))
+
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId !== undefined && e.reason === 'answer') await workerDone($, e.agentId, e.answer)
+    return r
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', { tool: JOURNAL_TOOL }, async ($, e) => {
+    const last = Number((e as unknown as { last?: unknown }).last)
+    return { result: journalText(await read($, journal), Number.isFinite(last) && last > 0 ? Math.floor(last) : JOURNAL_LAST) }
+  })
+
   // ---------- the other mods ----------
 
   // followups' Start names the items it hands Claude, remembered so their "done" can be offered;
@@ -291,7 +433,7 @@ export const register: Register = on => {
       const goal = parseGoalPrompt(e.text)
       if (goal) await update($, goalText, () => goal)
     }
-    return next(e)
+    return next(await withJournal($, e))
   }).catch(($, e, next) => next(e))
 
   // The other mods' tools are answered by their owners' tool.call hooks, which don't call next: a
@@ -300,7 +442,7 @@ export const register: Register = on => {
   // call whatever the order; an offer is made once, whichever comes first.
   on('tool.call', { tool: FOLLOWUPS_DONE }, async ($, e, next) => {
     const r = await next(e)
-    await followupDone($, (e as unknown as { id?: unknown }).id, String(r.result ?? ''))
+    await followupDone($, (e as unknown as { id?: unknown }).id, String(r.result ?? ''), e.tool_use_id)
     // goal-run notes on the same result when this item closed the goal's last task (seen when
     // goal-run's hook runs beneath this one).
     for (const c of r.context ?? []) {
@@ -312,13 +454,13 @@ export const register: Register = on => {
 
   on('tool.call', { tool: GOAL_PLAN }, async ($, e, next) => {
     const r = await next(e)
-    await goalPlanned($, (e as unknown as { goal?: unknown }).goal)
+    await goalPlanned($, (e as unknown as { goal?: unknown }).goal, String(r.result ?? ''), e.tool_use_id)
     return r
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: GOAL_UPDATE }, async ($, e, next) => {
     const r = await next(e)
-    await goalUpdated($, String(r.result ?? ''))
+    await goalUpdated($, String(r.result ?? ''), e.tool_use_id)
     return r
   }).catch(($, e, next) => next(e))
 
@@ -326,9 +468,9 @@ export const register: Register = on => {
     const r = await next(e)
     const input = (e.tool_input ?? {}) as { id?: unknown; goal?: unknown }
     const text = toolText(e.tool_response)
-    if (e.tool_name === FOLLOWUPS_DONE) await followupDone($, input.id, text)
-    else if (e.tool_name === GOAL_PLAN) await goalPlanned($, input.goal)
-    else if (e.tool_name === GOAL_UPDATE) await goalUpdated($, text)
+    if (e.tool_name === FOLLOWUPS_DONE) await followupDone($, input.id, text, e.tool_use_id)
+    else if (e.tool_name === GOAL_PLAN) await goalPlanned($, input.goal, text, e.tool_use_id)
+    else if (e.tool_name === GOAL_UPDATE) await goalUpdated($, text, e.tool_use_id)
     return r
   }).catch(($, e, next) => next(e))
 

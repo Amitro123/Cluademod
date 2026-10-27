@@ -2,7 +2,7 @@
 // steps as text lines for the terminal.
 
 import type { Run, StepState } from '../types'
-import { ROLES, tok } from './flow'
+import { modelOf, ROLES, tok } from './flow'
 
 const COLOR: Record<StepState, string> = { pass: '#16a34a', changes: '#d97706', run: '#2563eb', wait: '#94a3b8', skip: '#cbd5e1', fail: '#dc2626' }
 const MARK: Record<StepState, string> = { pass: '✓', changes: '!', run: '◐', wait: '◌', skip: '–', fail: '✕' }
@@ -65,11 +65,11 @@ export function diagramSvg(run: Run, frame: number, theme: Theme = 'light'): str
 
   const bw = 230
   const bx = cx - bw / 2
-  s += box(bx, 10, bw, 44, ROLES.spec.label, ROLES.spec.model, run.steps.spec.state, run.steps.spec.tokens ? `${tok(run.steps.spec.tokens)} tokens · ${run.tasks.length} tasks` : 'writing the spec')
+  s += box(bx, 10, bw, 44, ROLES.spec.label, modelOf(run, 'spec'), run.steps.spec.state, run.steps.spec.tokens ? `${tok(run.steps.spec.tokens)} tokens · ${run.tasks.length} tasks${run.size ? ` · ${run.size}` : ''}` : 'writing the spec')
   s += arrow(54, 72)
   s += box(bx, 72, bw, 44, 'plan approval', 'you', st.planState, st.planState === 'run' ? 'waiting for you (Goal pane or here)' : '')
   s += arrow(116, 130)
-  s += box(bx, 130, bw, 44, buildRound(run) > 1 ? `builder · round ${buildRound(run)}` : 'builder', ROLES.builder.model, run.steps.builder.state, run.steps.builder.tokens ? `${tok(run.steps.builder.tokens)} tokens` : '')
+  s += box(bx, 130, bw, 44, buildRound(run) > 1 ? `builder · round ${buildRound(run)}` : 'builder', modelOf(run, 'builder'), run.steps.builder.state, run.steps.builder.tokens ? `${tok(run.steps.builder.tokens)} tokens` : '')
   s += arrow(174, 192)
   s += box(bx, 192, bw, 44, run.checkRound > 1 ? `checks · pass ${run.checkRound}` : 'checks', 'no model', run.steps.checks.state, checksLine(run))
 
@@ -84,7 +84,7 @@ export function diagramSvg(run: Run, frame: number, theme: Theme = 'light'): str
     const x = x0 + i * (rw + gap)
     s += arrow(256, 272, x + rw / 2)
     const meta = r.state === 'pass' ? `PASS${r.tokens ? ` · ${tok(r.tokens)}` : ''}` : r.state === 'changes' ? `${r.findings.length} finding${r.findings.length === 1 ? '' : 's'}${r.tokens ? ` · ${tok(r.tokens)}` : ''}` : r.state === 'run' ? 'reviewing' : ''
-    s += box(x, 272, rw, 48, ROLES[r.role].label, ROLES[r.role].model, r.state, meta)
+    s += box(x, 272, rw, 48, ROLES[r.role].label, modelOf(run, r.role), r.state, meta)
     s += `<line x1="${x + rw / 2}" y1="320" x2="${x + rw / 2}" y2="338" stroke="${P.line}" stroke-width="1.6"/>`
   })
   s += `<line x1="${x0 + rw / 2}" y1="338" x2="${x0 + (n - 1) * (rw + gap) + rw / 2}" y2="338" stroke="${P.line}" stroke-width="1.6"/>`
@@ -99,7 +99,7 @@ export function diagramSvg(run: Run, frame: number, theme: Theme = 'light'): str
   s += `<path d="M${bx + bw + 8} 148l-8 4 8 4z" fill="${st.waitState === 'changes' ? COLOR.changes : P.line}"/>`
   s += `<text x="${W - 20}" y="300" font-size="10" fill="${P.dim}" transform="rotate(-90 ${W - 20} 300)">changes: builder again</text>`
   s += arrow(396, 414, cx, true)
-  s += box(bx, 414, bw, 44, ROLES.approver.label, ROLES.approver.model, run.steps.approver.state, run.blocked?.on === 'escalate' || run.phase === 'ready' || run.phase === 'done' ? run.note : '')
+  s += box(bx, 414, bw, 44, ROLES.approver.label, modelOf(run, 'approver'), run.steps.approver.state, run.blocked?.on === 'escalate' || run.phase === 'ready' || run.phase === 'done' ? run.note : '')
   s += `<line x1="${cx - 70}" y1="458" x2="${cx - 70}" y2="486" stroke="${P.line}" stroke-dasharray="4 3"/><line x1="${cx + 70}" y1="458" x2="${cx + 70}" y2="486" stroke="${P.line}" stroke-dasharray="4 3"/>`
   s += `<text x="${cx - 118}" y="480" font-size="9.5" fill="${P.dim}" text-anchor="middle">APPROVE</text><text x="${cx + 118}" y="480" font-size="9.5" fill="${P.dim}" text-anchor="middle">ESCALATE</text>`
   s += box(cx - 190, 486, 160, 40, 'open PR', '', st.pr)
@@ -113,12 +113,12 @@ export function pipelineLines(run: Run): string[] {
   const st = states(run)
   const line = (state: StepState, label: string, extra = '') => `${MARK[state]} ${label}${extra ? ` · ${extra}` : ''}`
   return [
-    line(run.steps.spec.state, `spec-writer (${ROLES.spec.model})`, run.tasks.length ? `${run.tasks.length} tasks` : ''),
+    line(run.steps.spec.state, `spec-writer (${modelOf(run, 'spec')})`, run.tasks.length ? `${run.tasks.length} tasks${run.size ? `, ${run.size}` : ''}` : ''),
     line(st.planState, 'plan approval (you)'),
-    line(run.steps.builder.state, `builder${buildRound(run) > 1 ? ` · round ${buildRound(run)}` : ''} (${ROLES.builder.model})`),
+    line(run.steps.builder.state, `builder${buildRound(run) > 1 ? ` · round ${buildRound(run)}` : ''} (${modelOf(run, 'builder')})`),
     line(run.steps.checks.state, 'checks', checksLine(run)),
-    ...run.reviews.map(r => `  ${line(r.state, `${ROLES[r.role].label} (${ROLES[r.role].model})`, r.state === 'changes' ? `${r.findings.length} findings` : r.state === 'pass' ? 'PASS' : '')}`),
-    line(run.steps.approver.state, `approver (${ROLES.approver.model})`),
+    ...run.reviews.map(r => `  ${line(r.state, `${ROLES[r.role].label} (${modelOf(run, r.role)})`, r.state === 'changes' ? `${r.findings.length} findings` : r.state === 'pass' ? 'PASS' : '')}`),
+    line(run.steps.approver.state, `approver (${modelOf(run, 'approver')})`),
     line(st.pr !== 'wait' ? st.pr : st.human === 'changes' ? 'changes' : 'wait', st.pr === 'pass' ? 'open PR' : st.pr === 'run' ? 'open PR (you)' : st.human === 'changes' ? 'needs-human' : 'PR or needs-human'),
   ]
 }

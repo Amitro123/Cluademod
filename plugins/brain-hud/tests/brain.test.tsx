@@ -5,6 +5,8 @@ import type { On } from 'claude-code'
 import { claudeCells, sceneSvg } from '../hooks/art'
 import { GRAPH, graphSvg, routeOf, shownFiles } from '../hooks/graph'
 import { diffBrain, logPrompt, paraStats, parseMemory, parseMistakes, withListing } from '../hooks/brain'
+import { handoffEntry, HANDOFF_TITLE, insertBelowMarker, journalText, looseEnds, reportSections, workerEntry } from '../hooks/journal'
+import type { JournalEntry } from '../hooks/journal'
 import type { Brain } from '../types'
 // The wording followups and goal-run write, from the copy of shared/texts.ts they use too.
 import { doneResult, GOAL_REACHED, goalClosedNote, goalPrompt, parseStartPrompt, startLine } from '../hooks/texts'
@@ -256,7 +258,7 @@ const buttons = async (ui: { findAll: (q: never) => Promise<unknown[]> }) =>
 // The engine beneath: a project in memory (files by path under /repo, each write bumps its time),
 // a clock, and the side calls the mod makes.
 function engine(on: On, files: Record<string, string>, { commands = ['followup'] as string[], failSubmit = false, closesGoal = '' } = {}) {
-  const w = { sent: [] as string[], ran: [] as string[], opened: [] as string[], times: {} as Record<string, number>, pulses: 0, offers: 0 }
+  const w = { sent: [] as string[], contexts: [] as string[][], ran: [] as string[], opened: [] as string[], times: {} as Record<string, number>, pulses: 0, offers: 0, git: [] as string[] }
   on('state.set', (_, e, next) => {
     const { key, value } = e as { key?: string; value?: unknown }
     if (key === 'pulse' && value) w.pulses++
@@ -296,10 +298,29 @@ function engine(on: On, files: Record<string, string>, { commands = ['followup']
   on('prompt.submit', (_, e) => {
     if (failSubmit) throw new Error('not now')
     w.sent.push(e.text)
-    return { text: e.text } as never
+    w.contexts.push([...(e.context ?? [])])
+    return { text: e.text, context: e.context } as never
   })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }) as never)
+  on('session.id', () => ({ value: 's-1' }) as never)
+  on('fs.write', (_, e) => {
+    write(rel(e.path), e.text)
+    return { value: undefined } as never
+  })
+  on('process.run', (_, e) => {
+    w.git.push(e.argv.join(' '))
+    return { value: { exitCode: 0, stdout: '.git/info/exclude\n', stderr: '' } } as never
+  })
+  on('tool.register', (_, e) => ({ value: { tool: `mcp__brain-hud__${e.name}` } }) as never)
+  const spawned: { id: string; description: string; type: string }[] = []
+  on('agent.spawn', (_, e) => {
+    const id = `a${spawned.length + 1}`
+    spawned.push({ id, description: e.description, type: e.subagentType })
+    return { model: 'haiku', agentId: id } as never
+  })
+  on('agent.list', () => ({ value: spawned.map(s => ({ ...s, status: 'completed' })) }) as never)
+  on('turn.complete', (_, e) => ({ text: e.answer }) as never)
   on('classic.PostToolUse', () => ({}) as never)
   on('tool.call', (_, e) => {
     if (e.tool === 'mcp__followups__done') return { result: doneResult('Fix the upload', 'added a retry'), ...(closesGoal ? { context: [goalClosedNote(closesGoal)] } : {}) } as never
@@ -647,3 +668,180 @@ describe('in a session', () => {
 
 // Typed for the helpers above.
 export type { Engine }
+
+// ---------- the session journal ----------
+
+// A routed-worker's report, in the sections its contract names.
+const REPORT = `## Findings
+- The retry wraps only the first request; the second never retries.
+- Timeouts are 30s everywhere.
+
+## Files
+- src/upload.ts:42
+- src/client.ts:10
+
+## Changes
+- none
+
+## Unsure-about
+- Should the second request retry too?
+`
+
+describe('the session journal: reading a report', () => {
+  test("a worker's report: its sections, under any heading form", () => {
+    expect(reportSections(REPORT)).toEqual({
+      Findings: ['The retry wraps only the first request; the second never retries.', 'Timeouts are 30s everywhere.'],
+      Files: ['src/upload.ts:42', 'src/client.ts:10'],
+      Changes: ['none'],
+      'Unsure-about': ['Should the second request retry too?'],
+    })
+    expect(reportSections('**Findings:** the cache is cold\nFiles: a.ts:1\nOpen questions:\n- why?')).toEqual({ Findings: ['the cache is cold'], Files: ['a.ts:1'], 'Unsure-about': ['why?'] })
+  })
+
+  test('a finding that opens with a section\'s word stays a finding', () => {
+    expect(reportSections('Findings:\n- Changes to auth broke login\n- Files are cached')).toEqual({ Findings: ['Changes to auth broke login', 'Files are cached'] })
+  })
+
+  test("one line per report: the task, the first findings, the files; a 'none' change is left out, the open question kept", () => {
+    const e = workerEntry('09:10', 'Check the upload retry', 'routed-worker', REPORT)!
+    expect(e.text).toBe('routed-worker: Check the upload retry — The retry wraps only the first request; the second never retries.; Timeouts are 30s everywhere. · files: src/upload.ts:42, src/client.ts:10 · open: 1')
+    expect(e.open).toEqual(['Should the second request retry too?'])
+    expect(workerEntry('09:10', 'Read the docs', 'Explore', '\nThe docs say nothing about retries.\nMore.')!.text).toBe('Explore: Read the docs — The docs say nothing about retries.')
+    expect(workerEntry('09:10', 'x', '', '  ')).toBeNull()
+  })
+
+  test('the tool hands back the newest entries, with the counts of all', () => {
+    const list: JournalEntry[] = Array.from({ length: 5 }, (_, i) => ({ at: `09:0${i}`, kind: i % 2 ? 'todo' : 'worker', text: `e${i}` }))
+    const out = journalText(list, 2)
+    expect(out.split('\n')).toEqual(['Session journal: 3 worker reports, 2 to-dos done (the last 2 of 5).', '- 09:03 [to-do] e3', '- 09:04 [worker] e4'])
+    expect(journalText([])).toMatch(/^Nothing in the session journal yet/)
+  })
+})
+
+describe('the session journal: the handoff draft', () => {
+  const entries: JournalEntry[] = [{ at: '09:10', kind: 'worker', text: 'routed-worker: Check the retry', open: ['Should the second request retry?'] }]
+
+  test('what is left open: the questions, the to-dos not done, a goal not reached; nothing open, nothing to hand off', () => {
+    const loose = looseEnds(entries, [{ id: 'k1', title: 'Fix the upload' }, { id: 'k2', title: 'Docs' }], ['k2'], { text: 'Ship it', reached: false })
+    expect(loose).toEqual({ questions: ['Should the second request retry?'], todos: ['Fix the upload'], goal: 'Ship it' })
+    expect(looseEnds([], [], [], { text: 'Ship it', reached: true })).toEqual({ questions: [], todos: [], goal: '' })
+  })
+
+  test("a handoff in the skill's format, below the marker, that the memory reads as an unrouted handoff", () => {
+    const loose = looseEnds(entries, [{ id: 'k1', title: 'Fix the upload' }], [], { text: '', reached: false })
+    const text = insertBelowMarker(MISTAKES_HEAD + entry('2026-10-05 15:55', 'Older', 'decision'), handoffEntry('2026-10-26 18:40', entries, loose, '.claude/brain/session-s-1.md'))!
+    const list = parseMistakes(text)
+    expect(list.map(e => [e.at, e.title, e.type, e.status])).toEqual([
+      ['2026-10-26 18:40', HANDOFF_TITLE, 'handoff', 'unrouted'],
+      ['2026-10-05 15:55', 'Older', 'decision', 'unrouted'],
+    ])
+    expect(text).toMatch(/- \*\*Next steps:\*\* finish the to-do "Fix the upload"; answer: Should the second request retry\?\./)
+    expect(text).toMatch(/- \*\*Context needed:\*\* .*Full session journal: \.claude\/brain\/session-s-1\.md\./)
+    expect(insertBelowMarker('# no marker', 'x')).toBeNull()
+  })
+})
+
+describe('the session journal: in a session', () => {
+  const JOURNAL = 'mcp__brain-hud__journal'
+  const start = ($: Engine) => $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+  const worker = async ($: Engine, description: string, answer: string) => {
+    const id = String((await $.agent.spawn({ prompt: 'p', description, subagentType: 'routed-worker' } as never) as { agentId?: string }).agentId)
+    await $.turn.complete({ answer, agentId: id, reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as never)
+  }
+  const journalOf = async ($: Engine) => String((await $.tool.call({ tool: JOURNAL } as never) as { result?: unknown }).result ?? '')
+
+  test("a worker's report lands in the journal, the tool reads it, and a copy is kept out of git", async ($, on) => {
+    const files = project()
+    const w = engine(on, files)
+    await start($)
+    await worker($, 'Check the upload retry', REPORT)
+    expect(await journalOf($)).toMatch(/\[worker\] routed-worker: Check the upload retry — The retry wraps only the first request.*\n  - unsure: Should the second request retry too\?/)
+    expect(files['.claude/brain/session-s-1.md']).toMatch(/^# Session journal s-1\n[\s\S]*Check the upload retry/)
+    expect(w.git).toEqual(['git rev-parse --git-path info/exclude'])
+    expect(files['.git/info/exclude']).toBe('.claude/brain/\n')
+  })
+
+  test('a main-loop answer, an interrupted worker and an errored one are not journaled', async ($, on) => {
+    engine(on, project())
+    await start($)
+    await $.turn.complete({ answer: 'main', reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as never)
+    await $.agent.spawn({ prompt: 'p', description: 'Gone', subagentType: 'Explore' } as never)
+    await $.turn.complete({ answer: 'half', agentId: 'a1', reason: 'aborted', durationMs: 1, isAborted: true, turnId: 't' } as never)
+    await $.turn.complete({ answer: 'x', agentId: 'a1', reason: 'error', durationMs: 1, isAborted: false, turnId: 't' } as never)
+    expect(await journalOf($)).toMatch(/^Nothing in the session journal yet/)
+  })
+
+  test('beside a prompt, one line when the journal grew, and none when it did not', async ($, on) => {
+    const w = engine(on, project())
+    await start($)
+    await $.prompt.submit({ text: 'first', origin: { kind: 'user' } } as never)
+    await worker($, 'Check the upload retry', REPORT)
+    await $.prompt.submit({ text: 'second', origin: { kind: 'user' } } as never)
+    await $.prompt.submit({ text: 'third', origin: { kind: 'user' } } as never)
+    expect(w.contexts[0]).toEqual([])
+    expect(w.contexts[1]).toEqual([expect.stringMatching(/^\[brain-hud\] Session so far: 1 worker report, 1 open question\. Latest: routed-worker: Check the upload retry.*mcp__brain-hud__journal reads the whole journal/)])
+    expect(w.contexts[2]).toEqual([])
+  })
+
+  test('a to-do done (seen twice), a goal step and a memory entry each make one line', async ($, on) => {
+    const files = project()
+    const w = engine(on, files)
+    await start($)
+    await $.tool.call({ tool: 'mcp__followups__done', id: 'k1-a', tool_use_id: 'u1' } as never)
+    await $.classic.PostToolUse({ tool_name: 'mcp__followups__done', tool_input: { id: 'k1-a' }, tool_response: doneResult('Fix the upload', 'added a retry'), tool_use_id: 'u1' } as never)
+    await $.tool.call({ tool: 'mcp__goal-run__update', id: 't2', status: 'done', tool_use_id: 'u2' } as never)
+    w.write('MISTAKES.md', files['MISTAKES.md']!.replace('line -->\n\n', `line -->\n\n${entry('2026-10-24 09:01', 'Retry only wrapped one call', 'mistake')}`))
+    await $.tool.call({ tool: 'Edit', file_path: '/repo/MISTAKES.md', old_string: 'a', new_string: 'b' } as never)
+    const lines = (await journalOf($)).split('\n').slice(1)
+    expect(lines).toEqual([
+      '- 09:00 [to-do] Fix the upload — added a retry',
+      '- 09:00 [goal] t2 is done. 2/2 tasks done (100%). The goal is reached.',
+      '- 09:00 [memory] Logged a mistake: Retry only wrapped one call',
+    ])
+  })
+
+  test("at the end, what is left open becomes a handoff draft in MISTAKES.md, once", async ($, on) => {
+    const files = project()
+    engine(on, files)
+    await start($)
+    await $.prompt.submit({ text: startLine({ id: 'k9', title: 'Rotate the keys' }), origin: { kind: 'plugin', name: 'followups' } } as never)
+    await worker($, 'Check the upload retry', REPORT)
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 's-1', resume: {} } as never)
+    await $.session.end({ reason: 'other', sessionId: 's-1', resume: {} } as never)
+    const list = parseMistakes(files['MISTAKES.md']!)
+    expect(list.filter(e => e.title === HANDOFF_TITLE).map(e => [e.at, e.type, e.status])).toEqual([['2026-10-24 09:00', 'handoff', 'unrouted']])
+    expect(list[0]!.title).toBe(HANDOFF_TITLE)
+    expect(files['MISTAKES.md']).toMatch(/Next steps:\*\* finish the to-do "Rotate the keys"; answer: Should the second request retry too\?/)
+  })
+
+  test('nothing left open, no handoff; and a project without the memory gets none', async ($, on) => {
+    const files = project()
+    engine(on, files)
+    await start($)
+    await worker($, 'Read the docs', 'Findings:\n- all clear')
+    await $.session.end({ reason: 'other', sessionId: 's-1', resume: {} } as never)
+    expect(parseMistakes(files['MISTAKES.md']!).some(e => e.title === HANDOFF_TITLE)).toBe(false)
+  })
+
+  test('with handoffDraft off, the journal is kept and no draft is written', { options: { handoffDraft: 'off' } } as never, async ($: Engine, on: On) => {
+    const files = project()
+    engine(on, files)
+    await start($)
+    await worker($, 'Check the upload retry', REPORT)
+    await $.session.end({ reason: 'other', sessionId: 's-1', resume: {} } as never)
+    expect(await journalOf($)).toMatch(/Check the upload retry/)
+    expect(parseMistakes(files['MISTAKES.md']!).some(e => e.title === HANDOFF_TITLE)).toBe(false)
+  })
+
+  test('with the journal off: no line beside a prompt, no file, no draft', { options: { journal: 'off' } } as never, async ($: Engine, on: On) => {
+    const files = project()
+    const w = engine(on, files)
+    await start($)
+    await worker($, 'Check the upload retry', REPORT)
+    await $.prompt.submit({ text: 'next', origin: { kind: 'user' } } as never)
+    await $.session.end({ reason: 'other', sessionId: 's-1', resume: {} } as never)
+    expect(w.contexts).toEqual([[]])
+    expect(Object.keys(files).some(f => f.startsWith('.claude/brain/'))).toBe(false)
+    expect(parseMistakes(files['MISTAKES.md']!).some(e => e.title === HANDOFF_TITLE)).toBe(false)
+  })
+})

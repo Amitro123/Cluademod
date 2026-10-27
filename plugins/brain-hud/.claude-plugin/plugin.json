@@ -1,12 +1,34 @@
 {
   "name": "brain-hud",
-  "version": "0.4.2",
-  "description": "Agent memory that works on its own: the mistake-brain skill and its hooks ship inside (log, route, promote, dream, recall), and a pixel Claude with a brain reacts to each MISTAKES.md entry while a pane draws the PARA memory as a graph. Offers finished follow-ups and reached goals to memory.",
+  "version": "0.5.0",
+  "description": "Agent memory that works on its own: the mistake-brain skill and its hooks ship inside (log, route, promote, dream, recall), and a pixel Claude with a brain reacts to each MISTAKES.md entry while a pane draws the PARA memory as a graph. Offers finished follow-ups and reached goals to memory. Keeps a session journal (each worker's report, memory entries, finished to-dos, goal steps) that Claude reads through a tool, and drafts a handoff for what the session leaves open.",
   "author": {
     "name": "Amit Rosen",
     "url": "https://github.com/Amitro123"
   },
   "repository": "https://github.com/Amitro123/claudemod",
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "journal": {
+      "type": "string",
+      "title": "Session journal",
+      "description": "on keeps a journal of the session (worker reports, memory entries, to-dos done, goal steps) in .claude/brain/, tells Claude beside a prompt when it grew, and gives it a journal tool; off keeps none",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    },
+    "handoffDraft": {
+      "type": "string",
+      "title": "Handoff draft at the session's end",
+      "description": "on writes a handoff entry to MISTAKES.md when the session ends with something open (a worker's open question, a to-do started and not done, a goal not reached); off writes none",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    }
+  }
 }

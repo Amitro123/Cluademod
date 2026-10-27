@@ -260,6 +260,20 @@ Then, in each project that should remember: `/brain-hud:mistake-brain init`, or 
   - **How they hear each other.** followups and goal-run answer their own tools (`done`, `plan`, `update`) and stop there, so another mod's hook on those tools runs only when that mod sits above the owner, and Claude Code doesn't promise an order among installed mods. brain-hud and goal-run therefore also read each of those calls from the `PostToolUse` event, which every mod sees whatever the order; an offer, or a task closed, happens once whichever arrives first. Not yet checked in a live session with all the mods installed: with `claude --debug`, a line `<event> bypassed by <plugin>` for these tools would mean a hook was skipped.
 - In a project with no `MISTAKES.md` and no `.agent-brain/` the mod stays quiet; the pane offers **Set up memory**, which runs `/brain-hud:mistake-brain init`.
 
+### The session journal
+
+Memory between sessions is the skill's; the journal is for the session you're in. Work that goes to sub-agents (a model router's worker on a cheap model, an `Explore`, a factory role) comes back to the main agent as a bottom line, which keeps its context small. What each worker found, where, and what it left open would then be gone. brain-hud writes it down as it happens, with no model involved:
+
+- **One line per event**: each sub-agent's report (what it was asked, its first findings, what it changed, its files, its open questions, read from a routed-worker's *Findings / Files / Changes / Unsure-about* sections or from the report's first line), each `MISTAKES.md` entry, each to-do finished through followups, each goal step and approved plan from goal-run.
+- **The `journal` tool** (`mcp__brain-hud__journal`, optional `last`) hands Claude the journal, so it can look up what a worker found earlier instead of re-reading the files or sending another worker.
+- **One line beside your next prompt** when the journal grew, e.g. *Session so far: 3 worker reports, 1 memory entry, 2 open questions. Latest: …*; no line when nothing new happened.
+- **A copy on disk** at `.claude/brain/session-<id>.md`, added to the repository's `.git/info/exclude` so it is never committed. One file per session; delete old ones whenever you like.
+- **A handoff at the end.** When the session ends with something open (a worker's open question, a to-do started and not done, a goal not reached) and the project has a mistake-brain memory, brain-hud adds a `Type: handoff` entry, *Session handoff (auto-draft)*, below the marker in `MISTAKES.md`, with the next steps and a pointer to the journal file. It is unrouted like any entry, so the next session's route files it. Nothing open, no entry.
+
+Options: `journal` (`on`/`off`) and `handoffDraft` (`on`/`off`), both on by default.
+
+If you also run a router mod with a budget on work tools per prompt, exempt `mcp__brain-hud__journal` (and followups' and goal-run's tools) from it: a lookup in the journal is meant to replace reading files, not count as reading them.
+
 ### The memory graph
 
 ![The Brain pane's knowledge graph, dark and light: MEMORY.md at the centre, the four PARA folders, their files, and each MISTAKES.md entry as a dot linked to its file](assets/brain-hud-graph.png)
@@ -288,9 +302,10 @@ A feature goes in and a reviewed PR comes out. Each step is a sub-agent with its
 
 ```text
 /factory <feature>
-  spec-writer (opus)    writes docs/specs/<slug>.md and a task list
+  spec-writer (sonnet)  writes docs/specs/<slug>.md, a task list and the feature's size
   plan approval (you)   in goal-run's dialog, or factory's own Approve plan button
-  builder (opus)        implements on branch factory/<slug>, in the worktree .factory/<slug>
+  builder (sonnet,      implements on branch factory/<slug>, in the worktree .factory/<slug>
+   opus when large)
   checks (no model)     installs the dependencies once, then tests, lint, typecheck; red goes back to the builder (2 passes)
   reviewers, at once    security (opus) and code (sonnet): VERDICT PASS or CHANGES, with findings
                         any CHANGES, with rounds left: the builder again, then every reviewer again
@@ -303,7 +318,7 @@ A feature goes in and a reviewed PR comes out. Each step is a sub-agent with its
 3. **Build and checks.** The builder implements the tasks in the worktree, marks them in goal-run as it goes, and commits; anything it leaves uncommitted the factory commits, so what is reviewed is what is pushed. Except new files that should never be committed: installed dependencies (`node_modules/`, `.venv/`), build output (`dist/`, `build/`) and credentials (`.env*`, `*.pem`, `*.key`) are left out, and the pane and the PR prompt say which. A fresh worktree has no dependencies installed, so before the first checks the factory runs the `setup` option, or the lockfile's install when `node_modules` is missing (`npm ci`, `pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile`). A failed setup stops the run for you rather than sending the builder after it. Then the checks run with no model: the `checks` option, or what the project has (`npm test` and its `lint` and `typecheck` scripts, `pytest`, `go test`, `cargo test`). A failure goes back to the builder with its output, twice at most; reviewers only ever see a green build.
 4. **Reviews.** The security and code reviewers read the spec and the branch's commits (`git diff <base>..HEAD`) in parallel. Each ends with `VERDICT: PASS` or `VERDICT: CHANGES` and findings tagged `blocker`, `major` or `minor`. A missing verdict counts as changes, and so does a PASS that lists a blocker. With changes and rounds left (`maxRounds`, 2 by default), a fresh builder gets the findings, and every reviewer looks again: a fix for the code reviewer is new code for the security reviewer too.
 5. **The approver**, an agent, reads the spec, the diff and the verdicts. On **APPROVE** the run waits for you: **Open PR** (or `/factory approve`) sends the main Claude a prompt to push the branch and open a PR, with the spec in it and the minor findings listed under "Not fixed". With `autoPr` on, that prompt goes as soon as the approver approves. On **ESCALATE** the run waits at *needs-human* with the reason, and **Approve PR** opens the PR anyway.
-6. **When something else stops the run** (no task list, a builder that stopped, checks still red, a failed setup, an agent that couldn't start), it waits at *needs-human* with the reason and offers **Retry**, which runs that step again; there's no approving past it into a PR. An agent that ends without its answer says why: an API error and its message, a refusal and its explanation, or an interruption. On an API error the agent is started once more on the session's own model, in case the account can't use the role's model. Another mod that rewrites sub-agents' models (a model router) must pass a model the API knows (a full id) for the factory's agents, or leave them alone.
+6. **When something else stops the run** (no task list, a builder that stopped, checks still red, a failed setup, an agent that couldn't start), it waits at *needs-human* with the reason and offers **Retry**, which runs that step again; there's no approving past it into a PR. An agent that ends without its answer says why: an API error and its message, a refusal and its explanation, or an interruption. On an API error the agent is started once more on the session's own model, in case the account can't use the role's model. The factory already picks each role's model by the feature's size (`models` below), so a mod that rewrites sub-agents' models (a model router) should leave an agent spawned with an explicit model on it.
 
 ![A run in four diagrams: the plan waiting for approval; both reviewers at once; code asks for changes and the builder goes to round 2; both PASS, the approver says APPROVE and the PR waits for your Open PR](assets/factory-flow.png)
 
@@ -322,6 +337,7 @@ A feature goes in and a reviewed PR comes out. Each step is a sub-agent with its
 - `setup`: commands that install the dependencies in a run's worktree before its first checks, e.g. `npm ci`. Empty uses the lockfile when `node_modules` is missing.
 - `takeOver` (`on` / `off`): `on` runs a goal set in goal-run, or one to-do item started in followups, through the factory instead of the main conversation; several items started together stay the main conversation's. `off` leaves only `/factory` and the 🏭 buttons.
 - `autoPr` (`off` / `on`): `on` opens the PR as soon as the approver agent approves; `off`, the default, waits for your Open PR.
+- `models` (`auto` / `fixed`): which model each role runs on. The spec-writer, the builder and the code reviewer run on sonnet; the security reviewer and the approver on opus, where a miss costs most. In `auto`, the default, the spec-writer also judges the feature `SIZE: small | medium | large` (large: it spans several modules, needs design decisions such as the data model, migrations, security or concurrency, or leaves real questions open), and a large one runs the builder on opus. The pane shows the size and each role's model. `fixed` keeps the table whatever the size.
 - `maxRounds` (`1`, `2`, `3`): how many times reviewers may send the builder back before the approver decides on what there is.
 - The roles are agent types, `factory:spec-writer`, `factory:builder`, `factory:security-reviewer`, `factory:code-reviewer` and `factory:approver`, hidden from the model so only the factory runs them. Their instructions are short defaults in the mod.
 
