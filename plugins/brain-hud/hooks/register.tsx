@@ -37,6 +37,8 @@ const MISTAKES = 'MISTAKES.md'
 const MEMORY_PATHS = ['.agent-brain/shared/MEMORY.md', '.claude/agent-memory/claude/MEMORY.md']
 const PARA_ROOT = '.agent-brain/shared'
 const POLL_MS = 4_000
+// In a project with no memory yet, the poll looks this often instead: a turn's end checks too.
+const IDLE_POLL_MS = 32_000
 const PULSE_MS = 6_000
 const FRAME_MS = 160
 const INBOX_SHOWN = 3
@@ -364,7 +366,9 @@ export const register: Register = (on, options) => {
     }
     await readTheme($)
     await refresh($)
+    let ticks = 0
     timers.push($.clock.every(POLL_MS, async () => {
+      if (!(await read($, brain)) && ++ticks % (IDLE_POLL_MS / POLL_MS)) return
       if ((await stamp($)) !== mtimes) await refresh($)
     }))
     return next(e)
@@ -412,6 +416,8 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId !== undefined && e.reason === 'answer') await workerDone($, e.agentId, e.answer)
+    // A memory set up during the turn (init) shows once it ends, whatever the poll's pace.
+    if (e.agentId === undefined && (await stamp($)) !== mtimes) await refresh($)
     return r
   }).catch(($, e, next) => next(e))
 

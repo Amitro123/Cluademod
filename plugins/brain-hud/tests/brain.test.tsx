@@ -266,7 +266,7 @@ const buttons = async (ui: { findAll: (q: never) => Promise<unknown[]> }) =>
 // The engine beneath: a project in memory (files by path under /repo, each write bumps its time),
 // a clock, and the side calls the mod makes.
 function engine(on: On, files: Record<string, string>, { commands = ['followup'] as string[], failSubmit = false, closesGoal = '' } = {}) {
-  const w = { sent: [] as string[], contexts: [] as string[][], ran: [] as string[], opened: [] as string[], times: {} as Record<string, number>, pulses: 0, offers: 0, git: [] as string[] }
+  const w = { sent: [] as string[], contexts: [] as string[][], ran: [] as string[], opened: [] as string[], times: {} as Record<string, number>, pulses: 0, offers: 0, git: [] as string[], stats: 0 }
   on('state.set', (_, e, next) => {
     const { key, value } = e as { key?: string; value?: unknown }
     if (key === 'pulse' && value) w.pulses++
@@ -283,6 +283,7 @@ function engine(on: On, files: Record<string, string>, { commands = ['followup']
     return { value: files[p] } as never
   })
   on('fs.stat', (_, e) => {
+    w.stats++
     const p = rel(e.path)
     if (!(p in files)) throw new Error(`ENOENT: ${p}`)
     return { value: { kind: 'file', size: files[p]!.length, mtimeMs: w.times[p] ?? 1, isLink: false } } as never
@@ -851,5 +852,24 @@ describe('the session journal: in a session', () => {
     expect(w.contexts).toEqual([[]])
     expect(Object.keys(files).some(f => f.startsWith('.claude/brain/'))).toBe(false)
     expect(parseMistakes(files['MISTAKES.md']!).some(e => e.title === HANDOFF_TITLE)).toBe(false)
+  })
+})
+
+describe('the poll in a project with no memory', () => {
+  test('looks every 32 seconds, not every 4; a turn ending shows a memory set up during it', async ($, on) => {
+    const files: Record<string, string> = {}
+    const w = engine(on, files)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const after = w.stats
+    await w.clock.advance(28_000)
+    expect(w.stats).toBe(after)
+    await w.clock.advance(4_000)
+    expect(w.stats).toBeGreaterThan(after)
+    Object.assign(files, project())
+    w.write('MISTAKES.md', files['MISTAKES.md']!)
+    await $.turn.complete({ answer: 'set it up', reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).not.toMatch(/Set up memory/)
+    await pane.unmount()
   })
 })
