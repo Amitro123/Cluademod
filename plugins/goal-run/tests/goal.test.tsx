@@ -425,10 +425,10 @@ describe('work started from the followups to-do list', () => {
 
   test('adding splits the tokens so far across the new tasks and numbers them after the plan', () => {
     const g: Goal = { text: 'x', status: 'active', activeId: null, other: 0, outside: 9, tasks: [{ id: 't1', title: 'a', status: 'done', tokens: 1 }, { id: 't2', title: 'b', status: 'pending', tokens: 0 }] }
-    const { goal: grown, taskIds } = addSide(g, { items: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }], tokens: 9, isAsking: true, taskIds: [], doneIds: ['b'], isLive: true })
-    expect(taskIds).toEqual(['t3', 't4'])
+    const { goal: grown, taskIds } = addSide(g, { items: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }], tokens: 9, isAsking: true, taskIds: [], doneIds: ['b'], isLive: true }, 'ab12')
+    expect(taskIds).toEqual(['t3-ab12', 't4-ab12'])
     expect(grown.tasks.slice(2).map(t => [t.status, t.tokens, t.followupId])).toEqual([['in_progress', 5, 'a'], ['done', 4, 'b']])
-    expect(grown.activeId).toBe('t3')
+    expect(grown.activeId).toBe('t3-ab12')
     expect(grown.outside).toBe(0)
   })
 })
@@ -537,7 +537,7 @@ describe('adding a task mid-goal', () => {
     const w = await underway($, on, ['Add it'])
     const r = await $.tool.call({ tool: ADD, title: 'Rotate the key', priority: 'high' } as never)
     expect(w.asked.at(-1)).toMatch(/Add to the goal: \[high\] Rotate the key\. It goes in as #3, before "C"\. Progress 25% → 20%\./)
-    expect(String(r.result)).toMatch(/^Added t5 \(high priority\) as #3/)
+    expect(String(r.result)).toMatch(/^Added t5-[0-9a-z]{4} \(high priority\) as #3/)
     expect(await titles($)).toMatch(/A .*B .*Rotate the key .*C .*D/)
   })
 
@@ -975,5 +975,42 @@ describe('the goal-reached toast', () => {
     await $.tool.call({ tool: 'mcp__goal-run__update', id: 't1', status: 'done' } as never)
     await $.tool.call({ tool: 'mcp__goal-run__update', id: 't1', status: 'done' } as never)
     expect(w.toasts.filter(t => /^Goal reached/.test(t))).toHaveLength(1)
+  })
+})
+
+describe('a re-plan and concurrent adds across sessions', () => {
+  test("a re-plan here while another session marks the old t2 done: the new plan's t2 stays pending", async ($, on) => {
+    const w = engine(on, { answers: ['Approve, run through', 'Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two', 'Three'] } as never)
+    const old = w.saved['goal:/repo'] as Goal
+    // The other session marks the old plan's t2 done; this one re-plans meanwhile.
+    w.saved['goal:/repo'] = { ...old, tasks: old.tasks.map(t => (t.id === 't2' ? { ...t, status: 'done', tokens: 400 } : t)) }
+    await w.clock.advance(1_000)
+    await $.tool.call({ tool: PLAN, tasks: ['Alpha', 'Beta'] } as never)
+    const now = w.saved['goal:/repo'] as Goal
+    expect(now.tasks.map(t => [t.id, t.title, t.status])).toEqual([['t1', 'Alpha', 'pending'], ['t2', 'Beta', 'pending']])
+    expect((now.planAt ?? 0) > (old.planAt ?? 0)).toBe(true)
+  })
+
+  test('the older plan does not merge into the newer one: the session holding it is told once', async ($, on) => {
+    const w = engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
+    const mine = w.saved['goal:/repo'] as Goal
+    w.saved['goal:/repo'] = { ...mine, planAt: (mine.planAt ?? 0) + 5_000, tasks: [{ id: 't1', title: 'Other plan', status: 'pending', tokens: 0 }] }
+    await $.tool.call({ tool: 'mcp__goal-run__update', id: 't2', status: 'done' } as never)
+    expect((w.saved['goal:/repo'] as Goal).tasks.map(t => t.title)).toEqual(['Other plan'])
+    expect(w.toasts.filter(t => /re-planned in another session/.test(t))).toHaveLength(1)
+  })
+
+  test('two sessions each adding a task: both tasks are kept', () => {
+    const g: Goal = { text: 'x', status: 'active', setAt: 1, planAt: 1, activeId: null, other: 0, tasks: [{ id: 't1', title: 'A', status: 'pending', tokens: 0 }] }
+    const a = insertTask(g, { title: 'From A', priority: 'medium', needs: [] }, 'aaaa').goal
+    const b = insertTask(g, { title: 'From B', priority: 'medium', needs: [] }, 'bbbb').goal
+    const m = mergeGoal(g, a, b)
+    expect(m.tasks.map(t => [t.id, t.title])).toEqual([['t1', 'A'], ['t2-aaaa', 'From A'], ['t2-bbbb', 'From B']])
   })
 })
