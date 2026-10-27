@@ -29,7 +29,7 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '' } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
   const sent: string[] = []
@@ -116,7 +116,7 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: { model: 'm', input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as never
   })
   // goal-run's plan tool, as it answers for a factory plan the person approved.
-  on('tool.call', { tool: PLAN }, () => ({ result: PLAN_APPROVED_FOR_FACTORY }) as never)
+  on('tool.call', { tool: PLAN }, () => ({ result: keepsGoal ? PLAN_KEPT_FOR_FACTORY : PLAN_APPROVED_FOR_FACTORY }) as never)
   on('tool.call', { tool: 'Edit' }, () => ({ result: 'edited' }) as never)
   // The engine's question dialog: the next answer, or dismissed when none is left.
   const asked: string[] = []
@@ -932,5 +932,24 @@ describe('a long feature reads as a short title', () => {
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
     expect(await texts(pane)).toContain('Do not commit or push.')
     await pane.unmount()
+  })
+})
+
+describe("the builder marks goal-run's tasks only when they are the factory's", () => {
+  test('goal-run kept your own goal: the builder is not told to mark its t1, t2...', async ($, on) => {
+    const w = engine(on, { answers: ['Approve and build'], keepsGoal: true })
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks: [{ title: 'x', priority: 'high' }] } as never)
+    await settled()
+    expect(last(w)).toMatchObject({ subagentType: 'factory:builder' })
+    expect(last(w).prompt).not.toContain('mcp__goal-run__update')
+    expect(last(w).prompt).toContain('The tasks:\n- t1: Token bucket core')
+  })
+
+  test("the factory's plan is the session goal: the builder marks its tasks", async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    expect(w.spawned.find(s => s.subagentType === 'factory:builder')!.prompt).toContain('mark each with mcp__goal-run__update')
   })
 })

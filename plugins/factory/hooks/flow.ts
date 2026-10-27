@@ -189,7 +189,9 @@ export function buildPrompt(run: Run, findings: Finding[], failed: Check[], { ag
     : [
         `Implement the spec in ${run.specFile} for: ${run.feature}`,
         `You are on branch ${run.branch}, in its own worktree. Commit your work to this branch when done.`,
-        'The tasks (in the session goal, if goal-run is installed: mark each with mcp__goal-run__update as in_progress, then done):',
+        // Marked in goal-run only when its plan is the session goal: when goal-run kept the person's own
+        // goal, its t1, t2... are the person's tasks, not these.
+        run.gate === 'goal-run' ? 'The tasks (in the session goal: mark each with mcp__goal-run__update as in_progress, then done):' : 'The tasks:',
         ...tasks,
       ]
   return [
