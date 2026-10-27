@@ -35,7 +35,7 @@ import {
   modelsFor,
   parseSize,
 } from './flow'
-import { FACTORY_PLAN_APPROVED_ARG, factoryArgs, parseFactoryArgs, parseGoalPrompt, parsePlanOutcome, parseStartPrompt, toolText } from './texts'
+import { FACTORY_PLAN_APPROVED_ARG, FACTORY_START_TOOL, factoryArgs, parseFactoryArgs, parseGoalPrompt, parsePlanOutcome, parseStartPrompt, toolText } from './texts'
 
 const run = atom({ plugin: 'factory', key: 'run' } as const, null as Run | null)
 const frame = atom({ plugin: 'factory', key: 'frame' } as const, 0)
@@ -52,6 +52,9 @@ const MAX_SLUG_TRIES = 5
 const CHECK_TIMEOUT_MS = 600_000
 const FRAME_MS = 700
 const ACCENT = '#2563eb'
+const START_TOOL = FACTORY_START_TOOL
+const FROM_CONVERSATION = `Start a factory run on the work this conversation is about: call ${START_TOOL} with the feature (what to build, in a short paragraph, naming the file, issue or to-do item it comes from; a to-do item's id as followupId). If there is no such work yet, ask me what the factory should build. Don't do the work yourself.`
+const STARTED_NOTE = "The factory does the work from here: don't start it yourself or propose a plan. Tell the person in one line, and that its plan comes up for their approval."
 const STOPPED_DENY = 'The factory run was stopped. Stop now and answer with one line.'
 
 // Set from the options when the module registers.
@@ -222,6 +225,27 @@ async function onSpec($: EngineInterface, answer: string, why: string) {
     steps: { ...cur.steps, spec: { ...cur.steps.spec, state: 'pass' } },
   }))
   if (r && viaGoalRun) void $.prompt.submit({ text: planPrompt(r) }).catch(() => {})
+  else if (r) void askPlan($)
+}
+
+// Without goal-run's dialog, the plan is put to the person in the engine's own: in the main
+// conversation, not only in the band. "Other" carries what to change.
+const APPROVE_PLAN = 'Approve and build'
+const NOT_NOW = 'Not now'
+async function askPlan($: EngineInterface) {
+  const r = await read($, run)
+  if (!r || r.phase !== 'plan' || r.gate !== 'factory') return
+  const tasks = r.tasks.map((t, i) => `${i + 1}. [${t.priority}] ${t.title}`).join('\n')
+  let answer = ''
+  try {
+    answer = await $.ui.ask(`The factory's plan for "${r.feature.split('\n')[0]!.slice(0, 120)}"${r.size ? ` (${r.size})` : ''}, spec in ${r.specFile}:\n${tasks}\n\nApprove it, and the builder starts? To change it, say what under Other.`, { header: 'Factory plan', options: [APPROVE_PLAN, NOT_NOW] })
+  } catch {
+    return
+  }
+  // Answered in the band meanwhile, or stopped: nothing left to decide here.
+  if ((await read($, run))?.phase !== 'plan') return
+  if (answer === APPROVE_PLAN) return void serial(() => onPlan($, { approved: true }))
+  if (answer && answer !== NOT_NOW) return void serial(() => respec($, answer))
 }
 
 async function onPlan($: EngineInterface, outcome: { approved: true } | { changes: string } | { kept: true }) {
@@ -229,7 +253,10 @@ async function onPlan($: EngineInterface, outcome: { approved: true } | { change
   if (!r || r.phase !== 'plan') return
   if ('approved' in outcome) return startBuild($, [], [])
   // The person has a goal of their own in goal-run: the factory's band asks instead.
-  if ('kept' in outcome) return void (await patch($, cur => ({ ...cur, gate: 'factory', note: 'waiting for you to approve the plan (here: goal-run keeps your own goal)' })))
+  if ('kept' in outcome) {
+    await patch($, cur => ({ ...cur, gate: 'factory', note: 'waiting for you to approve the plan (here: goal-run keeps your own goal)' }))
+    return void askPlan($)
+  }
   await respec($, outcome.changes || 'The person asked for changes to the plan.')
 }
 
@@ -350,11 +377,15 @@ async function spawnReviewers($: EngineInterface, r: Run) {
 }
 
 async function onReview($: EngineInterface, role: Reviewer, agentId: string, answer: string, why: string) {
-  const verdict = !why ? parseVerdict(answer) : { state: 'changes' as const, findings: [{ severity: 'major' as const, where: '-', text: `The reviewer stopped: ${why}.` }] }
+  const verdict = !why ? parseVerdict(answer) : { state: 'fail' as const, findings: [{ severity: 'major' as const, where: '-', text: `The reviewer stopped: ${why}.` }] }
   const r = await patch($, cur => ({ ...cur, reviews: cur.reviews.map(x => (x.role === role && x.agentId === agentId ? { ...x, state: verdict.state, findings: verdict.findings } : x)) }))
   if (!r || r.phase !== 'review') return
   const mine = r.reviews.filter(x => x.round === r.round)
   if (mine.some(x => x.state === 'run')) return
+  // A reviewer that ended without a verdict (an API error, say) didn't review: the run waits for a
+  // Retry rather than sending the builder after a "finding" that isn't one, or the approver ahead.
+  const failed = mine.find(x => x.state === 'fail')
+  if (failed) return block($, { on: 'start', role: failed.role }, `${failed.findings[0]?.text ?? 'The reviewer stopped.'} The ${failed.role} review didn't run; Retry runs it again.`)
   const changes = mine.filter(x => x.state === 'changes')
   if (changes.length && r.round < maxRounds) return startBuild($, openFindings(changes), [])
   await startApprover($)
@@ -366,7 +397,9 @@ async function startApprover($: EngineInterface) {
 }
 
 async function onApprover($: EngineInterface, answer: string, why: string) {
-  const { decision, reason } = !why ? parseDecision(answer) : { decision: 'ESCALATE' as const, reason: `The approver stopped before deciding: ${why}.` }
+  // An approver that ended without a decision decided nothing: Retry, not an escalation to approve past.
+  if (why) return block($, { on: 'start', role: 'approver' }, `The approver stopped before deciding: ${why}. Retry runs it again.`, r => ({ ...r, steps: { ...r.steps, approver: { ...r.steps.approver, state: 'fail' } } }))
+  const { decision, reason } = parseDecision(answer)
   if (decision === 'ESCALATE') {
     await block($, { on: 'escalate' }, reason, r => ({ ...r, steps: { ...r.steps, approver: { ...r.steps.approver, state: 'changes' } } }))
     $.ui.toast('The factory needs you: Approve PR, or /factory stop')
@@ -452,7 +485,10 @@ async function retryNow($: EngineInterface): Promise<string> {
     if (b.role === 'spec') return respec($)
     if (b.role === 'builder') return startBuild($, openFindings(r.reviews.filter(x => x.round === r.round)), r.checks.filter(c => !c.ok))
     if (b.role === 'approver') return startApprover($)
-    const now = await patch($, cur => moveTo(cur, 'review', `reviewing, round ${cur.round}`))
+    const now = await patch($, cur => ({
+      ...moveTo(cur, 'review', `reviewing, round ${cur.round}`),
+      reviews: cur.reviews.map(x => (x.round === cur.round && x.state === 'fail' ? { ...x, state: 'run', agentId: null, findings: [] } : x)),
+    }))
     if (now) await spawnReviewers($, now)
   })
   return `Retrying: ${b.on === 'start' ? `starting the ${describe(b.role, r)}` : b.on === 'setup' ? 'the setup and the checks' : b.on === 'checks' ? 'the checks' : `the ${b.on === 'spec' ? 'spec-writer' : 'builder'}`}.`
@@ -495,6 +531,22 @@ export const register: Register = (on, options) => {
         .register({ name: spec.name, description: `The factory's ${spec.label}: started by /factory runs only.`, prompt: ROLE_PROMPTS[role], model: spec.model, ...(spec.tools ? { tools: spec.tools } : {}) })
         .catch(() => {})
     }
+    // Last, and allowed to fail: the rest of the start must not depend on it.
+    await $.tool
+      .register({
+      name: 'start',
+      description: "Start a factory run: its spec-writer writes a spec, you approve its plan, its builder builds it on a branch of its own, the checks and reviewers check it, and an approver decides on the PR. Call it when the person asks for the factory (\"run it in the factory\", /factory), with the feature in their words plus where its details are; then don't do the work yourself.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          feature: { type: 'string', description: 'What to build, in a sentence or a short paragraph, naming the file, issue or to-do item it comes from' },
+          followupId: { type: 'string', description: 'Optional: the id of the to-do item this is, from the followups start message' },
+        },
+        required: ['feature'],
+      },
+      isDeferred: false,
+    })
+      .catch(() => {})
     timers.push($.clock.every(FRAME_MS, () => tick($)))
     return next(e)
   })
@@ -529,6 +581,17 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // Claude starts a run itself when the person asks for the factory in words, or after /factory.
+  on('tool.call', { tool: START_TOOL }, async ($, e) => {
+    if ((e as { agentId?: string }).agentId !== undefined) return { deny: 'Only the main conversation starts a factory run.' }
+    const input = e as unknown as { feature?: unknown; followupId?: unknown }
+    const feature = String(input.feature ?? '').trim()
+    if (!feature) return { deny: 'Name the feature: what to build, and where its details are (a file, an issue, the to-do item).' }
+    const id = String(input.followupId ?? '').trim()
+    const said = await start($, factoryArgs(feature, id || undefined))
+    return { result: /^Factory run started/.test(said) ? `${said}\n${STARTED_NOTE}` : said }
+  })
+
   on('command.run', { command: 'factory' }, async ($, e) => {
     const arg = e.args.trim()
     if (arg === 'approve' || arg === FACTORY_PLAN_APPROVED_ARG) return { text: await approveNow($) }
@@ -537,7 +600,11 @@ export const register: Register = (on, options) => {
     if (!arg) {
       await $.ui.open({ id: PANE, title: PANE_TITLE })
       const r = await read($, run)
-      return { text: r ? `${r.feature}: ${r.note}.` : 'No factory run. /factory <feature> starts one.' }
+      if (r && isLive(r.phase)) return { text: `${r.feature}: ${r.note}.` }
+      // Nothing running: Claude names the work from the conversation and starts it with the tool.
+      // From a timer: a prompt submitted while the command's own hook still runs is refused.
+      $.clock.after(1, () => void $.prompt.submit({ text: FROM_CONVERSATION }).catch(() => $.ui.toast('/factory <feature> starts a run')))
+      return { text: 'Asked Claude to start a run from what this conversation is working on.' }
     }
     return { text: await start($, arg) }
   })

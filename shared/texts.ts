@@ -54,6 +54,11 @@ export const PLAN_APPROVED_FOR_FACTORY = "Approved. The factory's builder does t
 export const planChangesForFactory = (said: string) => `The person wants changes: ${said}\nThe factory's spec-writer revises the spec; don't propose a plan yourself.`
 export const PLAN_WAITING_FOR_FACTORY = "The person hasn't answered; the plan waits for approval in the Goal pane, and the factory waits with it."
 // The person has a goal of their own: goal-run keeps it, and the factory asks for approval itself.
+// goal-run's answer to a new goal's plan when the factory takes goals over (its takeOver option):
+// Claude starts the run with the factory's tool instead of planning it.
+export const FACTORY_START_TOOL = 'mcp__factory__start'
+export const factoryTakesGoal = (goal: string) =>
+  `Not planned here: the factory takes goals over. Call ${FACTORY_START_TOOL} now with feature ${JSON.stringify(goal)} (add where its details are, a file or issue, if the conversation names one). Its spec-writer writes the spec and its plan comes up for the person's approval; don't plan or start the work yourself.`
 export const PLAN_KEPT_FOR_FACTORY = "The person has a session goal of their own, so the factory's plan is not set as the goal. The factory asks the person to approve it in its own band; don't propose a plan or start the tasks."
 
 // Only the factory's own wording counts: a regular plan's "Approved. …" or "The person wants changes

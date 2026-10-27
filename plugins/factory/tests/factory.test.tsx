@@ -29,7 +29,7 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[] } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
   const sent: string[] = []
@@ -40,9 +40,10 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
   const held = new Promise<void>(r => (release = r))
   let failing = fails
   const worktreeErrs = [...worktree]
-  mock.clock(on, { now: Date.UTC(2026, 9, 25, 9) })
+  const clock = mock.clock(on, { now: Date.UTC(2026, 9, 25, 9) })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('command.register', (_, e) => ({ value: { command: e.name } }) as never)
+  on('tool.register', (_, e) => ({ value: { tool: `mcp__factory__${e.name}` } }) as never)
   on('agent.register', (_, e) => ({ value: { agent: `factory:${e.name}` } }) as never)
   on('command.list', () => ({ value: goalRun ? [{ name: 'session-goal', description: 'g', source: 'plugin' }] : [] }) as never)
   // The mod's own spawn arrives in the Agent tool's words (subagent_type).
@@ -107,11 +108,20 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
   // goal-run's plan tool, as it answers for a factory plan the person approved.
   on('tool.call', { tool: PLAN }, () => ({ result: PLAN_APPROVED_FOR_FACTORY }) as never)
   on('tool.call', { tool: 'Edit' }, () => ({ result: 'edited' }) as never)
+  // The engine's question dialog: the next answer, or dismissed when none is left.
+  const asked: string[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+    const q = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
+    asked.push(q)
+    const a = answers.shift()
+    if (a === undefined) throw new Error('dismissed')
+    return { result: { questions: (e as unknown as { questions: unknown }).questions, answers: { [q]: a } } } as never
+  })
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
-  return { spawned, ran, sent, toasts, written, release }
+  return { spawned, ran, sent, toasts, written, release, asked, clock }
 }
 
 const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<unknown[]> }) =>
@@ -720,5 +730,81 @@ describe('the models follow the size of the feature', () => {
     await answer($, 'a1', LARGE)
     await command($, 'approve')
     expect(last(w)).toMatchObject({ subagentType: 'factory:builder', model: 'sonnet' })
+  })
+})
+
+describe('starting a run, and its questions, in the main conversation', () => {
+  test('Claude starts a run with the start tool; not from inside a subagent', async ($, on) => {
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const r = await $.tool.call({ tool: 'mcp__factory__start', feature: 'Rate limiter, per ROUTER.md', followupId: 'k9' } as never)
+    await settled()
+    expect(String(r.result)).toMatch(/^Factory run started: Rate limiter, per ROUTER\.md\.[\s\S]*don't start it yourself/)
+    expect(last(w)).toMatchObject({ subagentType: 'factory:spec-writer' })
+    const denied = await $.tool.call({ tool: 'mcp__factory__start', feature: 'x', agentId: 'a7' } as never)
+    expect(JSON.stringify(denied)).toMatch(/Only the main conversation/)
+  })
+
+  test('/factory with nothing running asks Claude to start one from the conversation', async ($, on) => {
+    const w = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    expect(await command($, '')).toBe('Asked Claude to start a run from what this conversation is working on.')
+    await w.clock.advance(10)
+    await settled()
+    expect(w.sent.at(-1)).toMatch(/^Start a factory run on the work this conversation is about: call mcp__factory__start/)
+    expect(w.spawned).toHaveLength(0)
+  })
+
+  test('without goal-run the plan is asked in a dialog: approved, the builder starts', async ($, on) => {
+    const w = engine(on, { goalRun: false, answers: ['Approve and build'] })
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    expect(w.asked.at(-1)).toMatch(/^The factory's plan for "Rate limiter"[\s\S]*1\. \[high\] Token bucket core/)
+    expect(last(w)).toMatchObject({ id: 'a2', subagentType: 'factory:builder' })
+  })
+
+  test('the dialog\'s Other text sends the spec back with it; dismissed, the band still asks', async ($, on) => {
+    const w = engine(on, { goalRun: false, answers: ['Split the middleware task'] })
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    expect(last(w)).toMatchObject({ id: 'a2', subagentType: 'factory:spec-writer' })
+    expect(last(w).prompt).toContain('The person asked for changes to your earlier spec: Split the middleware task')
+    await answer($, 'a2', SPEC_ANSWER)
+    expect(w.spawned).toHaveLength(2)
+    expect(await bandText($)).toMatch(/waiting for you to approve the plan/)
+  })
+})
+
+describe('a reviewer or the approver that fails is retried, never approved past', () => {
+  test('an approver that failed offers Retry, not Approve PR; Retry runs it again', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    expect(last(w)).toMatchObject({ id: 'a5', subagentType: 'factory:approver' })
+    await answer($, 'a5', 'boom', 'error')
+    await answer($, 'a6', 'overloaded', 'error')
+    const t = await bandText($)
+    expect(t).toMatch(/The approver stopped before deciding/)
+    expect(t).not.toMatch(/Approve PR/)
+    expect(await command($, 'approve')).toMatch(/^Nothing to approve/)
+    await command($, 'retry')
+    expect(last(w)).toMatchObject({ id: 'a7', subagentType: 'factory:approver' })
+  })
+
+  test("a reviewer that failed doesn't send the builder back: Retry runs that reviewer alone", async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    await answer($, 'a3', 'x', 'error')
+    await answer($, 'a5', 'overloaded', 'error')
+    await answer($, 'a4', PASS)
+    expect(w.spawned.map(s => s.subagentType)).not.toContain('factory:approver')
+    expect(w.spawned.filter(s => s.subagentType === 'factory:builder')).toHaveLength(1)
+    expect(await bandText($)).toMatch(/The security review didn't run; Retry runs it again/)
+    const sec = () => w.spawned.filter(s => s.subagentType === 'factory:security-reviewer').length
+    const before = sec()
+    await command($, 'retry')
+    expect(sec()).toBe(before + 1)
+    expect(w.spawned.filter(s => s.subagentType === 'factory:code-reviewer')).toHaveLength(1)
   })
 })
