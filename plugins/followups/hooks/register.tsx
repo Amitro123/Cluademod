@@ -12,6 +12,7 @@ const exported = atom({ plugin: 'followups', key: 'exported' } as const, '')
 const skipped = atom({ plugin: 'followups', key: 'skipped' } as const, [] as string[])
 // The list as this session last loaded or saved it, to merge with another session's saves.
 const base = atom({ plugin: 'followups', key: 'base' } as const, [] as Item[])
+const startedHere = atom({ plugin: 'followups', key: 'startedHere' } as const, [] as string[])
 
 const PANE = 'followups'
 const PANE_TITLE = 'To-do'
@@ -364,6 +365,7 @@ async function setStatus($: EngineInterface, ids: Set<string>, status: Status) {
 
 async function start($: EngineInterface, which: Item[]) {
   if (!which.length) return
+  await update($, startedHere, l => [...new Set([...l, ...which.map(i => i.id)])])
   await setStatus($, new Set(which.map(i => i.id)), 'in_progress')
   // A turn of its own once the session is idle; it may not resolve until then, so not awaited. If
   // it can't be sent, the items go back to open, where their Start button is.
@@ -635,6 +637,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const list = await read($, items)
+    const here = await read($, startedHere)
     const note = await read($, exported)
     const count = (st: Status) => list.filter(i => i.status === st).length
     const [open, doing, done] = [count('open'), count('in_progress'), count('done')]
@@ -666,6 +669,7 @@ export const register: Register = (on, options) => {
                   </Box>
                   <Box flexDirection="row" gap={1}>
                     {i.status === 'open' ? <Button key={`s-${i.id}`} label="▶ Start" plain onPress={() => start($, [i])} /> : null}
+                    {i.status === 'in_progress' && !here.includes(i.id) ? <Button key={`s-${i.id}`} label="▶ Start again" plain onPress={() => start($, [i])} /> : null}
                     {i.status === 'open' && hasFactory ? <Button key={`f-${i.id}`} label="🏭" plain onPress={() => toFactory($, i)} /> : null}
                     <Button key={`t-${i.id}`} label={i.status === 'done' ? '↺ Reopen' : '✓ Done'} plain onPress={toggle(i.id)} />
                     <Button key={`x-${i.id}`} label="✕" plain onPress={remove(i.id)} />

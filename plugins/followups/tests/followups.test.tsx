@@ -322,6 +322,22 @@ describe('flag → ask → to-do → export', () => {
     expect(opened).toEqual(['followups'])
   })
 
+  test("an item still in progress from an earlier session can be started again; one started here can't", async ($, on) => {
+    const sent: string[] = []
+    on('prompt.submit', (_, e) => {
+      sent.push(e.text)
+      return { text: e.text } as never
+    })
+    engine(on, {}, saved('in_progress'))
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await pane.find({ key: 's-x' } as never)).toBeTruthy()
+    await pane.press({ key: 's-x' })
+    expect(sent.at(-1)).toMatch(/Left from yesterday/)
+    expect(await pane.find({ key: 's-x' } as never)).toBeFalsy()
+    await pane.unmount()
+  })
+
   test('a folder with only done items starts with the pane closed', async ($, on) => {
     const opened: string[] = []
     engine(on, {}, saved('done'), opened)
