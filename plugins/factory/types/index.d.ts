@@ -1,6 +1,8 @@
 // A step's state, as the pane draws it.
 export type StepState = 'wait' | 'run' | 'pass' | 'changes' | 'fail' | 'skip'
 export type Role = 'spec' | 'builder' | 'security' | 'code' | 'approver'
+// How big the spec-writer judged the feature: what the models of the later roles follow.
+export type Size = 'small' | 'medium' | 'large'
 export type Reviewer = 'security' | 'code'
 export type Severity = 'blocker' | 'major' | 'minor'
 export type Finding = { severity: Severity; where: string; text: string }
@@ -36,6 +38,9 @@ export type Run = {
   worktree: string
   specFile: string
   tasks: SpecTask[]
+  // The spec-writer's judgment of the feature, and the model each role runs on in this run.
+  size?: Size
+  models?: Partial<Record<Role, string>>
   steps: Record<'spec' | 'builder' | 'checks' | 'approver', { state: StepState; tokens: number }>
   checks: Check[]
   reviews: Review[]

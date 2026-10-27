@@ -1,15 +1,17 @@
 // The factory's pure parts: what each role is told, how its answer is read, which checks run, and
 // how a run starts. The hooks module only spawns, runs and draws.
 
-import type { Check, Finding, Phase, Review, Reviewer, Role, Run, Severity, SpecTask, StepState } from '../types'
+import type { Check, Finding, Phase, Review, Reviewer, Role, Run, Severity, Size, SpecTask, StepState } from '../types'
 import { FACTORY_SOURCE } from './texts'
 
 export const REVIEWERS: Reviewer[] = ['security', 'code']
 
-// Each role as an agent type `factory:<name>`, with the model it runs on by default.
+// Each role as an agent type `factory:<name>`, with the model it runs on by default: sonnet does
+// the writing and building; opus is kept where a miss costs most, the security review and the
+// approval. A large feature moves the builder up to opus too (modelsFor).
 export const ROLES: Record<Role, { name: string; model: string; label: string; tools?: string[] }> = {
-  spec: { name: 'spec-writer', model: 'opus', label: 'spec-writer', tools: ['Read', 'Grep', 'Glob', 'Write', 'Edit', 'Bash'] },
-  builder: { name: 'builder', model: 'opus', label: 'builder' },
+  spec: { name: 'spec-writer', model: 'sonnet', label: 'spec-writer', tools: ['Read', 'Grep', 'Glob', 'Write', 'Edit', 'Bash'] },
+  builder: { name: 'builder', model: 'sonnet', label: 'builder' },
   security: { name: 'security-reviewer', model: 'opus', label: 'security', tools: ['Read', 'Grep', 'Glob', 'Bash'] },
   code: { name: 'code-reviewer', model: 'sonnet', label: 'code', tools: ['Read', 'Grep', 'Glob', 'Bash'] },
   approver: { name: 'approver', model: 'opus', label: 'approver', tools: ['Read', 'Grep', 'Glob'] },
@@ -38,6 +40,22 @@ export function parseTasks(answer: string): SpecTask[] {
   }
   return out
 }
+
+// The spec-writer's size line:  SIZE: small | medium | large.  None (or another word): null.
+export function parseSize(answer: string): Size | null {
+  const m = /^\s*SIZE:\s*(small|medium|large)\b/im.exec(answer)
+  return m ? (m[1]!.toLowerCase() as Size) : null
+}
+
+// The model each role runs on for a feature of this size. 'auto' moves the builder up to opus for a
+// large one; 'fixed' keeps the defaults whatever the size.
+export function modelsFor(size: Size | null, mode: 'auto' | 'fixed'): Record<Role, string> {
+  const out = Object.fromEntries((Object.keys(ROLES) as Role[]).map(r => [r, ROLES[r].model])) as Record<Role, string>
+  if (mode === 'auto' && size === 'large') out.builder = 'opus'
+  return out
+}
+
+export const modelOf = (run: Pick<Run, 'models'> | null | undefined, role: Role) => run?.models?.[role] ?? ROLES[role].model
 
 // A reviewer ends with:  VERDICT: PASS | CHANGES  and  FINDINGS:  "- [major] path:line what and why".
 // No verdict reads as CHANGES, so a confused reviewer can't wave a change through.
@@ -118,6 +136,9 @@ export function specPrompt(run: Run, feedback = ''): string {
     `Feature: ${run.feature}`,
     ...(feedback ? [`The person asked for changes to your earlier spec: ${feedback}`, 'Revise the spec file and the tasks.'] : []),
     `Write the spec to ${run.specFile} (create the folder if needed).`,
+    'Then judge the size of the feature, on a line of its own:',
+    'SIZE: small, medium or large',
+    'small: a local change in one or two files. medium: a few files in one area, the design clear. large: it spans several modules, or needs design decisions (architecture, data model or migrations, security, concurrency), or the request leaves real questions open. The builder runs on a stronger model for a large one.',
     'Then end your answer with the task breakdown, in this exact form, 3 to 8 tasks, in any order:',
     'TASKS:',
     '1. [high] <short imperative title>',

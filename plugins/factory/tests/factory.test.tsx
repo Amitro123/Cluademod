@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cleanFeature, detectChecks, detectSetup, parseDecision, parseTasks, parseVerdict, splitChecks } from '../hooks/flow'
+import { cleanFeature, detectChecks, detectSetup, modelsFor, parseDecision, parseSize, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
 import { factoryArgs, goalPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -215,7 +215,7 @@ describe('a run from the feature to the PR', () => {
 
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
     const text = await texts(pane)
-    expect(text).toMatch(/✓ spec-writer \(opus\) · 3 tasks/)
+    expect(text).toMatch(/✓ spec-writer \(sonnet\) · 3 tasks/)
     expect(text).toMatch(/✓ approver/)
     expect(text).toMatch(/✓ open PR/)
     expect(text).toMatch(/2k tokens/)
@@ -610,8 +610,8 @@ describe('an agent that fails says why', () => {
   test('an API error retries once on the session model, then stops with the reason', async ($, on) => {
     const w = engine(on)
     await startRun($)
-    expect(last(w).model).toBe('opus')
-    await answer($, 'a1', 'model not available: opus', 'error')
+    expect(last(w).model).toBe('sonnet')
+    await answer($, 'a1', 'model not available: sonnet', 'error')
     expect(last(w)).toMatchObject({ id: 'a2', subagentType: 'factory:spec-writer' })
     expect(last(w).model).toBeUndefined()
     await answer($, 'a2', 'overloaded', 'error')
@@ -674,5 +674,51 @@ describe('the parsers', () => {
     expect(detectSetup(['package.json'])).toEqual(['npm', 'install'])
     expect(detectSetup(['package.json', 'node_modules', 'package-lock.json'])).toBeNull()
     expect(detectSetup(['go.mod'])).toBeNull()
+  })
+})
+
+describe('the models follow the size of the feature', () => {
+  const LARGE = SPEC_ANSWER.replace('TASKS:', 'SIZE: large\nTASKS:')
+  const models = (w: { spawned: Spawned[] }) => Object.fromEntries(w.spawned.map(x => [x.subagentType.replace('factory:', ''), x.model]))
+
+  test('the spec-writer is asked for a size, and its line is read', () => {
+    expect(specPrompt({ feature: 'x', specFile: 'docs/specs/x.md' } as never)).toMatch(/^SIZE: small, medium or large$/m)
+    expect(parseSize('Wrote it.\nSIZE: Large\nTASKS:\n1. [high] a')).toBe('large')
+    expect(parseSize('size: small')).toBe('small')
+    expect(parseSize(SPEC_ANSWER)).toBeNull()
+    expect(parseSize('SIZE: huge')).toBeNull()
+  })
+
+  test('auto: sonnet builds unless the feature is large; opus reviews security and approves; fixed ignores the size', () => {
+    expect(modelsFor('medium', 'auto')).toEqual({ spec: 'sonnet', builder: 'sonnet', security: 'opus', code: 'sonnet', approver: 'opus' })
+    expect(modelsFor(null, 'auto').builder).toBe('sonnet')
+    expect(modelsFor('large', 'auto').builder).toBe('opus')
+    expect(modelsFor('large', 'fixed').builder).toBe('sonnet')
+  })
+
+  test('a large feature: the builder is spawned on opus, and the pane says so', async ($, on) => {
+    const w = engine(on)
+    await startRun($)
+    await answer($, 'a1', LARGE)
+    await command($, 'approve')
+    await answer($, 'a2', 'built')
+    expect(models(w)).toEqual({ 'spec-writer': 'sonnet', builder: 'opus', 'security-reviewer': 'opus', 'code-reviewer': 'sonnet' })
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/spec-writer \(sonnet\) · 3 tasks, large[\s\S]*builder \(opus\)/)
+    await pane.unmount()
+  })
+
+  test('no size line: the defaults', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    expect(models(w).builder).toBe('sonnet')
+  })
+
+  test('with models fixed, a large feature still builds on sonnet', { options: { models: 'fixed' } } as never, async ($: Engine, on: On) => {
+    const w = engine(on)
+    await startRun($)
+    await answer($, 'a1', LARGE)
+    await command($, 'approve')
+    expect(last(w)).toMatchObject({ subagentType: 'factory:builder', model: 'sonnet' })
   })
 })
