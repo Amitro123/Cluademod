@@ -958,3 +958,10 @@ describe('two sessions on the same goal keep both sides\' progress', () => {
     expect(after.tasks.map(t => [t.id, t.status, t.tokens])).toEqual([['t1', 'in_progress', 1000], ['t2', 'done', 700]])
   })
 })
+
+describe('a plan with a blank task', () => {
+  test("the tasks after it keep depending on the ones they named", () => {
+    const items = planItems([{ title: 'A' }, { title: '  ' }, { title: 'C', dependsOn: [1] }, { title: 'D', dependsOn: [3, 2] }])
+    expect(items.map(i => [i.title, i.dependsOn])).toEqual([['A', []], ['C', [1]], ['D', [2]]])
+  })
+})

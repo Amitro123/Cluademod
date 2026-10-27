@@ -79,14 +79,19 @@ export type PlanItem = { title: string; priority: Priority; dependsOn: number[] 
 // dependsOn the 1-based places of other tasks in the same list.
 export function planItems(raw: unknown): PlanItem[] {
   if (!Array.isArray(raw)) return []
-  return raw.slice(0, MAX_TASKS).map(r => {
+  const all = raw.slice(0, MAX_TASKS).map(r => {
     const o = (r && typeof r === 'object' ? r : { title: r }) as { title?: unknown; priority?: unknown; dependsOn?: unknown }
     return {
       title: clip(String(o.title ?? '').trim(), 120),
       priority: isPriority(o.priority) ? o.priority : 'medium',
       dependsOn: Array.isArray(o.dependsOn) ? o.dependsOn.map(Number).filter(n => Number.isInteger(n)) : [],
     }
-  }).filter(it => it.title)
+  })
+  // dependsOn counts places in the list as given: a blank task dropped shifts the places after it,
+  // so they are renumbered, and a dependency on a dropped task goes with it.
+  const place = new Map<number, number>()
+  all.forEach((it, i) => it.title && place.set(i + 1, place.size + 1))
+  return all.filter(it => it.title).map(it => ({ ...it, dependsOn: it.dependsOn.flatMap(n => (place.has(n) ? [place.get(n)!] : [])) }))
 }
 
 // The order the work runs in: the highest priority whose dependencies are done goes next, ties in
