@@ -207,6 +207,8 @@ def main() -> int:
     if _draft_entry(project_dir, event_type, description):
         # Stop's additionalContext reaches the model with the next turn, once this one has ended:
         # the note says so, rather than asking for something before a turn that is already over.
+        # Checked against Claude Code 2.1.310's own hook types (claude-code.d.ts, ClassicResultFields:
+        # `Stop: 'additionalContext'`, "text handed to the model with the event"); not checked live.
         _emit(
             f"[mistake-brain] At the end of the last turn, a revert was auto-drafted into MISTAKES.md: `{description}`\n"
             "1 unrouted entry now in the inbox. "
