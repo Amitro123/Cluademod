@@ -661,7 +661,8 @@ export const register: Register = (on, options) => {
     const status = input.status
     await setGoal($, cur => (cur ? withStatus(cur, id, status) : cur))
     const now = (await read($, goal))!
-    if (now.status === 'done') $.ui.toast(goalReachedToast(now.text))
+    // Once, as the goal is reached: an update to a task of a goal already done says nothing new.
+    if (now.status === 'done' && g.status !== 'done') $.ui.toast(goalReachedToast(now.text))
     const where = `${id} is ${status.replace('_', ' ')}. ${now.tasks.filter(t => t.status === 'done').length}/${now.tasks.length} tasks done (${percentOf(now)}%).`
     const next = now.tasks.find(t => t.status === 'pending')
     if (now.status === 'done') return { result: `${where} ${GOAL_REACHED}` }

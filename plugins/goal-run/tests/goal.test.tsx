@@ -965,3 +965,15 @@ describe('a plan with a blank task', () => {
     expect(items.map(i => [i.title, i.dependsOn])).toEqual([['A', []], ['C', [1]], ['D', [2]]])
   })
 })
+
+describe('the goal-reached toast', () => {
+  test('shows once, when the last task is done; later updates of the done goal stay quiet', async ($, on) => {
+    const w = engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One'] } as never)
+    await $.tool.call({ tool: 'mcp__goal-run__update', id: 't1', status: 'done' } as never)
+    await $.tool.call({ tool: 'mcp__goal-run__update', id: 't1', status: 'done' } as never)
+    expect(w.toasts.filter(t => /^Goal reached/.test(t))).toHaveLength(1)
+  })
+})
