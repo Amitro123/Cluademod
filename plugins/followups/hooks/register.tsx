@@ -372,8 +372,14 @@ async function start($: EngineInterface, which: Item[]) {
   $.prompt.submit({ text: startPrompt(which) }).catch(() => setStatus($, new Set(which.map(i => i.id)), 'open'))
 }
 
-// Whether the factory mod is installed: an open item can be run through it instead of started.
-let hasFactory = false
+// Whether the factory mod is installed: an open item can be run through it instead of started (🏭).
+// Mods start in no set order, so it's asked again until it's there (checkFactory).
+const hasFactory = atom({ plugin: 'followups', key: 'hasFactory' } as const, false)
+
+async function checkFactory($: EngineInterface) {
+  if (await read($, hasFactory)) return
+  if ((await $.command.list().catch(() => [])).some(c => c.name === 'factory')) await update($, hasFactory, () => true)
+}
 
 // An item run through the factory: /factory with what the item says, its id carried along so the
 // run's PR prompt has Claude mark it done. In progress meanwhile; back to open if it can't start.
@@ -477,7 +483,8 @@ export const register: Register = (on, options) => {
     if (held.some(i => !isStatus((i as { status?: unknown }).status))) await update($, items, l => migrate(l))
     await migrateKey($, 'items')
     await migrateKey($, 'skipped')
-    hasFactory = (await $.command.list().catch(() => [])).some(c => c.name === 'factory')
+    await update($, hasFactory, () => false)
+    await checkFactory($)
     // Items kept in this project carry over to a new session; a resumed one, which comes back with
     // the list it had, takes in what other sessions changed meanwhile.
     await sync($)
@@ -499,6 +506,7 @@ export const register: Register = (on, options) => {
 
   // A new turn from the person (a continuation after a stop has no text) starts the check afresh.
   on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await checkFactory($)
     if (e.agentId === undefined && e.text !== '') {
       isFlagged = false
       isBlocked = false
@@ -641,6 +649,7 @@ export const register: Register = (on, options) => {
     const list = await read($, items)
     const here = await read($, startedHere)
     const note = await read($, exported)
+    const canFactory = await read($, hasFactory)
     const count = (st: Status) => list.filter(i => i.status === st).length
     const [open, doing, done] = [count('open'), count('in_progress'), count('done')]
     const toggle = (id: string) => async () => {
@@ -672,7 +681,7 @@ export const register: Register = (on, options) => {
                   <Box flexDirection="row" gap={1}>
                     {i.status === 'open' ? <Button key={`s-${i.id}`} label="▶ Start" plain onPress={() => start($, [i])} /> : null}
                     {i.status === 'in_progress' && !here.includes(i.id) ? <Button key={`s-${i.id}`} label="▶ Start again" plain onPress={() => start($, [i])} /> : null}
-                    {i.status === 'open' && hasFactory ? <Button key={`f-${i.id}`} label="🏭" plain onPress={() => toFactory($, i)} /> : null}
+                    {i.status === 'open' && canFactory ? <Button key={`f-${i.id}`} label="🏭" plain onPress={() => toFactory($, i)} /> : null}
                     <Button key={`t-${i.id}`} label={i.status === 'done' ? '↺ Reopen' : '✓ Done'} plain onPress={toggle(i.id)} />
                     <Button key={`x-${i.id}`} label="✕" plain onPress={remove(i.id)} />
                   </Box>

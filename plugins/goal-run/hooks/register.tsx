@@ -324,15 +324,23 @@ async function save($: EngineInterface) {
   if (await read($, superseded)) await update($, superseded, () => false)
 }
 
-// Whether the factory mod is installed: the Goal pane offers to run the goal through it.
-let hasFactory = false
+// Whether the factory mod is installed: the Goal pane offers to run the goal through it. Mods start in
+// no set order, so it's asked again until it's there (checkFactory), not only at session start.
+const hasFactory = atom({ plugin: 'goal-run', key: 'hasFactory' } as const, false)
+
+async function checkFactory($: EngineInterface): Promise<boolean> {
+  if (await read($, hasFactory)) return true
+  const found = (await $.command.list().catch(() => [])).some(c => c.name === 'factory')
+  if (found) await update($, hasFactory, () => true)
+  return found
+}
 
 // The goal goes to the factory: marked as the factory's, so the spec's plan replaces it (instead of
 // being kept apart as the person's own), then /factory runs with its text. A refused command puts
 // the goal back as it was.
 // factory's own takeOver option (on by default): whether a goal planned here goes to the factory.
 async function factoryTakesOver($: EngineInterface): Promise<boolean> {
-  if (!hasFactory) return false
+  if (!(await checkFactory($))) return false
   const row = (await $.config.list().catch(() => [])).find(r => r.key === 'factory.takeOver')
   return String(row?.value ?? 'on') !== 'off'
 }
@@ -561,7 +569,8 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
     await $.command.register({ name: 'session-goal', description: 'Set a session goal, or show it', argumentHint: '[goal | clear]' })
-    hasFactory = (await $.command.list().catch(() => [])).some(c => c.name === 'factory')
+    await update($, hasFactory, () => false)
+    await checkFactory($)
 
     // A goal kept for this project from an earlier session: offered to continue, or a new one asked for.
     const key = await storeKey($)
@@ -586,6 +595,7 @@ export const register: Register = (on, options) => {
 
   // Another session open beside this one may have changed the goal since.
   on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await checkFactory($)
     if (e.agentId === undefined && e.text !== '') await sync($).catch(() => {})
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -881,6 +891,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const g = await read($, goal)
+    const canRunAsFactory = await read($, hasFactory)
     const frame = Math.floor((await read($, tick)) / FRAME_MS)
     const Svg = e.surface === 'terminal' ? null : $.ui.resolve(e as typeof e & { surface: 'desktop' }).Svg
 
@@ -954,7 +965,7 @@ export const register: Register = (on, options) => {
           {g.status === 'active' ? (
             <Button key="pace" label={paceOf(g) === 'run' ? '⏩ Runs through · ask between' : '⏸ Asks between · run through'} plain onPress={() => setGoal($, cur => (cur ? { ...cur, pace: paceOf(cur) === 'run' ? 'ask' : 'run' } : cur))} />
           ) : null}
-          {hasFactory && g.status !== 'done' && g.source !== FACTORY_SOURCE ? (
+          {canRunAsFactory && g.status !== 'done' && g.source !== FACTORY_SOURCE ? (
             <Button key="factory" label="🏭 Run as factory" plain onPress={() => runAsFactory($)} />
           ) : null}
           <Button key="clear" label="Clear goal" plain onPress={() => setGoal($, () => null)} />

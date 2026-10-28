@@ -978,6 +978,22 @@ describe('one list per repository, and items through the factory', () => {
     await again.unmount()
   })
 
+  test('a factory that registers after this mod started still gets its 🏭 from the next turn', async ($, on) => {
+    let loaded = false
+    on('command.list', () => ({ value: loaded ? [{ name: 'factory', description: 'f', source: 'plugin' }] : [] }) as never)
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    const saved: Record<string, unknown> = {}
+    engine(on, { 'README.md': '' }, saved)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'followup', args: 'Add a rate limiter' } as never)
+    const id = (saved['items:/repo'] as { id: string }[])[0]!.id
+    loaded = true
+    await $.turn.start({ turnId: 't1', text: 'hi' } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await pane.find({ key: `f-${id}` } as never)).toBeTruthy()
+    await pane.unmount()
+  })
+
   test('without the factory installed there is no 🏭', async ($, on) => {
     const saved: Record<string, unknown> = {}
     engine(on, { 'README.md': '' }, saved)

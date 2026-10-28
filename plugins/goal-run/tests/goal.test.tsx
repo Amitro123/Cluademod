@@ -817,6 +817,34 @@ describe('a goal run through the factory', () => {
     return ran
   }
 
+  test("a factory that registers after this mod started is seen: a new goal's plan goes to it", async ($, on) => {
+    let loaded = false
+    on('command.list', () => ({ value: loaded ? [{ name: 'factory', description: 'f', source: 'plugin' }] : [] }) as never)
+    on('config.list', () => ({ value: [] }) as never)
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    loaded = true
+    const r = await $.tool.call({ tool: PLAN, goal: 'Ship it', tasks: ['One', 'Two'] } as never)
+    expect(String(r.result)).toBe(factoryTakesGoal('Ship it'))
+  })
+
+  test('the Goal pane offers the factory once it registers, from the next turn', async ($, on) => {
+    let loaded = false
+    on('command.list', () => ({ value: loaded ? [{ name: 'factory', description: 'f', source: 'plugin' }] : [] }) as never)
+    on('config.list', () => ({ value: [{ key: 'factory.takeOver', value: 'off' }] }) as never)
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
+    loaded = true
+    await $.turn.start({ turnId: 't1', text: 'go on' } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await pane.find({ key: 'factory' } as never)).toBeTruthy()
+    await pane.unmount()
+  })
+
   test('a new goal Claude plans goes to the factory when it takes goals over: no plan, no dialog', async ($, on) => {
     const ran = withFactory(on)
     const w = engine(on, { answers: ['Approve, run through'] })
