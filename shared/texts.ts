@@ -115,6 +115,23 @@ export function parseFactoryArgs(args: string): { feature: string; followupId?: 
   return m ? { feature: m[1]!.trim(), followupId: m[2]! } : { feature: args.trim() }
 }
 
+// factory's takeOver: what a goal prompt or a one-item Start prompt hands the factory, as /factory's
+// arguments, else null. Shared so that goal-run and brain-hud, which also read these prompts, can tell
+// the factory takes one whatever order the mods' hooks run in.
+// Several items started together stay the main Claude's.
+// Only the mods' own prompts: a message the person types that happens to hold a line like
+// "My goal for this session:" or "- id x:" goes on as typed.
+export function takeOverArgs(text: string, origin?: { kind: string; name?: string }): string | null {
+  if (origin?.kind !== 'plugin') return null
+  const goal = origin.name === 'goal-run' ? parseGoalPrompt(text) : null
+  if (goal) return goal
+  if (origin.name !== 'followups') return null
+  const items = parseStartPrompt(text)
+  if (items.length !== 1) return null
+  const it = items[0]!
+  return factoryArgs(`${it.title}${it.detail ? ` — ${it.detail}` : ''}${it.where ? ` (${it.where})` : ''}`, it.id)
+}
+
 // What a project's saved goal and to-do list are keyed by: the main repository, the same for each of
 // its git worktrees (a session in a worktree has a root of its own), else the session's root.
 // `git` answers `--git-common-dir` relative to the root in the main checkout, absolute in a worktree.

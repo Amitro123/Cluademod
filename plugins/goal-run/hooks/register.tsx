@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
-import { FACTORY_SOURCE, factoryPlanApprovedArgs, factoryTakesGoal, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
+import { FACTORY_SOURCE, factoryPlanApprovedArgs, factoryTakesGoal, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, takeOverArgs, toolText } from './texts'
 // The goal-run tests import the start-prompt parser from here, as before it was shared.
 export { parseStartPrompt }
 
@@ -772,6 +772,8 @@ export const register: Register = (on, options) => {
     if (e.command) return next(e)
     const g = await read($, goal)
     if (e.origin.kind === 'plugin' && e.origin.name === TODO_PLUGIN) {
+      // A Start the factory takes over is its run, not a side job, whichever mod's hook runs first.
+      if (takeOverArgs(e.text, e.origin) && (await factoryTakesOver($))) return next(e)
       const items = parseStartPrompt(e.text)
       if (g && items.length) {
         await update($, side, () => ({ items, tokens: 0, isAsking: g.status === 'active', taskIds: [], doneIds: [], isLive: true }))

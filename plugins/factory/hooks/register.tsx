@@ -49,7 +49,7 @@ import {
   progressNote,
   resumePrompt,
 } from './flow'
-import { FACTORY_START_TOOL, factoryArgs, type GoalTask, parseFactoryArgs, parseGoalPrompt, parsePlanApprovedArgs, parsePlanOutcome, parseStartPrompt, toolText } from './texts'
+import { FACTORY_START_TOOL, factoryArgs, type GoalTask, parseFactoryArgs, parsePlanApprovedArgs, parsePlanOutcome, takeOverArgs, toolText } from './texts'
 
 const run = atom({ plugin: 'factory', key: 'run' } as const, null as Run | null)
 const frame = atom({ plugin: 'factory', key: 'frame' } as const, 0)
@@ -177,21 +177,6 @@ export function whyEnded(e: { reason: string; answer: string; refusal?: { explan
   if (e.reason === 'refusal') return `the model refused${e.refusal?.explanation ? `: ${e.refusal.explanation}` : ''}`
   const said = e.answer.trim()
   return `an API error ended it${said ? `: ${tailOf(said, 1)}` : ''}`
-}
-
-// What a goal prompt or a one-item Start prompt hands the factory: /factory's arguments, else null.
-// Several items started together stay the main Claude's.
-// Only the mods' own prompts: a message the person types that happens to hold a line like
-// "My goal for this session:" or "- id x:" goes on as typed.
-export function takeOverArgs(text: string, origin?: { kind: string; name?: string }): string | null {
-  if (origin?.kind !== 'plugin') return null
-  const goal = origin.name === 'goal-run' ? parseGoalPrompt(text) : null
-  if (goal) return goal
-  if (origin.name !== 'followups') return null
-  const items = parseStartPrompt(text)
-  if (items.length !== 1) return null
-  const it = items[0]!
-  return factoryArgs(`${it.title}${it.detail ? ` — ${it.detail}` : ''}${it.where ? ` (${it.where})` : ''}`, it.id)
 }
 
 // What a run needs before it can start, checked cheaply: no run going, a git repository with a commit.

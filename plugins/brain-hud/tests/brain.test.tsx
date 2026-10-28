@@ -827,6 +827,19 @@ describe('the session journal: in a session', () => {
     expect(files['MISTAKES.md']).toMatch(/Next steps:\*\* finish the to-do "Rotate the keys"; answer: Should the second request retry too\?/)
   })
 
+  test("a to-do the factory takes over isn't left open in the handoff; two started together are", async ($, on) => {
+    const files = project()
+    engine(on, files, { commands: ['followup', 'factory'] })
+    await start($)
+    await $.prompt.submit({ text: startLine({ id: 'k9', title: 'Rotate the keys' }), origin: { kind: 'plugin', name: 'followups' } } as never)
+    await $.prompt.submit({ text: [startLine({ id: 'k1', title: 'Fix the upload' }), startLine({ id: 'k2', title: 'Docs' })].join('\n'), origin: { kind: 'plugin', name: 'followups' } } as never)
+    await worker($, 'Check the upload retry', REPORT)
+    await $.session.end({ reason: 'other', sessionId: 's-1', resume: {} } as never)
+    expect(files['MISTAKES.md']).toMatch(/finish the to-do "Fix the upload"/)
+    expect(files['MISTAKES.md']).toMatch(/finish the to-do "Docs"/)
+    expect(files['MISTAKES.md']).not.toMatch(/Rotate the keys/)
+  })
+
   test('nothing left open, no handoff; and a project without the memory gets none', async ($, on) => {
     const files = project()
     engine(on, files)

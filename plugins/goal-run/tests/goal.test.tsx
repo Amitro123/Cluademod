@@ -309,6 +309,23 @@ describe('work started from the followups to-do list', () => {
     return w
   }
 
+  test("with the factory taking items over, a one-item Start is its run, not a side job; two items still are", async ($, on) => {
+    // The goal is the person's own, planned before the factory was there to take it.
+    let loaded = false
+    on('command.list', () => ({ value: loaded ? [{ name: 'factory', description: 'f', source: 'plugin' }] : [] }) as never)
+    await halfway($, on)
+    loaded = true
+    await $.prompt.submit(fromTodo)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(band)).not.toMatch(/Add to your goal/)
+    await band.unmount()
+    const two = ['Start these 2 items from my to-do list, one after the other:', '- id fu-1: Rotate the dev key', '- id fu-2: Update the docs', 'Do the work.'].join('\n')
+    await $.prompt.submit({ text: two, wait: false, origin: { kind: 'plugin', name: 'followups' } } as never)
+    const again = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(again)).toMatch(/Add to your goal/)
+    await again.unmount()
+  })
+
   test('kept separate: no goal reminder beside it, and its tokens counted outside the goal', async ($, on) => {
     const w = await halfway($, on)
     const r = await $.prompt.submit(fromTodo)
