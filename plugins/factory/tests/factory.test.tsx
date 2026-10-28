@@ -1178,3 +1178,30 @@ describe("a check whose program isn't installed is skipped, not failed", () => {
   })
 
 })
+
+describe('with no check run, an approval is the person\'s call', () => {
+  test('the approver is told; its APPROVE becomes an escalation the person can approve past', async ($, on) => {
+    const w = engine(on, { files: [], pkg: '{}' })
+    await toReviews($)
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    expect(last(w).prompt).toContain('Checks: NONE RAN.')
+    expect(last(w).prompt).toContain('No check ran: an APPROVE goes to the person as an escalation')
+    await answer($, 'a5', 'DECISION: APPROVE\nREASON: tests read fine')
+    const t = await bandText($)
+    expect(t).toMatch(/no check ran, so nothing was verified by running it/)
+    expect(t).not.toMatch(/Open the PR when you're ready/)
+    expect(w.asked.at(-1)).toMatch(/was escalated by the approver/)
+    expect(await command($, 'approve')).toBe('Approved: Claude opens the PR.')
+  })
+
+  test('with checks that ran and passed, an APPROVE stays an approval', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    expect(last(w).prompt).not.toContain('No check ran')
+    await answer($, 'a5', 'DECISION: APPROVE\nREASON: ok')
+    expect(await bandText($)).toMatch(/approved: ok\. Open the PR when you're ready/)
+  })
+})

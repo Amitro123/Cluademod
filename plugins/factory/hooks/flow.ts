@@ -254,6 +254,7 @@ export function approvePrompt(run: Run): string {
     `Review rounds: ${run.round}. The last verdicts:`,
     ...reviews,
     'APPROVE when every acceptance criterion is met and no blocker or major finding is left; otherwise ESCALATE to the person.',
+    ...(!ranChecks(run).length ? ['No check ran: an APPROVE goes to the person as an escalation, since nothing was verified by running it. Say in your reason what the reviews did verify.'] : []),
     'End with exactly:',
     'DECISION: APPROVE or DECISION: ESCALATE',
     'REASON: <one line>',

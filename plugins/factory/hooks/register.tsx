@@ -34,6 +34,7 @@ import {
   tokensOf,
   untrackedOf,
   couldNotStart,
+  ranChecks,
   leftOut,
   waitsOnPerson,
   modelOf,
@@ -558,7 +559,13 @@ async function startApprover($: EngineInterface) {
 async function onApprover($: EngineInterface, answer: string, why: string) {
   // An approver that ended without a decision decided nothing: Retry, not an escalation to approve past.
   if (why) return block($, { on: 'start', role: 'approver' }, `The approver stopped before deciding: ${why}. Retry runs it again.`, r => ({ ...r, steps: { ...r.steps, approver: { ...r.steps.approver, state: 'fail' } } }))
-  const { decision, reason } = parseDecision(answer)
+  const parsed = parseDecision(answer)
+  // With no check run, nothing was verified by running it: an APPROVE becomes the person's call
+  // (Approve PR anyway is their override).
+  const r0 = await read($, run)
+  const unverified = parsed.decision === 'APPROVE' && r0 !== null && !ranChecks(r0).length
+  const decision = unverified ? 'ESCALATE' : parsed.decision
+  const reason = unverified ? `The approver would approve${parsed.reason ? ` (${parsed.reason})` : ''}, but no check ran, so nothing was verified by running it. Approve the PR anyway if the reviews are enough, or set the checks option.` : parsed.reason
   if (decision === 'ESCALATE') {
     await block($, { on: 'escalate' }, reason, r => ({ ...r, steps: { ...r.steps, approver: { ...r.steps.approver, state: 'changes' } } }))
     $.ui.toast('The factory needs you: Approve PR, /factory rework <what to change>, or /factory stop')

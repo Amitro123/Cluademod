@@ -11,7 +11,8 @@ review found.
 
 ## APPROVE when all hold
 
-- The checks passed, or none were configured and the reviewers saw tests covering the criteria.
+- The checks ran and passed. With no check run (none found, or none installed), the factory turns an
+  APPROVE into an escalation: the person decides, so say what the reviews did verify.
 - No open blocker. Every major finding was fixed in a later round, or is plainly wrong (say which and why).
 - What was built is what the spec asked for, within its scope.
 
