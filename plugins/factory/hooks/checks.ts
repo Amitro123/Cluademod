@@ -39,8 +39,9 @@ const norm = (p: string) => p.replace(/\\/g, '/').replace(/^\.\//, '').replace(/
 const join = (dir: string, name: string) => (dir ? `${dir}/${name}` : name)
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 120)
 
-// Commands from the `checks` option or a checks file: ";" or new lines between commands, no shell.
-function splitCommands(option: string): string[][] {
+// Commands from the `checks` or `setup` option or a checks file: ";" or new lines between commands,
+// each run without a shell.
+export function splitChecks(option: string): string[][] {
   return option.split(/[;\n]/).map(c => c.trim()).filter(Boolean).map(c => c.split(/\s+/))
 }
 
@@ -160,7 +161,7 @@ export function parseChecksFile(text: string, warnings: string[]): string[][] {
     }
     const out: string[][] = []
     for (const item of list.slice(0, 20)) {
-      if (typeof item === 'string') out.push(...splitCommands(item))
+      if (typeof item === 'string') out.push(...splitChecks(item))
       else if (Array.isArray(item) && item.length && item.every(x => typeof x === 'string' && x)) out.push(item as string[])
       else warnings.push('.factory/checks.json: an entry is neither a string nor a list of strings')
     }
@@ -261,7 +262,7 @@ export async function detectProjectChecks(io: ChecksIO, root: string, opts: Dete
   try {
     const explicit = (opts.explicit ?? '').trim()
     if (explicit) {
-      add(splitCommands(explicit), 'option')
+      add(splitChecks(explicit), 'option')
       return finish()
     }
     const rootDir = norm(root)

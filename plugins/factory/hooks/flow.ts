@@ -106,13 +106,9 @@ export function parseDecision(answer: string): { decision: 'APPROVE' | 'ESCALATE
 
 // ---------- the checks ----------
 
-// The `checks` option: commands separated by ";" or new lines, each run without a shell.
-export function splitChecks(option: string): string[][] {
-  return option.split(/[;\n]/).map(c => c.trim()).filter(Boolean).map(c => c.split(/\s+/))
-}
 
 // With no `checks` set: what the project's own files suggest. Detection lives in checks.ts (never throws).
-export { detectChecks, detectProjectChecks, specChecks, allowedCommand, NOTHING_RAN } from './checks'
+export { detectChecks, detectProjectChecks, specChecks, allowedCommand, splitChecks, NOTHING_RAN } from './checks'
 export type { ChecksIO, DetectedChecks } from './checks'
 
 // A fresh worktree has no installed dependencies: with no `setup` set, the lockfile says how to
