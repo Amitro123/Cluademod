@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { cleanFeature, couldNotStart, detectChecks, detectSetup, leftOut, neverCommit, slugOf, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
-import { factoryArgs, goalPrompt, startLine, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
+import { factoryArgs, goalPrompt, startLine, factoryPlanApprovedArgs, PLAN_APPROVED_FOR_FACTORY, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 
@@ -29,7 +29,7 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, checksOk = 'Run them' as string | null, missing = [] as string[] } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, planResult = PLAN_APPROVED_FOR_FACTORY, checksOk = 'Run them' as string | null, missing = [] as string[] } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
   // The last commit of the files that define the checks: a test moves it to change them.
@@ -126,7 +126,7 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: { model: 'm', input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as never
   })
   // goal-run's plan tool, as it answers for a factory plan the person approved.
-  on('tool.call', { tool: PLAN }, () => ({ result: keepsGoal ? PLAN_KEPT_FOR_FACTORY : PLAN_APPROVED_FOR_FACTORY }) as never)
+  on('tool.call', { tool: PLAN }, () => ({ result: keepsGoal ? PLAN_KEPT_FOR_FACTORY : planResult }) as never)
   on('tool.call', { tool: 'Edit' }, () => ({ result: 'edited' }) as never)
   // The engine's question dialog: the next answer, or dismissed when none is left.
   const asked: string[] = []
@@ -979,6 +979,29 @@ describe("the builder marks goal-run's tasks only when they are the factory's", 
     expect(last(w)).toMatchObject({ subagentType: 'factory:builder' })
     expect(last(w).prompt).not.toContain('mcp__goal-run__update')
     expect(last(w).prompt).toContain('The tasks:\n- t1: Token bucket core')
+  })
+
+  // goal-run numbers the plan in its own order (priority, then dependencies), not the spec's.
+  const OUT_OF_ORDER = 'Wrote docs/specs/rate-limiter.md.\nTASKS:\n1. [low] Write docs\n2. [high] Core'
+  const IDS = [{ id: 't1', title: 'Core' }, { id: 't2', title: 'Write docs' }]
+
+  test("approved in goal-run's dialog: the builder is given goal-run's ids for each task", async ($, on) => {
+    const w = engine(on, { planResult: planApprovedForFactory(IDS) })
+    await startRun($)
+    await answer($, 'a1', OUT_OF_ORDER)
+    await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks: [{ title: 'Write docs', priority: 'low' }, { title: 'Core', priority: 'high' }] } as never)
+    await settled()
+    expect(last(w)).toMatchObject({ subagentType: 'factory:builder' })
+    expect(last(w).prompt).toContain('then done):\n- t1: Core\n- t2: Write docs')
+  })
+
+  test("approved in the Goal pane: /factory plan-approved carries goal-run's ids", async ($, on) => {
+    const w = engine(on)
+    await startRun($)
+    await answer($, 'a1', OUT_OF_ORDER)
+    await command($, factoryPlanApprovedArgs(IDS))
+    expect(last(w)).toMatchObject({ subagentType: 'factory:builder' })
+    expect(last(w).prompt).toContain('- t1: Core\n- t2: Write docs')
   })
 
   test("the factory's plan is the session goal: the builder marks its tasks", async ($, on) => {

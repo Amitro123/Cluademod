@@ -41,6 +41,9 @@ export type Run = {
   worktree: string
   specFile: string
   tasks: SpecTask[]
+  // The tasks as goal-run numbered them (by priority and dependencies), once it approved the plan:
+  // the ids the builder marks.
+  goalTasks?: { id: string; title: string }[]
   // The spec-writer's judgment of the feature, and the model each role runs on in this run.
   size?: Size
   models?: Partial<Record<Role, string>>

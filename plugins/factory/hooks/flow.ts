@@ -195,7 +195,8 @@ export const isLimitError = (why: string) => /spend limit|rate limit|usage limit
 // The builder's prompt: the whole job for a new builder; for the builder that built it before
 // (`again`), only what to fix this round. A note is the person's own, sent back with /factory rework.
 export function buildPrompt(run: Run, findings: Finding[], failed: Check[], { again = false, note = '' } = {}): string {
-  const tasks = run.tasks.map((t, i) => `- t${i + 1}: ${t.title}`)
+  // In the session goal, goal-run's ids: it numbers the tasks in its own order, not the spec's.
+  const tasks = run.gate === 'goal-run' && run.goalTasks?.length ? run.goalTasks.map(t => `- ${t.id}: ${t.title}`) : run.tasks.map((t, i) => `- t${i + 1}: ${t.title}`)
   const head = again
     ? [`Another round on the change you built for: ${titleOf(run.feature, 200)}`, `Same branch ${run.branch} and worktree. Fix what follows, keep the rest as it is, and commit.`]
     : [

@@ -48,7 +48,7 @@ import {
   progressNote,
   resumePrompt,
 } from './flow'
-import { FACTORY_PLAN_APPROVED_ARG, FACTORY_START_TOOL, factoryArgs, parseFactoryArgs, parseGoalPrompt, parsePlanOutcome, parseStartPrompt, toolText } from './texts'
+import { FACTORY_START_TOOL, factoryArgs, type GoalTask, parseFactoryArgs, parseGoalPrompt, parsePlanApprovedArgs, parsePlanOutcome, parseStartPrompt, toolText } from './texts'
 
 const run = atom({ plugin: 'factory', key: 'run' } as const, null as Run | null)
 const frame = atom({ plugin: 'factory', key: 'frame' } as const, 0)
@@ -314,10 +314,13 @@ async function askPlan($: EngineInterface) {
   if (answer && answer !== NOT_NOW) return void serial(() => respec($, answer))
 }
 
-async function onPlan($: EngineInterface, outcome: { approved: true } | { changes: string } | { kept: true }) {
+async function onPlan($: EngineInterface, outcome: { approved: true; goalTasks?: GoalTask[] } | { changes: string } | { kept: true }) {
   const r = await read($, run)
   if (!r || r.phase !== 'plan') return
-  if ('approved' in outcome) return startBuild($, [], [])
+  if ('approved' in outcome) {
+    if (outcome.goalTasks) await patch($, cur => ({ ...cur, goalTasks: outcome.goalTasks }))
+    return startBuild($, [], [])
+  }
   // The person has a goal of their own in goal-run: the factory's band asks instead.
   if ('kept' in outcome) {
     await patch($, cur => ({ ...cur, gate: 'factory', note: 'waiting for you to approve the plan (here: goal-run keeps your own goal)' }))
@@ -638,12 +641,12 @@ async function addTokens($: EngineInterface, agentId: string, n: number) {
 
 // Approve: the plan, the PR the approver approved, or a change the approver escalated. Anything else
 // that stopped the run isn't approved past: it's retried or the run is stopped.
-async function approveNow($: EngineInterface): Promise<string> {
+async function approveNow($: EngineInterface, goalTasks?: GoalTask[]): Promise<string> {
   const r = await read($, run)
   if (!r) return 'No factory run.'
   // Queued, not awaited: a prompt submitted while the command's hook still runs is refused.
   if (r.phase === 'plan') {
-    void serial(() => onPlan($, { approved: true }))
+    void serial(() => onPlan($, goalTasks ? { approved: true, goalTasks } : { approved: true }))
     return 'Plan approved: the builder starts.'
   }
   if (r.phase === 'ready' || (r.phase === 'needs-human' && r.blocked?.on === 'escalate')) {
@@ -799,7 +802,8 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'factory' }, async ($, e) => {
     const arg = e.args.trim()
-    if (arg === 'approve' || arg === FACTORY_PLAN_APPROVED_ARG) return { text: await approveNow($) }
+    const approved = parsePlanApprovedArgs(arg)
+    if (arg === 'approve' || approved) return { text: await approveNow($, approved?.goalTasks) }
     if (arg === 'retry') return { text: await retryNow($) }
     if (arg === 'stop') return { text: await stopNow($) }
     if (arg === 'rework' || arg.startsWith('rework ')) return { text: await reworkNow($, arg.slice(6).trim()) }

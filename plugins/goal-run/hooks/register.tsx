@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
-import { FACTORY_PLAN_APPROVED_ARG, FACTORY_SOURCE, factoryTakesGoal, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
+import { FACTORY_SOURCE, factoryPlanApprovedArgs, factoryTakesGoal, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
 // The goal-run tests import the start-prompt parser from here, as before it was shared.
 export { parseStartPrompt }
 
@@ -408,11 +408,15 @@ async function startGoal($: EngineInterface, text: string) {
   }).catch(() => {})
 }
 
+// The ids the builder marks: goal-run's own, in its order, for the tasks still to do.
+const goalTasksOf = (g: Goal | null) => (g?.tasks ?? []).filter(t => t.status !== 'done').map(t => ({ id: t.id, title: t.title }))
+
 async function approve($: EngineInterface, pace: Pace) {
   await setGoal($, g => (g ? { ...g, status: 'active', pace } : g))
   // A factory's plan: the factory starts its builder; the main loop is not asked to work.
-  if ((await read($, goal))?.source === FACTORY_SOURCE) {
-    void $.command.run({ command: 'factory', args: FACTORY_PLAN_APPROVED_ARG }).catch(() => {})
+  const g = await read($, goal)
+  if (g?.source === FACTORY_SOURCE) {
+    void $.command.run({ command: 'factory', args: factoryPlanApprovedArgs(goalTasksOf(g)) }).catch(() => {})
     return
   }
   void $.prompt.submit({ text: `The plan is approved (${PACE_TEXT[pace]}). Start with the first pending task.` }).catch(() => {})
@@ -650,7 +654,7 @@ export const register: Register = (on, options) => {
     if (isFactory) {
       if (answer === APPROVE_BUILD) {
         await setGoal($, g => (g ? { ...g, status: 'active', pace: 'run' } : g))
-        return { result: PLAN_APPROVED_FOR_FACTORY }
+        return { result: planApprovedForFactory(goalTasksOf(await read($, goal))) }
       }
       if (!answer.trim()) return { result: PLAN_WAITING_FOR_FACTORY }
       return { result: planChangesForFactory(answer === CHANGE ? '' : answer) }

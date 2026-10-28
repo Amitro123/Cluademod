@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import { runnerX, trackText } from '../hooks/art'
 import { addSide, insertTask, mergeGoal, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan, stepTokens } from '../hooks/register'
 import type { Goal } from '../types'
-import { doneResult, factoryTakesGoal, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory, projectFrom } from '../hooks/texts'
+import { doneResult, factoryTakesGoal, parsePlanApprovedArgs, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory, projectFrom } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 const UPDATE = 'mcp__goal-run__update'
@@ -644,8 +644,8 @@ describe('a plan from a factory run', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks } as never)
     expect(w.asked.at(-1)).toMatch(/The factory's spec for this goal\. Approve it, and the builder starts\?/)
-    expect(String(r.result)).toBe(PLAN_APPROVED_FOR_FACTORY)
-    expect(parsePlanOutcome(String(r.result))).toEqual({ approved: true })
+    expect(String(r.result).startsWith(PLAN_APPROVED_FOR_FACTORY)).toBe(true)
+    expect(parsePlanOutcome(String(r.result))).toEqual({ approved: true, goalTasks: [{ id: 't1', title: 'Token bucket core' }, { id: 't2', title: 'Middleware with Retry-After' }] })
     // No goal reminder on the person's prompts, no nudge at a stop, no question between tasks.
     const p = await $.prompt.submit({ text: 'how is it going?', origin: { kind: 'composer' } } as never)
     expect((p.context ?? []).join('\n')).not.toMatch(/Session goal/)
@@ -684,7 +684,7 @@ describe('a plan from a factory run', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     await $.command.run({ command: 'session-goal', args: 'Rate limiter' } as never)
     const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks } as never)
-    expect(String(r.result)).toBe(PLAN_APPROVED_FOR_FACTORY)
+    expect(String(r.result).startsWith(PLAN_APPROVED_FOR_FACTORY)).toBe(true)
     expect((w.saved['goal:/repo'] as Goal).source).toBe('factory')
   })
 
@@ -724,9 +724,29 @@ describe('a plan from a factory run', () => {
     expect(parsePlanOutcome(String(r.result))).toBeNull()
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
     await pane.press({ key: 'approve' })
-    expect(ran).toContain('factory plan-approved')
+    expect(ran).toContain(`factory plan-approved ${JSON.stringify([{ id: 't1', title: 'Token bucket core' }, { id: 't2', title: 'Middleware with Retry-After' }])}`)
     expect(w.sent.some(t => /Start with the first pending task/.test(t))).toBe(false)
     await pane.unmount()
+  })
+
+  test("the factory is given goal-run's ids, in goal-run's order, on both paths", async ($, on) => {
+    const ran: string[] = []
+    on('command.run', (_, e) => {
+      ran.push(String(e.args ?? ''))
+      return { text: '' } as never
+    })
+    // The spec's order puts the low-priority docs first; goal-run puts the core first.
+    const outOfOrder = [{ title: 'Write docs', priority: 'low' }, { title: 'Core', priority: 'high' }]
+    const ids = [{ id: 't1', title: 'Core' }, { id: 't2', title: 'Write docs' }]
+    engine(on, { answers: ['Approve, start building', null] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const r = await $.tool.call({ tool: PLAN, goal: 'Docs', source: 'factory', tasks: outOfOrder } as never)
+    expect(parsePlanOutcome(String(r.result))).toEqual({ approved: true, goalTasks: ids })
+    await $.tool.call({ tool: PLAN, goal: 'Docs', source: 'factory', tasks: outOfOrder } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    await pane.press({ key: 'approve' })
+    await pane.unmount()
+    expect(parsePlanApprovedArgs(ran.at(-1)!)).toEqual({ goalTasks: ids })
   })
 })
 
@@ -782,7 +802,7 @@ describe('a goal run through the factory', () => {
     expect(await pane.find({ key: 'factory' } as never)).toBeFalsy()
     await pane.unmount()
     const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks: [{ title: 'Bucket', priority: 'high' }] } as never)
-    expect(String(r.result)).toBe(PLAN_APPROVED_FOR_FACTORY)
+    expect(String(r.result).startsWith(PLAN_APPROVED_FOR_FACTORY)).toBe(true)
     expect((w.saved['goal:/repo'] as Goal).tasks.map(t => t.title)).toEqual(['Bucket'])
   })
 
