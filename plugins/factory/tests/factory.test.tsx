@@ -1102,7 +1102,9 @@ describe('commands the factory found run only once you let them', () => {
     await toReviews($)
     expect(w.asked.find(q => q.startsWith('Before the factory runs'))).toMatch(/They run the code the builder wrote, its tests and config included, outside your permission prompts/)
     const asked = () => w.asked.filter(q => q.startsWith('Before the factory runs')).length
-    expect(w.ran.find(c => c.startsWith('git log -1 --format=%H HEAD --'))).toMatch(/ \.npmrc .*:\(glob\)\*\*\/jest\.config\.\*/)
+    const watched = w.ran.find(c => c.startsWith('git log -1 --format=%H HEAD --'))!
+    for (const f of ['.npmrc', 'jest.config.*', 'pom.xml', 'build.gradle.kts', '*.csproj', 'Makefile', 'conftest.py']) expect(watched).toContain(`:(glob)**/${f}`)
+    expect(watched).toContain(' .factory/checks.json')
     await answer($, 'a3', CHANGES)
     await answer($, 'a4', PASS)
     w.setConfig('npmrc-changed')
