@@ -1,6 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
+import type { ChecksIO, DetectedChecks } from './checks'
 import type { Blocked, Check, Finding, Phase, Reviewer, Role, Run } from '../types'
 import { buildRound, DIAGRAM, diagramSvg, pipelineLines } from './art'
 import type { Theme } from './art'
@@ -8,7 +9,8 @@ import {
   approvePrompt,
   buildPrompt,
   cleanFeature,
-  detectChecks,
+  detectProjectChecks,
+  NOTHING_RAN,
   detectSetup,
   isLive,
   neverCommit,
@@ -371,10 +373,22 @@ async function namesIn($: EngineInterface, dir: string) {
   return (await $.fs.list(dir).catch(() => [])).map(f => f.name)
 }
 
-async function checkCommands($: EngineInterface, worktree: string, files: string[]): Promise<string[][]> {
-  if (checksOption.trim()) return splitChecks(checksOption)
-  const pkg = files.includes('package.json') ? await $.fs.read(`${worktree}/package.json`).then(t => String(t), () => null) : null
-  return detectChecks(files, pkg)
+// The checks of this run: the option, else the project's checks file, else what detection finds in the
+// worktree and the commands in the spec's acceptance criteria. Never throws; says why when it finds none.
+async function checkCommands($: EngineInterface, r: Run): Promise<DetectedChecks> {
+  try {
+    const diff = await git($, ['diff', '--name-only', r.base, 'HEAD'], r.worktree)
+    const touched = diff.exitCode === 0 ? diff.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean) : []
+    const specPath = /^([A-Za-z]:|\/)/.test(r.specFile) ? r.specFile : `${r.worktree}/${r.specFile}`
+    const spec = checksOption.trim() ? null : await $.fs.read(specPath).then(t => String(t), () => null)
+    const io: ChecksIO = {
+      list: async dir => (await $.fs.list(dir).catch(() => [])).map(f => ({ name: f.name, isDir: String((f as { kind?: string }).kind) === 'dir' || String((f as { kind?: string }).kind) === 'directory' })),
+      read: path => $.fs.read(path).then(t => String(t), () => null),
+    }
+    return await detectProjectChecks(io, r.worktree, { explicit: checksOption, touched, spec })
+  } catch (e) {
+    return { checks: [], warnings: [String(e)], sources: {}, reason: `${NOTHING_RAN} Warning: ${String(e).slice(0, 120)}` }
+  }
 }
 
 // A fresh worktree has no dependencies installed: the `setup` option, or the lockfile's install, runs
@@ -397,10 +411,19 @@ async function setUp($: EngineInterface, r: Run, files: string[]): Promise<boole
 }
 
 // The files that decide what an auto-detected command does: its scripts, its install, its test hooks.
+// Detection looks at the root, one level down and the touched folders, so each file is matched at any
+// depth (`**/` takes the root too). The project's own .factory/checks.json is untracked in a worktree:
+// a change to its commands changes the commands themselves, which asks again.
 const CHECK_CONFIGS = [
-  'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '.npmrc', '.pnpmfile.cjs',
-  'pyproject.toml', 'setup.cfg', 'setup.py', 'pytest.ini', 'tox.ini', 'noxfile.py', 'Makefile', 'go.mod', 'Cargo.toml',
-  ':(glob)**/conftest.py', ':(glob)**/jest.config.*', ':(glob)**/vitest.config.*', ':(glob)**/babel.config.*',
+  '.factory/checks.json',
+  ...[
+    'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '.npmrc', '.pnpmfile.cjs',
+    'pyproject.toml', 'setup.cfg', 'setup.py', 'pytest.ini', 'tox.ini', 'noxfile.py', 'conftest.py',
+    'Makefile', 'makefile', 'GNUmakefile', 'go.mod', 'Cargo.toml',
+    'pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'gradle.properties',
+    '*.sln', '*.csproj', '*.fsproj', 'Directory.Build.props', 'Directory.Build.targets',
+    'jest.config.*', 'vitest.config.*', 'babel.config.*',
+  ].map(f => `:(glob)**/${f}`),
 ]
 const RUN_THEM = 'Run them'
 
@@ -448,13 +471,14 @@ async function runChecks($: EngineInterface) {
   }))
   if (!r) return
   const files = await namesIn($, r.worktree)
+  const found = await checkCommands($, r)
   const auto = [
     ...(!r.setupDone && !setupOption.trim() ? [detectSetup(files)].filter((c): c is string[] => c !== null) : []),
-    ...(!checksOption.trim() ? await checkCommands($, r.worktree, files) : []),
+    ...(!checksOption.trim() ? found.checks : []),
   ]
   if (auto.length && !(await approveAuto($, r, auto))) return
   if (!(await setUp($, r, files))) return
-  const cmds = await checkCommands($, r.worktree, files)
+  const cmds = found.checks
   await patch($, cur => ({ ...cur, note: 'running the checks' }))
   const results: Check[] = []
   for (const argv of cmds) {
@@ -465,7 +489,10 @@ async function runChecks($: EngineInterface) {
   }
   const failed = results.filter(c => !c.ok)
   if (results.length) await record($, 'checks', results.map(c => `${c.ok ? '✓' : '✗'} ${c.cmd}${c.tail ? `\n${c.tail}` : ''}`).join('\n'))
-  const after = await patch($, cur => ({ ...cur, checks: results, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: !cmds.length ? 'skip' : failed.length ? 'fail' : 'pass' } } }))
+  // Why nothing ran, or what detection warned about: the reviewers and the approver read it.
+  const checksNote = found.reason || (found.warnings.length ? found.warnings.join('; ') : '')
+  if (!cmds.length) await record($, 'checks', checksNote || NOTHING_RAN)
+  const after = await patch($, cur => ({ ...cur, checks: results, checksNote, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: !cmds.length ? 'skip' : failed.length ? 'fail' : 'pass' } } }))
   if (!after || after.phase !== 'checks') return
   if (!failed.length) return startReviews($)
   if (after.checkRound < MAX_CHECK_ROUNDS) return startBuild($, [], failed)

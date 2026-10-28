@@ -56,6 +56,8 @@ export type Run = {
   stat?: string
   steps: Record<'spec' | 'builder' | 'checks' | 'approver', { state: StepState; tokens: number }>
   checks: Check[]
+  // Why no check ran, or what detection warned about: what the reviewers and the approver are told.
+  checksNote?: string
   reviews: Review[]
   // The agents this run spawned, by agentId: the role each one plays.
   agents: Record<string, Role>

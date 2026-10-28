@@ -99,6 +99,8 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
   on('fs.read', (_, e) => {
     if (e.path.endsWith('package.json')) return { value: pkg } as never
     if (e.path in written) return { value: written[e.path] } as never
+    // The spec the agent wrote: a file the engine has, with no commands in it.
+    if (/\/docs\/specs\/.+\.md$/.test(e.path)) return { value: '# Spec' } as never
     throw new Error('ENOENT')
   })
   on('fs.write', (_, e) => {
