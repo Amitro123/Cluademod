@@ -131,6 +131,8 @@ export const cleanFeature = (text: string) =>
   text.replace(/<\/?pasted_content\b[^>]*>/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim()
 
 // To the main Claude, when the factory takes over a goal or a to-do item: the work is the factory's.
+// After a takeOver whose run then failed to start: the work is the main Claude's after all.
+export const factoryCouldNotStart = (why: string) => `The factory couldn't start that run after all: ${why} Do the work yourself, as first asked.`
 export const takeOverNote = (feature: string) =>
   `The factory took this over: "${titleOf(feature, 200)}". Its spec-writer writes the spec and its builder does the work, in a worktree of its own. Don't start the work or propose a plan yourself; answer in one line that the factory is on it.`
 

@@ -29,7 +29,7 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, planResult = PLAN_APPROVED_FOR_FACTORY, checksOk = 'Run them' as string | null, missing = [] as string[] } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, planResult = PLAN_APPROVED_FOR_FACTORY, checksOk = 'Run them' as string | null, missing = [] as string[], noRepo = false } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
   // The last commit of the files that define the checks: a test moves it to change them.
@@ -44,6 +44,7 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
   const worktreeErrs = [...worktree]
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 25, 9) })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.root', () => ({ value: '/repo' }))
   on('command.register', (_, e) => ({ value: { command: e.name } }) as never)
   on('tool.register', (_, e) => ({ value: { tool: `mcp__factory__${e.name}` } }) as never)
   const registered: { name: string; tools?: string[] }[] = []
@@ -74,7 +75,7 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     const cmd = e.argv.join(' ')
     ran.push(cmd)
     if (cmd === hold) await held
-    if (cmd === 'git rev-parse --show-toplevel') return ok('/repo\n')
+    if (cmd === 'git rev-parse --show-toplevel') return noRepo ? ({ value: { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' } } as never) : ok('/repo\n')
     if (cmd === 'git rev-parse HEAD') return ok('abc123\n')
     if (cmd.startsWith('git worktree add')) {
       const err = worktreeErrs.shift()
@@ -618,6 +619,28 @@ describe('goals and to-do items run through the factory by themselves', () => {
     const second = goalPrompt('Second')
     expect(String((await $.prompt.submit({ text: second, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(second)
     expect(w.spawned).toHaveLength(1)
+  })
+
+  test("outside a git repository the prompt goes on unchanged: the main Claude does the work", async ($, on) => {
+    const w = engine(on, { noRepo: true })
+    await $.session.start({ cwd: '/notes', surface: 'desktop', isInteractive: true } as never)
+    const goal = goalPrompt('Rate limiter')
+    expect(String((await $.prompt.submit({ text: goal, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(goal)
+    const one = START(['- id a1: One'])
+    expect(String((await $.prompt.submit({ text: one, origin: { kind: 'plugin', name: 'followups' } } as never)).text)).toBe(one)
+    await settled()
+    expect(w.spawned).toHaveLength(0)
+    expect(w.toasts.at(-1)).toMatch(/didn't take this over: The factory needs a git repository/)
+  })
+
+  test("a run that fails to start after the takeOver tells the main Claude to do the work", async ($, on) => {
+    const w = engine(on, { worktree: ['fatal: could not lock config file'] })
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    const r = await $.prompt.submit({ text: goalPrompt('Rate limiter'), origin: { kind: 'plugin', name: 'goal-run' } } as never)
+    await settled()
+    expect(String(r.text)).toMatch(/^The factory took this over/)
+    expect(w.spawned).toHaveLength(0)
+    expect(w.sent.at(-1)).toMatch(/^The factory couldn't start that run after all: Could not create a worktree[\s\S]*Do the work yourself/)
   })
 
   test('a quoted title with " — " in it keeps it whole in the feature', async ($, on) => {

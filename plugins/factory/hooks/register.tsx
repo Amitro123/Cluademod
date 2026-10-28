@@ -29,6 +29,7 @@ import {
   specPrompt,
   splitChecks,
   tailOf,
+  factoryCouldNotStart,
   takeOverNote,
   tok,
   tokensOf,
@@ -193,24 +194,32 @@ export function takeOverArgs(text: string, origin?: { kind: string; name?: strin
   return factoryArgs(`${it.title}${it.detail ? ` — ${it.detail}` : ''}${it.where ? ` (${it.where})` : ''}`, it.id)
 }
 
+// What a run needs before it can start, checked cheaply: no run going, a git repository with a commit.
+async function preflight($: EngineInterface): Promise<{ root: string; head: string } | { error: string }> {
+  const cur = await read($, run)
+  if (cur && isLive(cur.phase)) return { error: `A factory run is already going: ${titleOf(cur.feature, 120)}. /factory stop ends it.` }
+  const top = await git($, ['rev-parse', '--show-toplevel'], await $.session.root())
+  if (top.exitCode !== 0) return { error: 'The factory needs a git repository: it builds on a branch, in a worktree of its own.' }
+  const root = top.stdout.trim()
+  const head = await git($, ['rev-parse', 'HEAD'], root)
+  if (head.exitCode !== 0) return { error: 'The repository has no commit yet to build from.' }
+  return { root, head: head.stdout.trim() }
+}
+
 async function start($: EngineInterface, args: string): Promise<string> {
   const parsed = parseFactoryArgs(args)
   const feature = cleanFeature(parsed.feature)
   const followupId = parsed.followupId
   if (!feature) return 'What should the factory build? /factory <feature>'
-  const cur = await read($, run)
-  if (cur && isLive(cur.phase)) return `A factory run is already going: ${titleOf(cur.feature, 120)}. /factory stop ends it.`
-  const top = await git($, ['rev-parse', '--show-toplevel'])
-  if (top.exitCode !== 0) return 'The factory needs a git repository: it builds on a branch, in a worktree of its own.'
-  const root = top.stdout.trim()
-  const head = await git($, ['rev-parse', 'HEAD'], root)
-  if (head.exitCode !== 0) return 'The repository has no commit yet to build from.'
+  const ready = await preflight($)
+  if ('error' in ready) return ready.error
+  const { root, head } = ready
   const at = await $.clock.now()
   const slug = slugOf(feature)
   let r: Run | null = null
   // A branch or folder name already taken gets a number; any other failure is reported as it is.
   for (let k = 1; k <= MAX_SLUG_TRIES && !r; k++) {
-    const next = newRun(feature, at, head.stdout.trim(), root, k === 1 ? slug : `${slug}-${k}`)
+    const next = newRun(feature, at, head, root, k === 1 ? slug : `${slug}-${k}`)
     const added = await git($, ['worktree', 'add', '-b', next.branch, next.worktree, next.base], root)
     if (added.exitCode === 0) r = next
     else if (!/already exists/i.test(added.stderr)) return `Could not create a worktree for the run: ${tailOf(added.stderr, 3)}`
@@ -773,9 +782,19 @@ export const register: Register = (on, options) => {
     if (!takeOver) return next(e)
     const args = takeOverArgs(e.text, e.origin as { kind: string; name?: string })
     if (!args) return next(e)
-    const cur = await read($, run)
-    if (cur && isLive(cur.phase)) return next(e)
-    void start($, args).then(msg => $.ui.toast(msg)).catch(() => {})
+    // The prompt is replaced only when the run can start: otherwise the main Claude does the work.
+    const ready = await preflight($)
+    if ('error' in ready) {
+      void $.ui.toast(`The factory didn't take this over: ${ready.error}`)
+      return next(e)
+    }
+    void start($, args)
+      .then(msg => {
+        void $.ui.toast(msg)
+        // It failed past the checks (the worktree, say): Claude was told the factory has it, so it's told otherwise.
+        if (!/^Factory run started/.test(msg)) void $.prompt.submit({ text: factoryCouldNotStart(msg) }).catch(() => {})
+      })
+      .catch(() => {})
     return next({ ...e, text: takeOverNote(parseFactoryArgs(args).feature) })
   }).catch(($, e, next) => next(e))
 
