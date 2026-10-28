@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cleanFeature, detectChecks, detectSetup, leftOut, neverCommit, slugOf, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
+import { cleanFeature, couldNotStart, detectChecks, detectSetup, leftOut, neverCommit, slugOf, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
 import { factoryArgs, goalPrompt, startLine, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -29,7 +29,7 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, checksOk = 'Run them' as string | null } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, checksOk = 'Run them' as string | null, missing = [] as string[] } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
   // The last commit of the files that define the checks: a test moves it to change them.
@@ -90,6 +90,8 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     if (cmd === 'git rev-parse --git-path info/exclude') return ok('.git/info/exclude\n')
     if (cmd.startsWith('git commit') && commitFails) return { value: { exitCode: 1, stdout: '', stderr: 'Please tell me who you are.' } } as never
     if (cmd.startsWith('git ')) return ok()
+    if (missing.includes(cmd)) throw new Error(`spawn ${e.argv[0]} ENOENT`)
+    if (cmd === 'sh-missing') return { value: { exitCode: 127, stdout: '', stderr: 'sh: vitest: not found' } } as never
     if (failing > 0) {
       failing--
       return { value: { exitCode: 1, stdout: 'FAIL src/mw.test.ts\n  expected 429', stderr: '' } } as never
@@ -1153,4 +1155,26 @@ describe('the frame timer', () => {
     await w.clock.advance(5_000)
     expect(frames).toBe(after)
   })
+})
+
+describe("a check whose program isn't installed is skipped, not failed", () => {
+  test('not installed (spawn ENOENT, exit 127): no builder round for it; the approver is told', { options: { checks: 'mvn -q test; sh-missing; npm test' } } as never, async ($: Engine, on: On) => {
+    const w = engine(on, { missing: ['mvn -q test'] })
+    await toReviews($)
+    // Straight on to the reviewers: the builder isn't sent to install maven.
+    expect(w.spawned.filter(s => s.subagentType === 'factory:builder')).toHaveLength(1)
+    expect(w.spawned.slice(-2).map(s => s.subagentType)).toEqual(['factory:security-reviewer', 'factory:code-reviewer'])
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    const prompt = last(w).prompt
+    expect(prompt).toContain('mvn -q test not installed, not run, sh-missing not installed, not run, npm test passed')
+    expect(prompt).toContain('Not installed here, so not run: mvn -q test, sh-missing.')
+  })
+
+  test('a timeout is a failure, not a missing program', () => {
+    expect(couldNotStart(new Error('spawn mvn ENOENT'))).toBe(true)
+    expect(couldNotStart(new Error('the command timed out after 600000 ms'))).toBe(false)
+    expect(couldNotStart('Timeout: still running')).toBe(false)
+  })
+
 })

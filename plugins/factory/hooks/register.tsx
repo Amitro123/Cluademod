@@ -33,6 +33,7 @@ import {
   tok,
   tokensOf,
   untrackedOf,
+  couldNotStart,
   leftOut,
   waitsOnPerson,
   modelOf,
@@ -106,8 +107,13 @@ async function git($: EngineInterface, args: string[], cwd?: string) {
   return $.process.run(['git', ...args], { ...(cwd ? { cwd } : {}), timeoutMs: 60_000 }).catch(err => ({ exitCode: 1, stdout: '', stderr: String(err) }))
 }
 
+// A command that couldn't start (its program isn't installed) says so: `notStarted`. process.run
+// rejects for that and for a timeout; exit 127 is a shell's or a wrapper's "command not found".
 async function run$($: EngineInterface, argv: string[], cwd: string) {
-  return $.process.run(argv, { cwd, timeoutMs: CHECK_TIMEOUT_MS }).catch(err => ({ exitCode: 1, stdout: '', stderr: String(err) }))
+  return $.process.run(argv, { cwd, timeoutMs: CHECK_TIMEOUT_MS }).then(
+    out => ({ ...out, notStarted: out.exitCode === 127 }),
+    err => ({ exitCode: 1, stdout: '', stderr: String(err), notStarted: couldNotStart(err) }),
+  )
 }
 
 const describe = (role: Role, r: Run) =>
@@ -485,14 +491,22 @@ async function runChecks($: EngineInterface) {
     // A Stop meanwhile ends the checks here: the rest don't run for nothing.
     if (!(await stillIn($, 'checks'))) return
     const out = await run$($, argv, r.worktree)
-    results.push({ cmd: argv.join(' '), ok: out.exitCode === 0, tail: out.exitCode === 0 ? '' : tailOf(`${out.stdout}\n${out.stderr}`) })
+    results.push({ cmd: argv.join(' '), ok: out.exitCode === 0, tail: out.exitCode === 0 ? '' : tailOf(`${out.stdout}\n${out.stderr}`), ...(out.notStarted ? { isMissing: true } : {}) })
   }
-  const failed = results.filter(c => !c.ok)
-  if (results.length) await record($, 'checks', results.map(c => `${c.ok ? '✓' : '✗'} ${c.cmd}${c.tail ? `\n${c.tail}` : ''}`).join('\n'))
-  // Why nothing ran, or what detection warned about: the reviewers and the approver read it.
-  const checksNote = found.reason || (found.warnings.length ? found.warnings.join('; ') : '')
+  const failed = results.filter(c => !c.ok && !c.isMissing)
+  const missing = results.filter(c => c.isMissing)
+  const ran = results.filter(c => !c.isMissing)
+  if (results.length) await record($, 'checks', results.map(c => `${c.isMissing ? '– (not installed)' : c.ok ? '✓' : '✗'} ${c.cmd}${c.tail ? `\n${c.tail}` : ''}`).join('\n'))
+  // Why nothing ran, or what detection warned about, or which programs aren't installed: the
+  // reviewers and the approver read it.
+  const notes = [
+    ...(missing.length ? [`Not installed here, so not run: ${missing.map(c => c.cmd).join(', ')}.`] : []),
+    ...(!ran.length ? [found.reason || NOTHING_RAN] : []),
+    ...(ran.length && found.warnings.length ? [found.warnings.join('; ')] : []),
+  ]
+  const checksNote = notes.join(' ')
   if (!cmds.length) await record($, 'checks', checksNote || NOTHING_RAN)
-  const after = await patch($, cur => ({ ...cur, checks: results, checksNote, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: !cmds.length ? 'skip' : failed.length ? 'fail' : 'pass' } } }))
+  const after = await patch($, cur => ({ ...cur, checks: results, checksNote, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: !ran.length ? 'skip' : failed.length ? 'fail' : 'pass' } } }))
   if (!after || after.phase !== 'checks') return
   if (!failed.length) return startReviews($)
   if (after.checkRound < MAX_CHECK_ROUNDS) return startBuild($, [], failed)
@@ -635,13 +649,13 @@ async function retryNow($: EngineInterface): Promise<string> {
   const b = r.blocked
   void serial(async () => {
     if (b.on === 'spec') return respec($)
-    if (b.on === 'builder') return startBuild($, openFindings(r.reviews.filter(x => x.round === r.round)), r.checks.filter(c => !c.ok), '', b.why ?? '')
+    if (b.on === 'builder') return startBuild($, openFindings(r.reviews.filter(x => x.round === r.round)), r.checks.filter(c => !c.ok && !c.isMissing), '', b.why ?? '')
     if (b.on === 'checks' || b.on === 'setup') {
       await patch($, cur => ({ ...cur, checkRound: 0 }))
       return runChecks($)
     }
     if (b.role === 'spec') return respec($)
-    if (b.role === 'builder') return startBuild($, openFindings(r.reviews.filter(x => x.round === r.round)), r.checks.filter(c => !c.ok))
+    if (b.role === 'builder') return startBuild($, openFindings(r.reviews.filter(x => x.round === r.round)), r.checks.filter(c => !c.ok && !c.isMissing))
     if (b.role === 'approver') return startApprover($)
     const now = await patch($, cur => ({
       ...moveTo(cur, 'review', `reviewing, round ${cur.round}`),
@@ -863,7 +877,7 @@ export const register: Register = (on, options) => {
     }
     const f = await read($, frame)
     const findings = r.reviews.filter(x => x.round === r.round && x.findings.length)
-    const failed = r.checks.filter(c => !c.ok)
+    const failed = r.checks.filter(c => !c.ok && !c.isMissing)
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">

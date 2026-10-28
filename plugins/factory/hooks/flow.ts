@@ -225,12 +225,19 @@ export function buildPrompt(run: Run, findings: Finding[], failed: Check[], { ag
   ].join('\n')
 }
 
+// Why a command run rejected: it couldn't start (its program isn't installed), unless it timed out.
+export const couldNotStart = (err: unknown) => !/time(d)?\s*out/i.test(String(err))
+
+// The checks that actually ran: one whose program isn't installed here was skipped, not run.
+export const ranChecks = (run: Pick<Run, 'checks'>) => run.checks.filter(c => !c.isMissing)
+const checkWord = (c: Check) => (c.isMissing ? 'not installed, not run' : c.ok ? 'passed' : 'FAILED')
+
 export function reviewPrompt(run: Run, role: Reviewer, stat: string): string {
   return [
     `Review the change for: ${run.feature}`,
     `The spec is ${run.specFile}. The change is the commits on branch ${run.branch} since ${run.base.slice(0, 12)}, in the repository you are started in (git diff ${run.base.slice(0, 12)}..HEAD): exactly what will be pushed.`,
     stat ? `Files changed:\n${stat}` : '',
-    ...(!run.checks.length && run.checksNote ? [`No checks ran for this change: ${run.checksNote} Nothing was verified by running it, so weigh the tests you read accordingly.`] : []),
+    ...(!ranChecks(run).length && run.checksNote ? [`No checks ran for this change: ${run.checksNote} Nothing was verified by running it, so weigh the tests you read accordingly.`] : []),
     `Start from the diff and the spec's "Code map"; read the changed files around the changed lines, not whole, and search before reading anything else.`,
     `Look only at what a ${role} review covers. Don't change any file.`,
     'End your answer with exactly:',
@@ -246,8 +253,8 @@ export function approvePrompt(run: Run): string {
   return [
     `Decide on the change for: ${run.feature}`,
     `The spec is ${run.specFile}; the change is on branch ${run.branch}.`,
-    `Checks: ${run.checks.length ? run.checks.map(c => `${c.cmd} ${c.ok ? 'passed' : 'FAILED'}`).join(', ') : `NONE RAN. ${run.checksNote || 'none configured'}`}.`,
-    ...(run.checks.length && run.checksNote ? [`Check notes: ${run.checksNote}`] : []),
+    `Checks: ${ranChecks(run).length ? run.checks.map(c => `${c.cmd} ${checkWord(c)}`).join(', ') : `NONE RAN. ${run.checksNote || 'none configured'}`}.`,
+    ...(ranChecks(run).length && run.checksNote ? [`Check notes: ${run.checksNote}`] : []),
     `Review rounds: ${run.round}. The last verdicts:`,
     ...reviews,
     'APPROVE when every acceptance criterion is met and no blocker or major finding is left; otherwise ESCALATE to the person.',
@@ -274,7 +281,7 @@ export function prPrompt(run: Run, reason: string): string {
   return [
     `The factory run "${run.feature}" is approved${reason ? ` (${reason})` : ''}.`,
     `Push branch ${run.branch} (its worktree is ${run.worktree}) and open a pull request from it.`,
-    `Title it after the feature. In the body: what it does (from ${run.specFile}), the checks (${run.checks.map(c => `${c.cmd} ${c.ok ? '✓' : '✗'}`).join(', ') || 'none'}), and ${run.round} review round${run.round === 1 ? '' : 's'}: ${run.reviews.map(r => `${r.role} ${r.state === 'pass' ? 'PASS' : 'CHANGES'}`).join(', ')}.`,
+    `Title it after the feature. In the body: what it does (from ${run.specFile}), the checks (${run.checks.map(c => `${c.cmd} ${c.isMissing ? '– not installed' : c.ok ? '✓' : '✗'}`).join(', ') || 'none ran'}), and ${run.round} review round${run.round === 1 ? '' : 's'}: ${run.reviews.map(r => `${r.role} ${r.state === 'pass' ? 'PASS' : 'CHANGES'}`).join(', ')}.`,
     ...(minor.length ? ['List these minor findings under "Not fixed":', ...minor] : []),
     ...(run.followupId ? [`Once the PR is open, call mcp__followups__done with id "${run.followupId}" and the PR's link as the note: the run came from that to-do item.`] : []),
     ...(run.skipped?.length ? [`The factory left these new files out of its commits (dependencies, build output or credentials); don't add them: ${run.skipped.join(', ')}.`] : []),
