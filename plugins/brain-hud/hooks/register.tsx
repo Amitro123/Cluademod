@@ -180,12 +180,12 @@ async function writeJournal($: EngineInterface, entries: readonly JournalEntry[]
 // Whether .claude/brain/ is in git's exclude file: tried with each write until it is.
 let excluded = false
 
-// True once nothing is left to do: listed, or not a git repository. A git that didn't run, or a
-// write that failed, is tried again with the next entry.
+// True once nothing is left to do: listed, not a git repository, or no git to run. Only a write to
+// the exclude file that failed is tried again with the next entry.
 async function keepOutOfGit($: EngineInterface): Promise<boolean> {
   const root = await $.session.root()
   const found = await $.process.run(['git', 'rev-parse', '--git-path', 'info/exclude'], { cwd: root, timeoutMs: 10_000 }).catch(() => null)
-  if (!found) return false
+  if (!found) return true
   if (found.exitCode !== 0 || !found.stdout.trim()) return true
   const rel = found.stdout.trim()
   const path = /^([a-zA-Z]:)?[\\/]/.test(rel) ? rel : `${root.replace(/[\\/]$/, '')}/${rel}`

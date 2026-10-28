@@ -265,7 +265,7 @@ const buttons = async (ui: { findAll: (q: never) => Promise<unknown[]> }) =>
 
 // The engine beneath: a project in memory (files by path under /repo, each write bumps its time),
 // a clock, and the side calls the mod makes.
-function engine(on: On, files: Record<string, string>, { commands = ['followup'] as string[], failSubmit = false, closesGoal = '', gitFails = 0 } = {}) {
+function engine(on: On, files: Record<string, string>, { commands = ['followup'] as string[], failSubmit = false, closesGoal = '', gitFails = 0, excludeFails = 0 } = {}) {
   const w = { sent: [] as string[], contexts: [] as string[][], ran: [] as string[], opened: [] as string[], times: {} as Record<string, number>, pulses: 0, offers: 0, git: [] as string[], stats: 0 }
   on('state.set', (_, e, next) => {
     const { key, value } = e as { key?: string; value?: unknown }
@@ -313,7 +313,9 @@ function engine(on: On, files: Record<string, string>, { commands = ['followup']
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }) as never)
   on('session.id', () => ({ value: 's-1' }) as never)
+  let refusing = excludeFails
   on('fs.write', (_, e) => {
+    if (rel(e.path) === '.git/info/exclude' && refusing-- > 0) throw new Error('EACCES')
     write(rel(e.path), e.text)
     return { value: undefined } as never
   })
@@ -877,19 +879,31 @@ describe('the poll in a project with no memory', () => {
 })
 
 describe("the journal's git exclude", () => {
-  test('a git that did not run is tried again with the next entry, then not again', async ($, on) => {
+  const report = async ($: Engine, d: string) => {
+    const id = String((await $.agent.spawn({ prompt: 'p', description: d, subagentType: 'Explore' } as never) as { agentId?: string }).agentId)
+    await $.turn.complete({ answer: 'Findings:\n- ok', agentId: id, reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as never)
+  }
+
+  test('a write to the exclude file that failed is tried again with the next entry, then not again', async ($, on) => {
     const files = project()
-    const w = engine(on, files, { gitFails: 1 })
+    const w = engine(on, files, { excludeFails: 1 })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
-    const report = async (d: string) => {
-      const id = String((await $.agent.spawn({ prompt: 'p', description: d, subagentType: 'Explore' } as never) as { agentId?: string }).agentId)
-      await $.turn.complete({ answer: 'Findings:\n- ok', agentId: id, reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as never)
-    }
-    await report('one')
+    await report($, 'one')
     expect(files['.git/info/exclude']).toBeUndefined()
-    await report('two')
+    await report($, 'two')
     expect(files['.git/info/exclude']).toBe('.claude/brain/\n')
-    await report('three')
+    await report($, 'three')
     expect(w.git).toHaveLength(2)
   })
+
+  test('no git to run: not tried again at every write', async ($, on) => {
+    const files = project()
+    const w = engine(on, files, { gitFails: 5 })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await report($, 'one')
+    await report($, 'two')
+    await report($, 'three')
+    expect(w.git).toHaveLength(1)
+  })
+
 })
