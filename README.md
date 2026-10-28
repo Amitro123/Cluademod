@@ -368,7 +368,7 @@ The tests check the code; the evals in `plugins/<mod>/evals/` check what the mod
 
 ```bash
 cd plugins/<mod>
-claude plugin eval . --trust-plugin --runs 3 --max-cost-usd 5 --allow-tools "mcp__<mod>__*" Write Edit
+claude plugin eval . --trust-plugin --scaffold --runs 3 --max-cost-usd 5 --allow-tools "mcp__<mod>__*" Write Edit
 ```
 
 A case that needs the shell also needs `--allow-tools Bash`. The run refuses it on a machine where the shell can't be sandboxed.

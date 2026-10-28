@@ -1,7 +1,7 @@
 ---
 name: mistake-brain
 description: 'Persistent cross-session memory. Invoke proactively to log events to MISTAKES.md (Type: mistake/success/decision/handoff), classify into PARA memory (.agent-brain/shared/Projects|Areas|Resources|Archives), and propose hard rules for CLAUDE.md or .claude/rules/ after 3+ repeats (never without approval unless AGENT_AUTO_IMPROVE=1). Also handles: /brain-hud:mistake-brain log, route, promote, dream, recall, init, update.'
-when_to_use: 'A fix just landed, a bug got reverted, the same bug happened again, a regression needs root-cause tracing, the user corrects your approach. An approach worked well and is worth repeating. A real decision was made between alternatives. A task/session is ending with context a future session needs cold. Starting a task that might match a prior lesson, retrying a failed approach, or the user mentions a recurring bug — use /brain-hud:mistake-brain recall. Do NOT use for plain feature requests, general Q&A, or first-time issues with no pattern to log.'
+when_to_use: 'A fix just landed (yours, or one the user tells you they made, with its cause), a bug got reverted, the same bug happened again, a regression needs root-cause tracing, the user corrects your approach. An approach worked well and is worth repeating. A real decision was made between alternatives. A task/session is ending with context a future session needs cold. Starting a task that might match a prior lesson, retrying a failed approach, or the user mentions a recurring bug — use /brain-hud:mistake-brain recall. Do NOT use for plain feature requests, general Q&A, or first-time issues with no pattern to log.'
 ---
 
 <!-- Keep this file's body under 500 lines (the progressive-disclosure cap skills are meant to respect) —
