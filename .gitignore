@@ -3,3 +3,6 @@ demo/frames/
 plugins/*/.claude-plugin/types/
 __pycache__/
 .pytest_cache/
+
+# plugin eval results
+plugins/*/evals/results/
