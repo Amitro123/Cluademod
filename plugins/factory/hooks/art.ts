@@ -40,7 +40,7 @@ export function states(run: Run) {
 }
 
 const checksLine = (run: Run) =>
-  run.checks.length ? run.checks.map(c => `${c.cmd.split(' ').slice(-1)[0]} ${c.ok ? '✓' : '✗'}`).join(' · ') : run.steps.checks.state === 'skip' ? 'none configured' : ''
+  run.checks.length ? run.checks.map(c => `${c.cmd.split(' ').slice(-1)[0]} ${c.isMissing ? '–' : c.ok ? '✓' : '✗'}`).join(' · ') : run.steps.checks.state === 'skip' ? 'none ran' : ''
 
 export function diagramSvg(run: Run, frame: number, theme: Theme = 'light'): string {
   const P = PALETTE[theme]

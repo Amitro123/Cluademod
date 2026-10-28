@@ -8,7 +8,9 @@ export type Severity = 'blocker' | 'major' | 'minor'
 export type Finding = { severity: Severity; where: string; text: string }
 // A task of the spec's breakdown: what goes to goal-run's plan.
 export type SpecTask = { title: string; priority: 'high' | 'medium' | 'low'; dependsOn: number[] }
-export type Check = { cmd: string; ok: boolean; tail: string }
+// isMissing: the command couldn't start here (its program isn't installed): skipped, not failed, so the
+// builder isn't sent to fix what it can't.
+export type Check = { cmd: string; ok: boolean; tail: string; isMissing?: boolean }
 // agentId: the reviewer's agent this round (null until started), so a late answer from an earlier one is ignored.
 export type Review = { role: Reviewer; state: StepState; findings: Finding[]; tokens: number; round: number; agentId: string | null }
 // Where the run is: each phase waits on one thing (an agent, the checks, the person).
@@ -56,6 +58,8 @@ export type Run = {
   stat?: string
   steps: Record<'spec' | 'builder' | 'checks' | 'approver', { state: StepState; tokens: number }>
   checks: Check[]
+  // Why no check ran, or what detection warned about: what the reviewers and the approver are told.
+  checksNote?: string
   reviews: Review[]
   // The agents this run spawned, by agentId: the role each one plays.
   agents: Record<string, Role>

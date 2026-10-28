@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "A software factory: /factory <feature> writes a spec, has you approve its plan (in goal-run when it's installed), builds it on a branch, runs the checks and parallel reviews, and has an approver agent decide; you then press Open PR and Claude opens it. Its pane draws where the run is",
   "author": {
     "name": "Amit Rosen",
@@ -13,7 +13,7 @@
     "checks": {
       "type": "string",
       "title": "Check commands",
-      "description": "Commands the factory runs after each build, separated by ; (no shell), e.g. npm test; npm run lint. Empty detects them from package.json, pyproject.toml, go.mod or Cargo.toml",
+      "description": "Commands the factory runs after each build, separated by ; (no shell), e.g. npm test; npm run lint. Empty uses .factory/checks.json, else detects them (node, python, go, cargo, make, maven/gradle, dotnet; root, one level down, touched folders) plus allowlisted commands in the spec acceptance criteria",
       "default": ""
     },
     "maxRounds": {

@@ -106,29 +106,10 @@ export function parseDecision(answer: string): { decision: 'APPROVE' | 'ESCALATE
 
 // ---------- the checks ----------
 
-// The `checks` option: commands separated by ";" or new lines, each run without a shell.
-export function splitChecks(option: string): string[][] {
-  return option.split(/[;\n]/).map(c => c.trim()).filter(Boolean).map(c => c.split(/\s+/))
-}
 
-// With no `checks` set: what the project's own files suggest.
-export function detectChecks(files: string[], packageJson: string | null): string[][] {
-  const out: string[][] = []
-  if (packageJson !== null) {
-    let scripts: Record<string, unknown> = {}
-    try {
-      scripts = (JSON.parse(packageJson) as { scripts?: Record<string, unknown> }).scripts ?? {}
-    } catch {
-      scripts = {}
-    }
-    if (scripts.test) out.push(['npm', 'test'])
-    for (const s of ['lint', 'typecheck']) if (scripts[s]) out.push(['npm', 'run', s])
-  }
-  if (files.includes('pyproject.toml') || files.includes('pytest.ini') || files.includes('setup.cfg')) out.push(['python', '-m', 'pytest', '-q'])
-  if (files.includes('go.mod')) out.push(['go', 'test', './...'])
-  if (files.includes('Cargo.toml')) out.push(['cargo', 'test'])
-  return out
-}
+// With no `checks` set: what the project's own files suggest. Detection lives in checks.ts (never throws).
+export { detectChecks, detectProjectChecks, specChecks, allowedCommand, splitChecks, NOTHING_RAN } from './checks'
+export type { ChecksIO, DetectedChecks } from './checks'
 
 // A fresh worktree has no installed dependencies: with no `setup` set, the lockfile says how to
 // install them. Nothing when they're there already (or the project isn't one of these).
@@ -177,7 +158,7 @@ export function specPrompt(run: Run, feedback = ''): string {
     `Feature: ${run.feature}`,
     ...(feedback ? [`The person asked for changes to your earlier spec: ${feedback}`, 'Revise the spec file and the tasks.'] : []),
     `Write the spec to ${run.specFile} (create the folder if needed).`,
-    `End the spec file with a "## Code map" section, for the builder and reviewers to start from instead of searching again: each file the change touches or depends on, with the functions, types and line ranges that matter (path:start-end) and a few words on each; the signatures of the types it uses from large files (type definitions, generated code), so nobody reads those whole; and the commands that test the change.`,
+    `End the spec file with a "## Code map" section, for the builder and reviewers to start from instead of searching again: each file the change touches or depends on, with the functions, types and line ranges that matter (path:start-end) and a few words on each; the signatures of the types it uses from large files (type definitions, generated code), so nobody reads those whole; and the commands that test the change. In it, list every copy of the code the change touches (the same logic in another module, a bundled and a standalone version, generated output) and mark each in or out of scope.`,
     'Then judge the size of the feature, on a line of its own:',
     'SIZE: small, medium or large',
     'small: a local change in one or two files. medium: a few files in one area, the design clear. large: it spans several modules, or needs design decisions (architecture, data model or migrations, security, concurrency), or the request leaves real questions open. The builder runs on a stronger model for a large one.',
@@ -220,6 +201,7 @@ export function buildPrompt(run: Run, findings: Finding[], failed: Check[], { ag
     : [
         `Implement the spec in ${run.specFile} for: ${run.feature}`,
         `You are on branch ${run.branch}, in its own worktree. Commit your work to this branch when done.`,
+        `For each of the spec's Open questions, say in your closing summary how you settled it.`,
         `Start from the spec's "Code map": read the files it lists by the ranges it gives. Search (Grep) before reading anything it doesn't list, and never read a large file (type definitions, generated code, lockfiles) whole.`,
         // Marked in goal-run only when its plan is the session goal: when goal-run kept the person's own
         // goal, its t1, t2... are the person's tasks, not these.
@@ -240,12 +222,21 @@ export function buildPrompt(run: Run, findings: Finding[], failed: Check[], { ag
   ].join('\n')
 }
 
+// Why a command run rejected: it couldn't start (its program isn't installed), unless it timed out.
+export const couldNotStart = (err: unknown) => !/time(d)?\s*out/i.test(String(err))
+
+// The checks that actually ran: one whose program isn't installed here was skipped, not run.
+export const ranChecks = (run: Pick<Run, 'checks'>) => run.checks.filter(c => !c.isMissing)
+const checkWord = (c: Check) => (c.isMissing ? 'not installed, not run' : c.ok ? 'passed' : 'FAILED')
+
 export function reviewPrompt(run: Run, role: Reviewer, stat: string): string {
   return [
     `Review the change for: ${run.feature}`,
     `The spec is ${run.specFile}. The change is the commits on branch ${run.branch} since ${run.base.slice(0, 12)}, in the repository you are started in (git diff ${run.base.slice(0, 12)}..HEAD): exactly what will be pushed.`,
     stat ? `Files changed:\n${stat}` : '',
-    `Start from the diff and the spec's "Code map"; read the changed files around the changed lines, not whole, and search before reading anything else.`,
+    ...(!ranChecks(run).length && run.checksNote ? [`No checks ran for this change: ${run.checksNote} Nothing was verified by running it, so weigh the tests you read accordingly.`] : []),
+    `Start from the diff and the spec's "Code map". Read a changed file whole when it is short (under about 400 lines), else around the changed lines; search before reading anything else.`,
+    'Check every API field, input or type the change, or an acceptance criterion, relies on against its real definition (search for it and read the definition), not against the spec\'s wording: a criterion built on a field that doesn\'t exist is a blocker, and a test that only feeds a made-up fixture doesn\'t prove it.',
     `Look only at what a ${role} review covers. Don't change any file.`,
     'End your answer with exactly:',
     'VERDICT: PASS or VERDICT: CHANGES',
@@ -255,15 +246,20 @@ export function reviewPrompt(run: Run, role: Reviewer, stat: string): string {
   ].filter(Boolean).join('\n')
 }
 
-export function approvePrompt(run: Run): string {
+// `stat`: git's list of the files the change touched, so the approver can hold them against the spec.
+export function approvePrompt(run: Run, stat = ''): string {
   const reviews = run.reviews.map(r => `- ${r.role}: ${r.state === 'pass' ? 'PASS' : 'CHANGES'}${r.findings.length ? `\n${r.findings.map(f => `  - [${f.severity}] ${f.where} ${f.text}`).join('\n')}` : ''}`)
   return [
     `Decide on the change for: ${run.feature}`,
     `The spec is ${run.specFile}; the change is on branch ${run.branch}.`,
-    `Checks: ${run.checks.length ? run.checks.map(c => `${c.cmd} ${c.ok ? 'passed' : 'FAILED'}`).join(', ') : 'none configured'}.`,
+    `Checks: ${ranChecks(run).length ? run.checks.map(c => `${c.cmd} ${checkWord(c)}`).join(', ') : `NONE RAN. ${run.checksNote || 'none configured'}`}.`,
+    ...(ranChecks(run).length && run.checksNote ? [`Check notes: ${run.checksNote}`] : []),
+    ...(stat ? [`Files the change touched:\n${stat}`, "Hold them against the spec's Design and Code map: a file, dependency or public interface the spec doesn't name is scope it didn't ask for. Name it in your reason, and ESCALATE unless it is plainly needed to meet a criterion."] : []),
+    "Read the spec's Open questions: one the change settled by guessing, rather than the way the spec or the builder's summary says, is the person's to decide: ESCALATE.",
     `Review rounds: ${run.round}. The last verdicts:`,
     ...reviews,
     'APPROVE when every acceptance criterion is met and no blocker or major finding is left; otherwise ESCALATE to the person.',
+    ...(!ranChecks(run).length ? ['No check ran: an APPROVE goes to the person as an escalation, since nothing was verified by running it. Say in your reason what the reviews did verify.'] : []),
     'End with exactly:',
     'DECISION: APPROVE or DECISION: ESCALATE',
     'REASON: <one line>',
@@ -287,7 +283,7 @@ export function prPrompt(run: Run, reason: string): string {
   return [
     `The factory run "${run.feature}" is approved${reason ? ` (${reason})` : ''}.`,
     `Push branch ${run.branch} (its worktree is ${run.worktree}) and open a pull request from it.`,
-    `Title it after the feature. In the body: what it does (from ${run.specFile}), the checks (${run.checks.map(c => `${c.cmd} ${c.ok ? '✓' : '✗'}`).join(', ') || 'none'}), and ${run.round} review round${run.round === 1 ? '' : 's'}: ${run.reviews.map(r => `${r.role} ${r.state === 'pass' ? 'PASS' : 'CHANGES'}`).join(', ')}.`,
+    `Title it after the feature. In the body: what it does (from ${run.specFile}), the checks (${run.checks.map(c => `${c.cmd} ${c.isMissing ? '– not installed' : c.ok ? '✓' : '✗'}`).join(', ') || 'none ran'}), and ${run.round} review round${run.round === 1 ? '' : 's'}: ${run.reviews.map(r => `${r.role} ${r.state === 'pass' ? 'PASS' : 'CHANGES'}`).join(', ')}.`,
     ...(minor.length ? ['List these minor findings under "Not fixed":', ...minor] : []),
     ...(run.followupId ? [`Once the PR is open, call mcp__followups__done with id "${run.followupId}" and the PR's link as the note: the run came from that to-do item.`] : []),
     ...(run.skipped?.length ? [`The factory left these new files out of its commits (dependencies, build output or credentials); don't add them: ${run.skipped.join(', ')}.`] : []),

@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cleanFeature, detectChecks, detectSetup, leftOut, neverCommit, slugOf, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
+import { cleanFeature, couldNotStart, detectChecks, detectSetup, leftOut, neverCommit, slugOf, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
 import { factoryArgs, goalPrompt, startLine, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -29,7 +29,7 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, checksOk = 'Run them' as string | null } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, checksOk = 'Run them' as string | null, missing = [] as string[] } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
   // The last commit of the files that define the checks: a test moves it to change them.
@@ -90,6 +90,8 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     if (cmd === 'git rev-parse --git-path info/exclude') return ok('.git/info/exclude\n')
     if (cmd.startsWith('git commit') && commitFails) return { value: { exitCode: 1, stdout: '', stderr: 'Please tell me who you are.' } } as never
     if (cmd.startsWith('git ')) return ok()
+    if (missing.includes(cmd)) throw new Error(`spawn ${e.argv[0]} ENOENT`)
+    if (cmd === 'sh-missing') return { value: { exitCode: 127, stdout: '', stderr: 'sh: vitest: not found' } } as never
     if (failing > 0) {
       failing--
       return { value: { exitCode: 1, stdout: 'FAIL src/mw.test.ts\n  expected 429', stderr: '' } } as never
@@ -99,6 +101,8 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
   on('fs.read', (_, e) => {
     if (e.path.endsWith('package.json')) return { value: pkg } as never
     if (e.path in written) return { value: written[e.path] } as never
+    // The spec the agent wrote: a file the engine has, with no commands in it.
+    if (/\/docs\/specs\/.+\.md$/.test(e.path)) return { value: '# Spec' } as never
     throw new Error('ENOENT')
   })
   on('fs.write', (_, e) => {
@@ -914,7 +918,7 @@ describe('what the factory did, and the PR asked in the conversation', () => {
     await toReviews($)
     const files = Object.keys(w.written).filter(p => p.startsWith('/repo/.factory/rate-limiter.record/')).map(p => p.split('/').pop())
     expect(files).toEqual(['01-spec-writer.md', '02-builder-round-1.md', '03-changes-after-builder-round-1.md', '04-checks.md'])
-    expect(w.written['/repo/.factory/rate-limiter.record/02-builder-round-1.md']).toBe('# builder, round 1\n\nbuilt\n')
+    expect(w.written['/repo/.factory/rate-limiter.record/02-builder-round-1.md']).toBe('# builder, round 1\n\nModel asked: sonnet; ran on: no step seen.\n\nbuilt\n')
     expect(w.written['/repo/.factory/rate-limiter.record/04-checks.md']).toMatch(/^# checks\n\n✓ npm test/)
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
     expect(await texts(pane)).toMatch(/Changed: 1 file changed · built \| What each step said: \/repo\/\.factory\/rate-limiter\.record\//)
@@ -1100,7 +1104,9 @@ describe('commands the factory found run only once you let them', () => {
     await toReviews($)
     expect(w.asked.find(q => q.startsWith('Before the factory runs'))).toMatch(/They run the code the builder wrote, its tests and config included, outside your permission prompts/)
     const asked = () => w.asked.filter(q => q.startsWith('Before the factory runs')).length
-    expect(w.ran.find(c => c.startsWith('git log -1 --format=%H HEAD --'))).toMatch(/ \.npmrc .*:\(glob\)\*\*\/jest\.config\.\*/)
+    const watched = w.ran.find(c => c.startsWith('git log -1 --format=%H HEAD --'))!
+    for (const f of ['.npmrc', 'jest.config.*', 'pom.xml', 'build.gradle.kts', '*.csproj', 'Makefile', 'conftest.py']) expect(watched).toContain(`:(glob)**/${f}`)
+    expect(watched).toContain(' .factory/checks.json')
     await answer($, 'a3', CHANGES)
     await answer($, 'a4', PASS)
     w.setConfig('npmrc-changed')
@@ -1148,5 +1154,89 @@ describe('the frame timer', () => {
     const after = frames
     await w.clock.advance(5_000)
     expect(frames).toBe(after)
+  })
+})
+
+describe("a check whose program isn't installed is skipped, not failed", () => {
+  test('not installed (spawn ENOENT, exit 127): no builder round for it; the approver is told', { options: { checks: 'mvn -q test; sh-missing; npm test' } } as never, async ($: Engine, on: On) => {
+    const w = engine(on, { missing: ['mvn -q test'] })
+    await toReviews($)
+    // Straight on to the reviewers: the builder isn't sent to install maven.
+    expect(w.spawned.filter(s => s.subagentType === 'factory:builder')).toHaveLength(1)
+    expect(w.spawned.slice(-2).map(s => s.subagentType)).toEqual(['factory:security-reviewer', 'factory:code-reviewer'])
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    const prompt = last(w).prompt
+    expect(prompt).toContain('mvn -q test not installed, not run, sh-missing not installed, not run, npm test passed')
+    expect(prompt).toContain('Not installed here, so not run: mvn -q test, sh-missing.')
+  })
+
+  test('a timeout is a failure, not a missing program', () => {
+    expect(couldNotStart(new Error('spawn mvn ENOENT'))).toBe(true)
+    expect(couldNotStart(new Error('the command timed out after 600000 ms'))).toBe(false)
+    expect(couldNotStart('Timeout: still running')).toBe(false)
+  })
+
+})
+
+describe('with no check run, an approval is the person\'s call', () => {
+  test('the approver is told; its APPROVE becomes an escalation the person can approve past', async ($, on) => {
+    const w = engine(on, { files: [], pkg: '{}' })
+    await toReviews($)
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    expect(last(w).prompt).toContain('Checks: NONE RAN.')
+    expect(last(w).prompt).toContain('No check ran: an APPROVE goes to the person as an escalation')
+    await answer($, 'a5', 'DECISION: APPROVE\nREASON: tests read fine')
+    const t = await bandText($)
+    expect(t).toMatch(/no check ran, so nothing was verified by running it/)
+    expect(t).not.toMatch(/Open the PR when you're ready/)
+    expect(w.asked.at(-1)).toMatch(/was escalated by the approver/)
+    expect(await command($, 'approve')).toBe('Approved: Claude opens the PR.')
+  })
+
+  test('with checks that ran and passed, an APPROVE stays an approval', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    expect(last(w).prompt).not.toContain('No check ran')
+    await answer($, 'a5', 'DECISION: APPROVE\nREASON: ok')
+    expect(await bandText($)).toMatch(/approved: ok\. Open the PR when you're ready/)
+  })
+})
+
+describe("the approver sees what the change touched", () => {
+  test('the files changed, the scope check and the open questions are in its prompt', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    const p = last(w).prompt
+    expect(p).toContain('Files the change touched:\nsrc/mw.ts | 40 +++')
+    expect(p).toMatch(/a file, dependency or public interface the spec doesn't name is scope it didn't ask for/)
+    expect(p).toMatch(/Open questions: one the change settled by guessing/)
+  })
+})
+
+describe('what the review run on PR #105 missed, asked for up front', () => {
+  test('the spec lists every copy; the builder reports its open questions; reviewers check fields against real definitions', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    expect(w.spawned[0]!.prompt).toMatch(/list every copy of the code the change touches[^\n]*in or out of scope/)
+    expect(w.spawned.find(s => s.subagentType === 'factory:builder')!.prompt).toContain("For each of the spec's Open questions, say in your closing summary how you settled it.")
+    const review = w.spawned.find(s => s.subagentType === 'factory:code-reviewer')!.prompt
+    expect(review).toMatch(/Read a changed file whole when it is short/)
+    expect(review).toMatch(/against its real definition[^\n]*a criterion built on a field that doesn't exist is a blocker/)
+  })
+})
+
+describe('the record says which model each role ran on', () => {
+  test('the model asked for, and the ones its steps actually ran on', async ($, on) => {
+    const w = engine(on)
+    await startRun($)
+    await step($, 'a1')
+    await answer($, 'a1', SPEC_ANSWER)
+    expect(w.written['/repo/.factory/rate-limiter.record/01-spec-writer.md']).toMatch(/^# spec-writer\n\nModel asked: sonnet; ran on: m\.\n/)
   })
 })

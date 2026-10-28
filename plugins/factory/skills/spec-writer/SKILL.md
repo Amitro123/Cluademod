@@ -44,7 +44,9 @@ Write it in this order, short and concrete:
    to read it again. Each file the change touches or depends on, as `path:start-end` with the
    functions or types there and a few words on each; the signatures of the types it uses from large
    files (copy them, short); and the commands that test the change. Paths and ranges you checked,
-   not guessed.
+   not guessed. List every copy of the code the change touches (the same logic in another module,
+   a bundled and a standalone version, generated output), each marked in or out of scope: a copy
+   left on the old logic is a bug the reviewers won't see in the diff.
 
 ## 3. Tasks
 
