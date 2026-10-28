@@ -18,6 +18,15 @@ what the factory now does about each, and what is still open.
 "Mitigated" means the agents are told to catch it and the factory gives them what they need; a
 model can still miss it. Only D1 and D2 are enforced in code.
 
+How often it is still missed is measured by the evals in `evals/` (tag `factory-roles`, run with
+`claude plugin eval . --tag factory-roles --scaffold --allow-tools Write`). First run, 3 runs each
+with the role's skill and without it:
+
+| Case | With the skill | Without |
+|---|---|---|
+| D4: reviewer calls a criterion on a missing field a blocker (`reviewer-catches-false-premise`) | 2/3 | 0/3 |
+| D5: spec's Code map names the second copy, in or out of scope (`spec-lists-every-copy`) | 2/3 | 0/3 |
+
 ## Answered
 
 - **Which model each role really ran on (g).** Each role's entry in the run record
