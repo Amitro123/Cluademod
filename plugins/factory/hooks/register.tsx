@@ -553,7 +553,9 @@ async function onReview($: EngineInterface, role: Reviewer, agentId: string, ans
 
 async function startApprover($: EngineInterface) {
   const r = await patch($, cur => ({ ...moveTo(cur, 'approve', 'the approver is deciding'), steps: { ...cur.steps, approver: { ...cur.steps.approver, state: 'run' } } }))
-  if (r) await spawnRole($, 'approver', approvePrompt(r))
+  if (!r) return
+  const stat = await git($, ['diff', '--stat', r.base, 'HEAD'], r.worktree)
+  await spawnRole($, 'approver', approvePrompt(r, stat.exitCode === 0 ? stat.stdout.trim() : ''))
 }
 
 async function onApprover($: EngineInterface, answer: string, why: string) {

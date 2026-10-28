@@ -244,13 +244,16 @@ export function reviewPrompt(run: Run, role: Reviewer, stat: string): string {
   ].filter(Boolean).join('\n')
 }
 
-export function approvePrompt(run: Run): string {
+// `stat`: git's list of the files the change touched, so the approver can hold them against the spec.
+export function approvePrompt(run: Run, stat = ''): string {
   const reviews = run.reviews.map(r => `- ${r.role}: ${r.state === 'pass' ? 'PASS' : 'CHANGES'}${r.findings.length ? `\n${r.findings.map(f => `  - [${f.severity}] ${f.where} ${f.text}`).join('\n')}` : ''}`)
   return [
     `Decide on the change for: ${run.feature}`,
     `The spec is ${run.specFile}; the change is on branch ${run.branch}.`,
     `Checks: ${ranChecks(run).length ? run.checks.map(c => `${c.cmd} ${checkWord(c)}`).join(', ') : `NONE RAN. ${run.checksNote || 'none configured'}`}.`,
     ...(ranChecks(run).length && run.checksNote ? [`Check notes: ${run.checksNote}`] : []),
+    ...(stat ? [`Files the change touched:\n${stat}`, "Hold them against the spec's Design and Code map: a file, dependency or public interface the spec doesn't name is scope it didn't ask for. Name it in your reason, and ESCALATE unless it is plainly needed to meet a criterion."] : []),
+    "Read the spec's Open questions: one the change settled by guessing, rather than the way the spec or the builder's summary says, is the person's to decide: ESCALATE.",
     `Review rounds: ${run.round}. The last verdicts:`,
     ...reviews,
     'APPROVE when every acceptance criterion is met and no blocker or major finding is left; otherwise ESCALATE to the person.',

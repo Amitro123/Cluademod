@@ -1205,3 +1205,16 @@ describe('with no check run, an approval is the person\'s call', () => {
     expect(await bandText($)).toMatch(/approved: ok\. Open the PR when you're ready/)
   })
 })
+
+describe("the approver sees what the change touched", () => {
+  test('the files changed, the scope check and the open questions are in its prompt', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    const p = last(w).prompt
+    expect(p).toContain('Files the change touched:\nsrc/mw.ts | 40 +++')
+    expect(p).toMatch(/a file, dependency or public interface the spec doesn't name is scope it didn't ask for/)
+    expect(p).toMatch(/Open questions: one the change settled by guessing/)
+  })
+})
