@@ -1,66 +1,38 @@
 # Factory plugin: open issues
 
-Source: post-hoc review of PR #105 (Amitro1234/keshet-claude-skills, "fix the 9 model-router issues"),
-built by this factory. The review found defects D1-D6 that the factory run did not catch.
-Root-cause analysis: `keshet-claude-skills/.factory/pr105-rootcause-analysis.md`.
+Source: a post-hoc review of a pull request this factory built (a fix to a model-router mod in a
+private repository). The review found defects D1-D6 that the run did not catch. This file tracks
+what the factory now does about each, and what is still open.
 
 ## Status of D1-D6
 
-| ID | Defect | Status | Why |
+| ID | Defect | Status | Where |
 |---|---|---|---|
-| D1 | Stale python test `test_contract.py` (PR rewrote `routed-worker.md`, test not updated); python suites never ran because `detectChecks` found no root config | MITIGATED | `detectChecks` (hooks/checks.ts) now detects checks generically and "none ran" is surfaced; the approver can still APPROVE with zero checks until (a) lands |
-| D2 | `SKILL.md` grew past the 16000-byte cap enforced by `tools/test_build_plugin.py`; same cause as D1 | MITIGATED | Same as D1 |
-| D3 | `explicitModel` in `register.tsx` disabled step routing for every Agent-tool subagent (`tool.call` rewrites model first); spec left it as an open question, builder guessed | OPEN | No open-question gate; approver does not re-read code. See (c) |
-| D4 | False premise in an acceptance criterion: `run_in_background` is not an Agent tool input (Bash only); builder wrote code and a synthetic test matching it | OPEN | No rubric step validates AC fields against real types. See (e), (b) |
-| D5 | Spec scoped issue 4 to the bundle only; sibling standalone mods left on old logic; spec-writer never flagged them | OPEN | See (d) |
-| D6 | An AC allowed a docs-only resolution; scope creep (`namedReadBudget`) invisible to a diff-less approver | OPEN | See (f) |
+| D1 | A stale python test went unnoticed: the python suites never ran, because check detection only looked for config files at the repository root | FIXED | `hooks/checks.ts` detects checks generically (root, one level down, touched folders, `.factory/checks.json`, allowlisted commands in the spec's criteria). With none run, an APPROVE becomes an escalation (`onApprover`) |
+| D2 | A `SKILL.md` grew past a size cap that a repository test enforces; same cause as D1 | FIXED | Same as D1 |
+| D3 | The spec left an open question; the builder guessed | MITIGATED | The builder reports how it settled each open question (`buildPrompt`); the approver escalates one settled by guessing (`approvePrompt`, approver skill). Not enforced in code: a model reads it |
+| D4 | An acceptance criterion rested on an input the API doesn't have; the builder wrote code and a synthetic test to match | MITIGATED | Reviewers check every field, input or type the change or a criterion relies on against its real definition; a false premise is a blocker (`reviewPrompt`, code-reviewer skill) |
+| D5 | The spec scoped a fix to one copy of the code; sibling copies stayed on the old logic | MITIGATED | The spec's Code map lists every copy of the code the change touches, each in or out of scope (`specPrompt`, spec-writer skill) |
+| D6 | Scope creep was invisible to an approver that never saw the diff | MITIGATED | The approver gets the files the change touched and escalates what the spec doesn't name (`approvePrompt`) |
 
-Unverified: whether the model-router step-routing bug downranked the opus reviewers/approver during the run
-(run records are absent). See (g).
+"Mitigated" means the agents are told to catch it and the factory gives them what they need; a
+model can still miss it. Only D1 and D2 are enforced in code.
 
-## Known failing tests (fail on clean HEAD, not caused by this branch)
+## Answered
 
-- Worktree folder excluded via exclude file.
-- Every step's words go to the run's record.
+- **Which model each role really ran on (g).** Each role's entry in the run record
+  (`.factory/<slug>.record/`) starts with the model it asked for and the models its steps ran on.
+- **Unattended runs at "Run them?" (h).** Fails closed: a question no one answers (or a `-p` run,
+  where there is no one to ask) leaves the run waiting at needs-human, and Retry asks again. Set
+  the `checks` and `setup` options for runs nobody watches: those commands aren't asked about.
+- **A program that isn't installed.** A detected check whose program can't start here (maven,
+  gradle, dotnet...) is recorded as not installed and skipped, not failed: the builder isn't sent
+  back to fix it, and the approver is told it didn't run.
 
-## Prioritized OPEN list
+## Still open
 
-### (a) Approver must refuse APPROVE when no checks ran (closes D1/D2 fully)
-- Change: when checks status is `skip` / "NONE RAN", the approver verdict is ESCALATE unless the user explicitly overrides.
-- Target: `hooks/flow.ts` (pass checks status into the approver prompt), `skills/approver/SKILL.md` (remove the "none were configured" approve path).
-- Acceptance test: factory test with a repo where `detectChecks` returns [] -> approver prompt contains the checks status and the run ends `needs-human` unless the override option is set; with the override it can APPROVE.
-
-### (b) Reviewers/approver get more than the diff
-- Change: provide full contents of touched files plus the real type definitions (`types/*.d.ts`), not diff-only.
-- Target: `reviewPrompt` in `hooks/flow.ts`; reviewer prompts under `skills/`.
-- Acceptance test: prompt-builder test asserts the review prompt includes touched-file contents and the type file paths; a fixture with a stale assertion in a touched file is surfaced.
-
-### (c) Open-question gate (D3)
-- Change: spec-writer lists open questions in a fixed section; builder must resolve each or escalate; approver ESCALATEs while any is unresolved before DONE.
-- Target: spec-writer prompt, `skills/approver/SKILL.md`, `hooks/flow.ts`.
-- Acceptance test: spec fixture with an open question and a builder result that does not resolve it -> verdict ESCALATE.
-
-### (d) Sibling copies (D5)
-- Change: spec-writer must enumerate duplicate code paths (bundle vs standalone mods) for each change and mark each in or out of scope.
-- Target: spec-writer prompt.
-- Acceptance test: spec for a fixture repo with a duplicated function lists every copy; a missing list fails the spec-format check.
-
-### (e) Rubric: validate ACs against real types (D4)
-- Change: every AC naming an API field/input is checked against the real type definition; tests may not rely only on synthetic fixtures.
-- Target: reviewer prompts (code-reviewer rubric), spec-writer prompt.
-- Acceptance test: fixture AC referencing a nonexistent input field -> reviewer returns a blocker finding.
-
-### (f) Scope-creep check (D6)
-- Change: approver compares the diff's file/interface list to the spec/AC and flags additions not in it.
-- Target: `hooks/flow.ts` (compute list), `skills/approver/SKILL.md`.
-- Acceptance test: fixture diff touching a file absent from the spec -> approver output flags it and ESCALATEs.
-
-### (g) Record/transcript retention
-- Change: retain run records and per-role transcripts, including the model actually used per role.
-- Target: `hooks/register.tsx` (record dir), `hooks/flow.ts`.
-- Acceptance test: after a run, the record dir exists and lists role -> model for every step, so a post-mortem can verify routing.
-
-### (h) Unattended runs and the "Run them?" prompt
-- Decision needed: when `detectChecks` finds checks, the flow asks "Run them?". Unattended runs would stall. Options: auto-run detected checks when unattended, or fail closed to needs-human.
-- Target: `hooks/register.tsx` (~374-395).
-- Acceptance test: an unattended-mode test completes without a prompt under the chosen policy.
+- **Enforce, not ask, for D3-D6.** A checker in code, e.g. the spec's open questions parsed and
+  each one required in the builder's summary, would close D3 for good.
+- **Two tests fail on Windows only** ("the worktree folder is kept out of git through the exclude
+  file", "every step's words go to the run's record"). They pass on Linux and macOS; likely path
+  separators in the worktree, exclude and record paths.
