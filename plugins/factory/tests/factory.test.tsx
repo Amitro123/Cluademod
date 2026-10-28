@@ -1218,3 +1218,15 @@ describe("the approver sees what the change touched", () => {
     expect(p).toMatch(/Open questions: one the change settled by guessing/)
   })
 })
+
+describe('what the review run on PR #105 missed, asked for up front', () => {
+  test('the spec lists every copy; the builder reports its open questions; reviewers check fields against real definitions', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    expect(w.spawned[0]!.prompt).toMatch(/list every copy of the code the change touches[^\n]*in or out of scope/)
+    expect(w.spawned.find(s => s.subagentType === 'factory:builder')!.prompt).toContain("For each of the spec's Open questions, say in your closing summary how you settled it.")
+    const review = w.spawned.find(s => s.subagentType === 'factory:code-reviewer')!.prompt
+    expect(review).toMatch(/Read a changed file whole when it is short/)
+    expect(review).toMatch(/against its real definition[^\n]*a criterion built on a field that doesn't exist is a blocker/)
+  })
+})

@@ -28,7 +28,8 @@ Every file read stays in your context and is paid again at each later step. So:
    - write or extend the tests that prove its acceptance criteria;
    - run those tests (and the project's checks you can find) before moving on.
 3. When a spec detail is wrong or impossible, do the closest thing that meets its acceptance criteria
-   and say so in your summary. Don't stop to ask: nobody answers mid-build.
+   and say so in your summary. Don't stop to ask: nobody answers mid-build. Each of the spec's Open
+   questions: say in your summary how you settled it, so the approver can tell a decision from a guess.
 
 ## Later rounds
 

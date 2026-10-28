@@ -13,7 +13,8 @@ Every file read stays in your context and is paid again at each later step. So:
 
 - Start from the diff (`git diff <base>..HEAD`) and the spec's Code map.
 - Search first (Grep, Glob), then read only what the search points to.
-- Read by range (offset and limit) around what you need. Never read whole a large file: type
+- Read a changed file whole when it is short (under about 400 lines); otherwise by range (offset
+  and limit) around what you need. Never read whole a large file: type
   definitions (`*.d.ts`), generated code, lockfiles, minified or vendored files, fixtures.
 - Don't read a file again unless it changed; keep a note of what you learned instead.
 - Read several independent files in one step, not one per step.
@@ -21,7 +22,9 @@ Every file read stays in your context and is paid again at each later step. So:
 ## Walk through
 
 1. **Each acceptance criterion** in the spec: find the code that meets it and the test that proves
-   it. A criterion with no code or no test is a finding.
+   it. A criterion with no code or no test is a finding. A criterion built on an API field, input or
+   type: read its real definition. One that doesn't exist (the criterion's premise is false) is a
+   blocker, whatever the tests say, and a test that only feeds a made-up fixture doesn't prove it.
 2. **Correctness**: the cases the spec's failure modes name, empty and boundary input, errors from
    what the code calls. Read the changed functions whole, not only the changed lines.
 3. **Tests**: do they test behaviour (a wrong implementation would fail them), or only that the code
