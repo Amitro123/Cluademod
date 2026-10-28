@@ -111,24 +111,9 @@ export function splitChecks(option: string): string[][] {
   return option.split(/[;\n]/).map(c => c.trim()).filter(Boolean).map(c => c.split(/\s+/))
 }
 
-// With no `checks` set: what the project's own files suggest.
-export function detectChecks(files: string[], packageJson: string | null): string[][] {
-  const out: string[][] = []
-  if (packageJson !== null) {
-    let scripts: Record<string, unknown> = {}
-    try {
-      scripts = (JSON.parse(packageJson) as { scripts?: Record<string, unknown> }).scripts ?? {}
-    } catch {
-      scripts = {}
-    }
-    if (scripts.test) out.push(['npm', 'test'])
-    for (const s of ['lint', 'typecheck']) if (scripts[s]) out.push(['npm', 'run', s])
-  }
-  if (files.includes('pyproject.toml') || files.includes('pytest.ini') || files.includes('setup.cfg')) out.push(['python', '-m', 'pytest', '-q'])
-  if (files.includes('go.mod')) out.push(['go', 'test', './...'])
-  if (files.includes('Cargo.toml')) out.push(['cargo', 'test'])
-  return out
-}
+// With no `checks` set: what the project's own files suggest. Detection lives in checks.ts (never throws).
+export { detectChecks, detectProjectChecks, specChecks, allowedCommand, NOTHING_RAN } from './checks'
+export type { ChecksIO, DetectedChecks } from './checks'
 
 // A fresh worktree has no installed dependencies: with no `setup` set, the lockfile says how to
 // install them. Nothing when they're there already (or the project isn't one of these).
@@ -245,6 +230,7 @@ export function reviewPrompt(run: Run, role: Reviewer, stat: string): string {
     `Review the change for: ${run.feature}`,
     `The spec is ${run.specFile}. The change is the commits on branch ${run.branch} since ${run.base.slice(0, 12)}, in the repository you are started in (git diff ${run.base.slice(0, 12)}..HEAD): exactly what will be pushed.`,
     stat ? `Files changed:\n${stat}` : '',
+    ...(!run.checks.length && run.checksNote ? [`No checks ran for this change: ${run.checksNote} Nothing was verified by running it, so weigh the tests you read accordingly.`] : []),
     `Start from the diff and the spec's "Code map"; read the changed files around the changed lines, not whole, and search before reading anything else.`,
     `Look only at what a ${role} review covers. Don't change any file.`,
     'End your answer with exactly:',
@@ -260,7 +246,8 @@ export function approvePrompt(run: Run): string {
   return [
     `Decide on the change for: ${run.feature}`,
     `The spec is ${run.specFile}; the change is on branch ${run.branch}.`,
-    `Checks: ${run.checks.length ? run.checks.map(c => `${c.cmd} ${c.ok ? 'passed' : 'FAILED'}`).join(', ') : 'none configured'}.`,
+    `Checks: ${run.checks.length ? run.checks.map(c => `${c.cmd} ${c.ok ? 'passed' : 'FAILED'}`).join(', ') : `NONE RAN. ${run.checksNote || 'none configured'}`}.`,
+    ...(run.checks.length && run.checksNote ? [`Check notes: ${run.checksNote}`] : []),
     `Review rounds: ${run.round}. The last verdicts:`,
     ...reviews,
     'APPROVE when every acceptance criterion is met and no blocker or major finding is left; otherwise ESCALATE to the person.',
