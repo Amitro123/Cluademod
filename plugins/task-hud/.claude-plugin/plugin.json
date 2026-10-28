@@ -1,6 +1,6 @@
 {
   "name": "task-hud",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "A to-do progress bar above the prompt and a pane of pixel creatures, one per sub-agent Claude sends out",
   "author": {
     "name": "Amit Rosen",
