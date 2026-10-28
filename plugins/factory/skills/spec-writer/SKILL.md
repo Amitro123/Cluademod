@@ -14,6 +14,10 @@ TASKS). This skill is how to get there. The prompt's format always wins over any
   guess from names. Note the conventions you see (layout, naming, error handling, test style).
 - If the request points at a file, an issue or a to-do item, read it whole: it is the source of truth.
 - Check the project's own rules (CLAUDE.md, `.claude/rules/`, CONTRIBUTING) and follow them in the spec.
+- Before you write, search the whole repository for the logic the change alters: by the expression
+  itself (`Math.round(x * 100)`), not only by its function's name, in every file type and folder
+  (scripts, tools, other packages, generated output), not only the folder the request names. A
+  copy under another name is still a copy.
 
 ## Reading, the costliest part of a run
 

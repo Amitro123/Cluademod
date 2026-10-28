@@ -19,13 +19,15 @@ what the factory now does about each, and what is still open.
 model can still miss it. Only D1 and D2 are enforced in code.
 
 How often it is still missed is measured by the evals in `evals/` (tag `factory-roles`, run with
-`claude plugin eval . --tag factory-roles --scaffold --allow-tools Write`). First run, 3 runs each
-with the role's skill and without it:
+`claude plugin eval . --tag factory-roles --scaffold --allow-tools Write`). With the role's skill,
+all runs so far, against 3 runs without it:
 
 | Case | With the skill | Without |
 |---|---|---|
-| D4: reviewer calls a criterion on a missing field a blocker (`reviewer-catches-false-premise`) | 2/3 | 0/3 |
-| D5: spec's Code map names the second copy, in or out of scope (`spec-lists-every-copy`) | 2/3 | 0/3 |
+| D4: reviewer calls a criterion on a missing field a blocker (`reviewer-catches-false-premise`) | 22/23 | 0/3 |
+| D5: spec's Code map names the second copy, in or out of scope (`spec-lists-every-copy`) | 13/14, then 12/12 once the spec-writer searches the whole repository by the expression (the miss searched only `src/`, and only `.ts` files) | 0/3 |
+
+The code reviewer also looks for a copy left on the old logic (not measured by a case yet).
 
 ## Answered
 
