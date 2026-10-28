@@ -160,8 +160,14 @@ export function movePending(g: Goal, id: string, by: -1 | 1): Goal {
 
 // Where a new task goes: before the first pending task of lower priority, but never ahead of a task it
 // needs. Done and in-progress tasks keep their places.
-export function insertTask(g: Goal, item: { title: string; priority: Priority; needs: string[] }): { goal: Goal; task: Task; at: number } {
-  const id = `t${g.tasks.reduce((n, t) => Math.max(n, Number(t.id.slice(1)) || 0), 0) + 1}`
+// A task's number: t3, or t3-k2x9 for one added during the run.
+const idNum = (id: string) => parseInt(id.slice(1), 10) || 0
+// Tasks added to a plan under way carry a short random tail: two sessions adding at once both make
+// "the next number", and the tail keeps the two apart when their copies merge.
+export const tail = () => Math.random().toString(36).slice(2, 6).padEnd(4, '0')
+
+export function insertTask(g: Goal, item: { title: string; priority: Priority; needs: string[] }, suffix = tail()): { goal: Goal; task: Task; at: number } {
+  const id = `t${g.tasks.reduce((n, t) => Math.max(n, idNum(t.id)), 0) + 1}-${suffix}`
   const needs = item.needs.filter(n => g.tasks.some(t => t.id === n))
   const task: Task = { id, title: item.title, status: 'pending', tokens: 0, priority: item.priority, ...(needs.length ? { needs } : {}) }
   const floor = Math.max(-1, ...needs.map(n => g.tasks.findIndex(t => t.id === n))) + 1
@@ -176,8 +182,8 @@ export function insertTask(g: Goal, item: { title: string; priority: Priority; n
 export function replan(before: Goal | null, text: string, tasks: Task[]): Goal {
   const kept = before && before.status !== 'planning' ? before.tasks.filter(t => t.status === 'done') : []
   const dropped = before ? before.tasks.filter(t => !kept.includes(t)).reduce((n, t) => n + t.tokens, 0) : 0
-  const shift = kept.reduce((n, t) => Math.max(n, Number(t.id.slice(1)) || 0), 0)
-  const renamed = tasks.map(t => ({ ...t, id: `t${Number(t.id.slice(1)) + shift}`, ...(t.needs ? { needs: t.needs.map(n => `t${Number(n.slice(1)) + shift}`) } : {}) }))
+  const shift = kept.reduce((n, t) => Math.max(n, idNum(t.id)), 0)
+  const renamed = tasks.map(t => ({ ...t, id: `t${idNum(t.id) + shift}`, ...(t.needs ? { needs: t.needs.map(n => `t${idNum(n) + shift}`) } : {}) }))
   return {
     text,
     status: 'proposed',
@@ -298,16 +304,17 @@ async function save($: EngineInterface) {
   const g = await read($, goal)
   const saved = (await $.store.get(key)) as Goal | null | undefined
   // Another session in this project set a newer goal: it stays saved, and this session's copy stays its own.
-  if (saved && typeof saved === 'object' && (saved.setAt ?? 0) > (g ? g.setAt ?? 0 : await read($, heldAt))) {
+  const sameGoal = g && saved && typeof saved === 'object' && (saved.setAt ?? 0) === (g.setAt ?? 0)
+  if (saved && typeof saved === 'object' && ((saved.setAt ?? 0) > (g ? g.setAt ?? 0 : await read($, heldAt)) || (sameGoal && (saved.planAt ?? 0) > (g!.planAt ?? 0)))) {
     if (!(await read($, superseded))) {
       await update($, superseded, () => true)
-      $.ui.toast("A newer goal was set in another session; progress here isn't saved")
+      $.ui.toast(sameGoal ? "The goal was re-planned in another session; progress here isn't saved" : "A newer goal was set in another session; progress here isn't saved")
     }
     return
   }
   // The same goal, changed in another session since this one last saw it: both sides' changes kept.
   let out = g
-  if (g && saved && typeof saved === 'object' && (saved.setAt ?? 0) === (g.setAt ?? 0) && JSON.stringify(saved) !== (await read($, seen))) {
+  if (g && sameGoal && (saved.planAt ?? 0) === (g.planAt ?? 0) && JSON.stringify(saved) !== (await read($, seen))) {
     out = mergeGoal(parsed(await read($, seen)), g, saved)
     await update($, goal, () => out)
   }
@@ -352,7 +359,13 @@ async function sync($: EngineInterface) {
   // The same goal: what this session changed since it last saved (token counts not saved yet, say)
   // is kept on top of the other session's, and saved at the turn's end.
   const mine = await read($, goal)
-  if (mine && stored && (mine.setAt ?? 0) === (stored.setAt ?? 0)) {
+  // The same goal re-planned here after the other session's copy: this plan stays, saved at the turn's end.
+  if (mine && stored && (mine.setAt ?? 0) === (stored.setAt ?? 0) && (mine.planAt ?? 0) > (stored.planAt ?? 0)) {
+    await update($, seen, () => there)
+    unsaved = true
+    return
+  }
+  if (mine && stored && (mine.setAt ?? 0) === (stored.setAt ?? 0) && (mine.planAt ?? 0) === (stored.planAt ?? 0)) {
     const merged = mergeGoal(parsed(await read($, seen)), mine, stored)
     await update($, goal, () => merged)
     await update($, seen, () => there)
@@ -440,11 +453,11 @@ export function withStatus(g: Goal, id: string, status: TaskStatus): Goal {
 
 // The side job's items as new tasks at the end of the plan: in progress (or done, if followups closed
 // them already), carrying the tokens they used so far, split evenly.
-export function addSide(g: Goal, sj: Side): { goal: Goal; taskIds: string[] } {
-  const next = g.tasks.reduce((n, t) => Math.max(n, Number(t.id.slice(1)) || 0), 0) + 1
+export function addSide(g: Goal, sj: Side, suffix = tail()): { goal: Goal; taskIds: string[] } {
+  const next = g.tasks.reduce((n, t) => Math.max(n, idNum(t.id)), 0) + 1
   const share = Math.floor(sj.tokens / Math.max(1, sj.items.length))
   const added: Task[] = sj.items.map((it, i) => ({
-    id: `t${next + i}`,
+    id: `t${next + i}-${suffix}`,
     title: it.title,
     status: sj.doneIds.includes(it.id) ? 'done' : 'in_progress',
     tokens: share + (i === 0 ? sj.tokens - share * sj.items.length : 0),
@@ -620,7 +633,8 @@ export const register: Register = (on, options) => {
     if (isFactory && before && before.source !== FACTORY_SOURCE && before.status !== 'done' && before.status !== 'planning') return { result: PLAN_KEPT_FOR_FACTORY }
     const text = clip(String(input.goal ?? '').trim() || before?.text || 'Session goal', 200)
     // A plan with no goal set before it is a new goal, set now.
-    const proposed = { setAt: await $.clock.now(), ...replan(isFactory ? null : before, text, orderPlan(items)), ...(isFactory ? { source: FACTORY_SOURCE } : {}) }
+    const now = await $.clock.now()
+    const proposed = { setAt: now, ...replan(isFactory ? null : before, text, orderPlan(items)), planAt: now, ...(isFactory ? { source: FACTORY_SOURCE } : {}) }
     await update($, asking, () => null)
     await setGoal($, () => proposed)
     void $.ui.open({ id: PANE, title: PANE_TITLE })

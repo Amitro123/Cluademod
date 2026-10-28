@@ -33,6 +33,9 @@ export type Goal = {
   pace?: Pace
   // When the person set it; absent on a goal saved before it. A newer goal from another session wins.
   setAt?: number
+  // When its plan was last proposed: a re-plan restarts the task ids at t1, so two copies of one goal
+  // merge task by task only when they hold the same plan; else the newer plan wins.
+  planAt?: number
 }
 
 // Work started from the followups to-do list (its Start button) while a goal is open: counted apart,

@@ -122,13 +122,14 @@ export function keepAgents(list: Agent[], keep = KEEP_AGENTS): Agent[] {
 }
 
 // `next` is the new list, or a change to the current one (applied atomically, so two calls at once both land).
-// The band is titled by the prompt the list was made for: a new list (empty before, or other tasks)
-// written in a new turn takes that turn's prompt; status changes and later writes keep the title.
+// The band is titled by the prompt the list was made for: a new list (empty before, or none of its
+// tasks left) written in a new turn takes that turn's prompt. Status changes, a task appended to the
+// list, and later writes in the turn keep the title.
 async function setTodos($: EngineInterface, next: Todo[] | ((list: Todo[]) => Todo[])) {
   const before = await read($, todos)
   const after = await update($, todos, list => (typeof next === 'function' ? next(list) : next))
   if (!after.length) return
-  const isNew = !before.length || ((await read($, retitle)) && after.map(t => t.subject).join('\n') !== before.map(t => t.subject).join('\n'))
+  const isNew = !before.length || ((await read($, retitle)) && !after.some(t => before.some(b => b.subject === t.subject)))
   if (!isNew) return
   await update($, retitle, () => false)
   const prompt = await read($, lastPrompt)

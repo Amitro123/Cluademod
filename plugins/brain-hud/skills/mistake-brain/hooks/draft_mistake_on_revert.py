@@ -92,6 +92,9 @@ def matches_revert(command: str) -> bool:
 # file: a token in a URL or flag, a bearer header, GitHub, OpenAI/Anthropic-style and AWS keys.
 _SECRETS = [
     (re.compile(r"(?i)\b(token|password|passwd|secret|api[_-]?key|access[_-]?key)(=|:\s*)\S+"), r"\1\2[redacted]"),
+    (re.compile(r"(?i)(--?(?:token|password|passwd|pass|secret|api[_-]?key|access[_-]?key))(\s+)(?!-)\S+"), r"\1\2[redacted]"),
+    # mysql-style -p<pass> (no space) and -p <pass>
+    (re.compile(r"(?<!\S)(-p)(\s+(?!-)\S+|\S+)"), r"\1 [redacted]"),
     (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 [redacted]"),
     (re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"), "[redacted]"),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "[redacted]"),

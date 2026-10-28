@@ -115,6 +115,23 @@ describe('band', () => {
     expect(await band()).toMatch(/Now the release notes/)
   })
 
+  test('a TaskCreate appended in a new turn keeps the title', async ($, on) => {
+    engine(on)
+    on('ui.render', ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return <Box />
+    })
+    on('tool.call', { tool: 'TaskCreate' }, (_, e) => ({ result: { task: { id: `k-${(e as unknown as { subject: string }).subject}` } } }) as never)
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+    await $.turn.start({ text: 'Video prep', turnId: 't1' })
+    await $.tool.call({ tool: 'TodoWrite', todos: [{ content: 'A', activeForm: 'A', status: 'pending' }] } as never)
+    await $.turn.start({ text: 'also add thumbnails', turnId: 't2' })
+    await $.tool.call({ tool: 'TaskCreate', subject: 'Thumbnails' } as never)
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(ui)).toMatch(/Video prep/)
+    await ui.unmount()
+  })
+
   test('stays out of the way with no to-dos', async ($, on) => {
     engine(on)
     on('ui.render', ($, e) => {
