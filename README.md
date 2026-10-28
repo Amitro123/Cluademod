@@ -364,6 +364,15 @@ tsc -p plugins/<mod>
 
 Run each mod's tests with `claude plugin test plugins/<mod>`; they don't need the types folder.
 
+The tests check the code; the evals in `plugins/<mod>/evals/` check what the model does with it (does it flag a bug it passes, call the plan tool for a goal, hand a factory request to the start tool, log a fix to memory). Each case runs with the plugin and without it, and reports the difference. They are real model calls, so they aren't in CI:
+
+```bash
+cd plugins/<mod>
+claude plugin eval . --trust-plugin --scaffold --runs 3 --max-cost-usd 5 --allow-tools "mcp__<mod>__*" Write Edit
+```
+
+A case that needs the shell also needs `--allow-tools Bash`. The run refuses it on a machine where the shell can't be sandboxed.
+
 The wording one mod writes and another reads (followups' Start prompt and `done` result, goal-run's goal prompt and reached-goal texts, the factory plan's outcomes) lives in `shared/texts.ts`, together with its parsers. A mod can import nothing outside its folder, so followups, goal-run, brain-hud and factory each keep a generated copy in `hooks/texts.ts`. Edit `shared/texts.ts`, then run `node tools/sync-texts.mjs`. CI runs it with `--check` and fails on a stale copy.
 
 ## License

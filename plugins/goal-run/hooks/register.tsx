@@ -505,7 +505,7 @@ export const register: Register = (on, options) => {
     await update($, side, () => null)
     await $.tool.register({
       name: 'plan',
-      description: `Propose the plan for the person's session goal: 3 to 8 concrete tasks, each with a priority (how much it matters to the goal: high, medium or low) and the tasks it depends on (dependsOn: their 1-based places in this list). The plan is ordered by priority, dependencies first, and the person sees it that way. The person is asked to approve it; the result says whether they did or what to change. Call it when they set a goal (or ask to re-plan); don't start the work before it is approved.`,
+      description: `Propose the plan for the person's session goal: 3 to 8 concrete tasks, each with a priority (how much it matters to the goal: high, medium or low) and the tasks it depends on (dependsOn: their 1-based places in this list). The plan is ordered by priority, dependencies first, and the person sees it that way. The person is asked to approve it; the result says whether they did or what to change. Call it when they set a goal, by /session-goal or in their own words ("my goal for this session is...", "today I want to get X done"), or ask to re-plan: call it first, before reading code or writing the plan out as text, and don't start the work before it is approved.`,
       inputSchema: {
         type: 'object',
         properties: {

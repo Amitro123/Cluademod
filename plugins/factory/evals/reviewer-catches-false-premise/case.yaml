@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: reviewer-catches-false-premise
+context:
+  scaffold_script: repo.sh

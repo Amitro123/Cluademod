@@ -31,7 +31,10 @@ Every file read stays in your context and is paid again at each later step. So:
    runs? Missing negative cases?
 4. **Fit**: the change follows the conventions around it and the project's rules; no duplicate of a
    helper that already exists; nothing outside the spec's scope.
-5. **Performance traps**: work in a loop that belongs outside it, unbounded reads, N+1 calls,
+5. **Copies left behind**: search the repository for the logic the change replaced, by the
+   expression itself, in every file type. A copy the spec's Code map doesn't mark out of scope,
+   still on the old logic, is a major finding: the diff doesn't show it.
+6. **Performance traps**: work in a loop that belongs outside it, unbounded reads, N+1 calls,
    blocking I/O where the code around is async.
 
 ## Report
