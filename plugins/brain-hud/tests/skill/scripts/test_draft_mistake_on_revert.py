@@ -143,3 +143,20 @@ def test_a_drafted_command_has_its_secrets_redacted_and_no_backtick():
     assert "`" not in out
     assert out.startswith("git checkout -- a.ts")
     assert len(out) <= 200
+
+
+def test_space_separated_secret_flags_are_redacted():
+    from draft_mistake_on_revert import safe_for_markdown
+
+    for cmd, secret in [
+        ("git checkout -- a && mysql --password hunter2 db", "hunter2"),
+        ("git restore . ; deploy --token abc123def", "abc123def"),
+        ("git clean -f && cli --api-key k-999 run", "k-999"),
+        ("git checkout . && mysql -u root -p s3cret db", "s3cret"),
+        ("git checkout . && mysql -u root -ps3cret db", "s3cret"),
+    ]:
+        out = safe_for_markdown(cmd)
+        assert secret not in out, (cmd, out)
+        assert "[redacted]" in out
+    # A flag followed by another flag isn't a value: left alone.
+    assert safe_for_markdown("git checkout -- a && tool --token --verbose") == "git checkout -- a && tool --token --verbose"
