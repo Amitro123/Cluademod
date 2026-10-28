@@ -126,7 +126,10 @@ const goalRunThere = async ($: EngineInterface) => (await $.command.list().catch
 // back to a general-purpose agent carrying the role's instructions in its prompt.
 // Each agent's spawn, by id: what a retry needs (the reload of the module forgets them; the step
 // then waits for Retry instead).
-const spawns = new Map<string, { role: Role; prompt: string; hasModel: boolean; isRetry: boolean }>()
+const spawns = new Map<string, { role: Role; prompt: string; hasModel: boolean; isRetry: boolean; asked?: string }>()
+// The models each agent of the run actually ran its requests on (from each step's usage): the
+// record shows them beside the model asked for, so a rewrite on the way (a router) shows after the fact.
+const ranOn = new Map<string, Set<string>>()
 
 async function spawnRole($: EngineInterface, role: Role, prompt: string, { onSessionModel = false } = {}): Promise<boolean> {
   const r = await read($, run)
@@ -162,7 +165,7 @@ async function spawnRole($: EngineInterface, role: Role, prompt: string, { onSes
     ...(role === 'builder' ? { builderId: id } : {}),
     reviews: cur.reviews.map(x => (x.role === role ? { ...x, agentId: id } : x)),
   }))
-  spawns.set(id, { role, prompt: job, hasModel: !onSessionModel, isRetry: onSessionModel })
+  spawns.set(id, { role, prompt: job, hasModel: !onSessionModel, isRetry: onSessionModel, asked: onSessionModel ? 'the session model' : modelOf(r, role) })
   return true
 }
 
@@ -610,7 +613,8 @@ async function onAgentDone($: EngineInterface, agentId: string, answer: string, 
     await patch($, cur => ({ ...cur, note: `the ${describe(role, cur)} failed on ${modelOf(cur, role)} (${why}); trying the session's model` }))
     if (await spawnRole($, role, spawn.prompt, { onSessionModel: true })) return
   }
-  await record($, describe(role, r), why ? `Stopped: ${why}.${answer.trim() ? `\n\n${answer}` : ''}` : answer)
+  const models = `Model asked: ${spawn?.asked ?? 'unknown (spawned before a reload)'}; ran on: ${[...(ranOn.get(agentId) ?? [])].join(', ') || 'no step seen'}.`
+  await record($, describe(role, r), `${models}\n\n${why ? `Stopped: ${why}.${answer.trim() ? `\n\n${answer}` : ''}` : answer}`)
   if (role === 'spec') return r.phase === 'spec' ? onSpec($, answer, why) : undefined
   if (role === 'builder') {
     if (r.phase !== 'build') return
@@ -825,7 +829,10 @@ export const register: Register = (on, options) => {
   on('turn.step', async function* ($, e, next) {
     const r = yield* next(e)
     const u = r.usage
-    if (e.agentId !== undefined && u && (await read($, run))?.agents[e.agentId]) await addTokens($, e.agentId, u.input_tokens + u.output_tokens + u.cache_creation_input_tokens)
+    if (e.agentId !== undefined && u && (await read($, run))?.agents[e.agentId]) {
+      await addTokens($, e.agentId, u.input_tokens + u.output_tokens + u.cache_creation_input_tokens)
+      if (u.model) ranOn.set(e.agentId, (ranOn.get(e.agentId) ?? new Set()).add(u.model))
+    }
     return r
   }).catch(async function* ($, e, next) { return yield* next(e) })
 

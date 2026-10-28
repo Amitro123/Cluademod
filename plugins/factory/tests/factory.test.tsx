@@ -918,7 +918,7 @@ describe('what the factory did, and the PR asked in the conversation', () => {
     await toReviews($)
     const files = Object.keys(w.written).filter(p => p.startsWith('/repo/.factory/rate-limiter.record/')).map(p => p.split('/').pop())
     expect(files).toEqual(['01-spec-writer.md', '02-builder-round-1.md', '03-changes-after-builder-round-1.md', '04-checks.md'])
-    expect(w.written['/repo/.factory/rate-limiter.record/02-builder-round-1.md']).toBe('# builder, round 1\n\nbuilt\n')
+    expect(w.written['/repo/.factory/rate-limiter.record/02-builder-round-1.md']).toBe('# builder, round 1\n\nModel asked: sonnet; ran on: no step seen.\n\nbuilt\n')
     expect(w.written['/repo/.factory/rate-limiter.record/04-checks.md']).toMatch(/^# checks\n\n✓ npm test/)
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
     expect(await texts(pane)).toMatch(/Changed: 1 file changed · built \| What each step said: \/repo\/\.factory\/rate-limiter\.record\//)
@@ -1228,5 +1228,15 @@ describe('what the review run on PR #105 missed, asked for up front', () => {
     const review = w.spawned.find(s => s.subagentType === 'factory:code-reviewer')!.prompt
     expect(review).toMatch(/Read a changed file whole when it is short/)
     expect(review).toMatch(/against its real definition[^\n]*a criterion built on a field that doesn't exist is a blocker/)
+  })
+})
+
+describe('the record says which model each role ran on', () => {
+  test('the model asked for, and the ones its steps actually ran on', async ($, on) => {
+    const w = engine(on)
+    await startRun($)
+    await step($, 'a1')
+    await answer($, 'a1', SPEC_ANSWER)
+    expect(w.written['/repo/.factory/rate-limiter.record/01-spec-writer.md']).toMatch(/^# spec-writer\n\nModel asked: sonnet; ran on: m\.\n/)
   })
 })
