@@ -1145,6 +1145,22 @@ describe('commands the factory found run only once you let them', () => {
     expect(w.asked.at(-1)).toMatch(/The builder changed what these run: package\.json\. Look at that diff/)
   })
 
+  test("the project's .factory/checks.json is read from the repository's root, where the person keeps it", async ($, on) => {
+    const w = engine(on)
+    w.written['/repo/.factory/checks.json'] = '["make verify"]'
+    await toReviews($)
+    expect(w.ran).toContain('make verify')
+    expect(w.ran).not.toContain('npm test')
+  })
+
+  test('a checks file only inside the worktree, where the builder writes, is not used', async ($, on) => {
+    const w = engine(on, { files: ['package.json', 'node_modules', '.factory'] })
+    w.written['/repo/.factory/rate-limiter/.factory/checks.json'] = '["make verify"]'
+    await toReviews($)
+    expect(w.ran).not.toContain('make verify')
+    expect(w.ran).toContain('npm test')
+  })
+
   test('the question says it runs the code the builder wrote; .npmrc or a jest config changed asks again', async ($, on) => {
     const w = engine(on, { delivers: true })
     await toReviews($)

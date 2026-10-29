@@ -30,6 +30,7 @@ import {
   splitChecks,
   tailOf,
   factoryCouldNotStart,
+  rootOf,
   takeOverNote,
   tok,
   tokensOf,
@@ -392,7 +393,10 @@ async function checkCommands($: EngineInterface, r: Run): Promise<DetectedChecks
       list: async dir => (await $.fs.list(dir).catch(() => [])).map(f => ({ name: f.name, isDir: String((f as { kind?: string }).kind) === 'dir' || String((f as { kind?: string }).kind) === 'directory' })),
       read: path => $.fs.read(path).then(t => String(t), () => null),
     }
-    return await detectProjectChecks(io, r.worktree, { explicit: checksOption, touched, spec })
+    // The person's checks file sits in the main repository; .factory/ is git-excluded, so a worktree
+    // never has it, and one the builder writes there must not count.
+    const checksFile = await $.fs.read(`${rootOf(r)}/.factory/checks.json`).then(t => String(t), () => null)
+    return await detectProjectChecks(io, r.worktree, { explicit: checksOption, touched, spec, checksFile })
   } catch (e) {
     return { checks: [], warnings: [String(e)], sources: {}, reason: `${NOTHING_RAN} Warning: ${String(e).slice(0, 120)}` }
   }
