@@ -148,12 +148,6 @@ export const tailOf = (text: string, lines = 30) => text.trim().split('\n').slic
 export const cleanFeature = (text: string) =>
   text.replace(/<\/?pasted_content\b[^>]*>/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim()
 
-// To the main Claude, when the factory takes over a goal or a to-do item: the work is the factory's.
-// After a takeOver whose run then failed to start: the work is the main Claude's after all.
-export const factoryCouldNotStart = (why: string) => `The factory couldn't start that run after all: ${why} Do the work yourself, as first asked.`
-export const takeOverNote = (feature: string) =>
-  `The factory took this over: "${titleOf(feature, 200)}". Its spec-writer writes the spec and its builder does the work, in a worktree of its own. Don't start the work or propose a plan yourself; answer in one line that the factory is on it.`
-
 // A run's name where a line is all there is (the band, a dialog's first line): the feature's first
 // sentence, clipped. A feature is often a whole paragraph of instructions.
 export function titleOf(feature: string, n = 60): string {
@@ -326,12 +320,20 @@ export function lastLines(text: string, n: number): string {
   return text.split('\n').map(l => l.trim()).filter(Boolean).slice(-n).join(' ').slice(0, 300)
 }
 
-// What the builder may leave untracked that never goes into a commit: installed dependencies,
-// build output, and credentials.
-const NEVER_COMMIT = [/(^|\/)(node_modules|\.venv|venv|__pycache__|dist|build)(\/|$)/, /(^|\/)\.env(\.[^/]*)?$/, /\.(pem|key|p12|pfx)$/i]
-export const neverCommit = (path: string) => NEVER_COMMIT.some(re => re.test(path))
+// What never goes into a commit, even where the project's .gitignore misses it: installed dependencies
+// and credentials. Narrow on purpose: a match the builder committed stops the run. Build output
+// (dist/, build/) isn't on it: a folder of that name can be source (cmd/build/), and one that is
+// output is the .gitignore's to keep out. A sample .env (.env.example) and a key or certificate among
+// test fixtures are files a change may well add.
+const DEPENDENCIES = /(^|\/)(node_modules|\.venv|venv|__pycache__)(\/|$)/
+const ENV_FILE = /(^|\/)\.env(\.[^/]*)?$/
+const SAMPLE_ENV = /(^|\/)\.env\.(example|sample|template|dist)$/i
+const KEY_FILE = /\.(pem|key|p12|pfx)$/i
+const TEST_DIR = /(^|\/)(tests?|__tests__|spec|fixtures|__fixtures__|testdata)\//i
+export const neverCommit = (path: string) =>
+  DEPENDENCIES.test(path) || (ENV_FILE.test(path) && !SAMPLE_ENV.test(path)) || (KEY_FILE.test(path) && !TEST_DIR.test(path))
 
-// The files left out, as a person reads them: a file inside an excluded folder (node_modules/, dist/)
+// The files left out, as a person reads them: a file inside an excluded folder (node_modules/)
 // as that folder, once, so a whole install doesn't list file by file.
 export function leftOut(paths: readonly string[]): string[] {
   const out: string[] = []

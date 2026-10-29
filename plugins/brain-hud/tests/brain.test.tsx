@@ -852,7 +852,7 @@ describe('the session journal: in a session', () => {
     expect(lists).toBe(before)
   })
 
-  test("a to-do the factory takes over isn't left open in the handoff; two started together are", async ($, on) => {
+  test("with the factory installed, a started to-do left undone is still in the handoff", async ($, on) => {
     const files = project()
     engine(on, files, { commands: ['followup', 'factory'] })
     await start($)
@@ -862,7 +862,7 @@ describe('the session journal: in a session', () => {
     await $.session.end({ reason: 'other', sessionId: 's-1', resume: {} } as never)
     expect(files['MISTAKES.md']).toMatch(/finish the to-do "Fix the upload"/)
     expect(files['MISTAKES.md']).toMatch(/finish the to-do "Docs"/)
-    expect(files['MISTAKES.md']).not.toMatch(/Rotate the keys/)
+    expect(files['MISTAKES.md']).toMatch(/finish the to-do "Rotate the keys"/)
   })
 
   test('nothing left open, no handoff; and a project without the memory gets none', async ($, on) => {

@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
-import { FACTORY_SOURCE, factoryPlanApprovedArgs, factoryTakesGoal, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, takeOverArgs, toolText } from './texts'
+import { FACTORY_SOURCE, FACTORY_START_TOOL, factoryChosenForGoal, factoryPlanApprovedArgs, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
 // The goal-run tests import the start-prompt parser from here, as before it was shared.
 export { parseStartPrompt }
 
@@ -38,6 +38,7 @@ const APPROVE_RUN = 'Approve, run through'
 const APPROVE_ASK = 'Approve, ask between tasks'
 const APPROVE_BUILD = 'Approve, start building'
 const CHANGE = 'Change it'
+const RUN_FACTORY = '🏭 Run as factory'
 const ADD_IT = 'Add it'
 const NOT_NOW = 'Not now'
 const GO_ON = 'Continue'
@@ -338,13 +339,6 @@ async function checkFactory($: EngineInterface): Promise<boolean> {
 // The goal goes to the factory: marked as the factory's, so the spec's plan replaces it (instead of
 // being kept apart as the person's own), then /factory runs with its text. A refused command puts
 // the goal back as it was.
-// factory's own takeOver option (on by default): whether a goal planned here goes to the factory.
-async function factoryTakesOver($: EngineInterface): Promise<boolean> {
-  if (!(await checkFactory($))) return false
-  const row = (await $.config.list().catch(() => [])).find(r => r.key === 'factory.takeOver')
-  return String(row?.value ?? 'on') !== 'off'
-}
-
 async function runAsFactory($: EngineInterface) {
   const g = await read($, goal)
   if (!g) return
@@ -503,6 +497,38 @@ async function keepSideApart($: EngineInterface) {
   await update($, side, cur => (!cur ? cur : cur.isLive ? { ...cur, isAsking: false } : null))
 }
 
+// Beside a one-item Start from followups while a goal is open and the factory is installed: Claude asks
+// the person, in the question dialog, whether the factory runs the item. The trigger is this mod's; the
+// question is Claude's, inside the turn. Unasked, the item is simply worked here, as before.
+const ASK_FACTORY = '🏭 Run as factory'
+const ASK_HERE = 'Do it here'
+export function factoryOffer(item: { id: string; title: string; detail?: string; where?: string }, goal: string): string {
+  const feature = `${item.title}${item.detail ? ` — ${item.detail}` : ''}${item.where ? ` (${item.where})` : ''}`
+  return [
+    `The person has a session goal open ("${goal}") and the factory mod is installed.`,
+    `Before any work on this to-do item, ask them with AskUserQuestion: whether to run it through the factory (spec, build on its own branch, reviews, PR) or do it here. Options exactly "${ASK_FACTORY}" and "${ASK_HERE}".`,
+    `If they pick the factory: call ${FACTORY_START_TOOL} with feature ${JSON.stringify(feature)} and followupId ${JSON.stringify(item.id)}, then stop; don't do the work yourself.`,
+    'If they pick doing it here, or answer anything else: do the item as the message asks.',
+  ].join('\n')
+}
+
+// Sub-agents of a factory run, by id: their tokens are the run's (the factory's pane counts them), not
+// the person's goal's, unless the goal is the factory's own. Known from their spawn; after a reload,
+// looked up once in the session's agent list.
+const isFactoryAgent = new Map<string, boolean>()
+const factoryLike = (a: { type?: string; subagentType?: string; description?: string }) =>
+  String(a.subagentType ?? a.type ?? '').startsWith('factory:') || String(a.description ?? '').startsWith('factory · ')
+
+async function fromFactory($: EngineInterface, agentId: string): Promise<boolean> {
+  const known = isFactoryAgent.get(agentId)
+  if (known !== undefined) return known
+  const list = await $.agent.list().catch(() => [])
+  const a = (Array.isArray(list) ? list : []).find(x => x.id === agentId)
+  const is = !!a && factoryLike(a as { type?: string; description?: string })
+  isFactoryAgent.set(agentId, is)
+  return is
+}
+
 const isTaskStatus = (s: unknown): s is TaskStatus => s === 'pending' || s === 'in_progress' || s === 'done'
 
 export const register: Register = (on, options) => {
@@ -609,6 +635,11 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    // The factory question's turn is over and the item stayed here: the band asks about the goal now.
+    if (e.agentId === undefined && (await read($, side))?.isOffered) {
+      const g = await read($, goal)
+      await update($, side, cur => (cur ? { ...cur, isOffered: false, isAsking: g?.status === 'active' } : cur))
+    }
     if (e.agentId === undefined && unsaved) await save($)
     return r
   }).catch(($, e, next) => next(e))
@@ -641,14 +672,10 @@ export const register: Register = (on, options) => {
     const items = planItems(input.tasks)
     if (!items.length) return { deny: 'A plan needs at least one task.' }
     const before = await read($, goal)
-    // A new goal from the main conversation, with the factory taking goals over: it builds it.
+    // A new goal from the main conversation, with the factory installed: the dialog also offers to
+    // run it through the factory instead. Never on its own: the person picks it.
     const isNew = !before || before.status === 'done' || before.status === 'planning'
-    if (!isFactory && isNew && (e as { agentId?: string }).agentId === undefined && (await factoryTakesOver($))) {
-      // A command can't run from inside a tool call, so Claude starts the run with the factory's
-      // tool. A goal still being planned stays: the factory's plan replaces it.
-      const goalText = clip(String(input.goal ?? '').trim() || before?.text || items.map(i => i.title).join('; '), 400)
-      return { result: factoryTakesGoal(goalText) }
-    }
+    const canFactory = !isFactory && isNew && (e as { agentId?: string }).agentId === undefined && (await checkFactory($))
     // A factory plan never takes over the person's own goal under way, and doesn't inherit its done
     // tasks. A goal still being planned (no plan approved yet) is the one the factory took over.
     if (isFactory && before && before.source !== FACTORY_SOURCE && before.status !== 'done' && before.status !== 'planning') return { result: PLAN_KEPT_FOR_FACTORY }
@@ -664,7 +691,7 @@ export const register: Register = (on, options) => {
     try {
       answer = isFactory
         ? await $.ui.ask(`${planText(proposed)}\n\nThe factory's spec for this goal. Approve it, and the builder starts?`, { header: 'Factory plan', options: [APPROVE_BUILD, CHANGE] })
-        : await $.ui.ask(`${planText(proposed)}\n\nApprove this plan? Run straight through the tasks, or be asked before each next one.`, { header: 'Goal plan', options: [APPROVE_RUN, APPROVE_ASK, CHANGE] })
+        : await $.ui.ask(`${planText(proposed)}\n\nApprove this plan? Run straight through the tasks, or be asked before each next one.${canFactory ? ' Or run it through the factory: spec, build on a branch, reviews, PR.' : ''}`, { header: 'Goal plan', options: canFactory ? [APPROVE_RUN, APPROVE_ASK, RUN_FACTORY, CHANGE] : [APPROVE_RUN, APPROVE_ASK, CHANGE] })
     } catch {
       answer = ''
     }
@@ -675,6 +702,12 @@ export const register: Register = (on, options) => {
       }
       if (!answer.trim()) return { result: PLAN_WAITING_FOR_FACTORY }
       return { result: planChangesForFactory(answer === CHANGE ? '' : answer) }
+    }
+    if (canFactory && answer === RUN_FACTORY) {
+      // A command can't run from inside a tool call, so Claude starts the run with the factory's tool.
+      // The goal waits as the factory's, so the spec's plan replaces this one when it comes.
+      await setGoal($, g => (g ? { ...g, status: 'planning', tasks: [], source: FACTORY_SOURCE } : g))
+      return { result: factoryChosenForGoal(clip(text, 400)) }
     }
     if (answer === APPROVE_RUN || answer === APPROVE_ASK) {
       const pace: Pace = answer === APPROVE_RUN ? 'run' : 'ask'
@@ -748,6 +781,7 @@ export const register: Register = (on, options) => {
     const r = yield* next(e)
     const u = r.usage
     const g = await read($, goal)
+    if (u && g && e.agentId !== undefined && g.source !== FACTORY_SOURCE && (await fromFactory($, e.agentId))) return r
     const sj = await read($, side)
     if (u && g && sj?.isLive) {
       // Work started from the to-do list: its tasks' once added to the goal, else counted outside it.
@@ -772,6 +806,12 @@ export const register: Register = (on, options) => {
     return r
   }).catch(async function* ($, e, next) { return yield* next(e) })
 
+  on('agent.spawn', async ($, e, next) => {
+    const r = await next(e)
+    if (r.agentId) isFactoryAgent.set(r.agentId, factoryLike(e as { subagentType?: string; description?: string }))
+    return r
+  }).catch(($, e, next) => next(e))
+
   // While a goal is worked, each of the person's prompts carries where it stands.
   // A followups Start is a side job: no goal reminder beside it, its tokens counted apart, and the
   // person asked (in the band) whether its items join the goal. The person's own next prompt ends it.
@@ -779,11 +819,11 @@ export const register: Register = (on, options) => {
     if (e.command) return next(e)
     const g = await read($, goal)
     if (e.origin.kind === 'plugin' && e.origin.name === TODO_PLUGIN) {
-      // A Start the factory takes over is its run, not a side job, whichever mod's hook runs first.
-      if (takeOverArgs(e.text, e.origin) && (await factoryTakesOver($))) return next(e)
       const items = parseStartPrompt(e.text)
       if (g && items.length) {
-        await update($, side, () => ({ items, tokens: 0, isAsking: g.status === 'active', taskIds: [], doneIds: [], isLive: true }))
+        const isOffered = items.length === 1 && g.status !== 'done' && g.source !== FACTORY_SOURCE && (await checkFactory($))
+        await update($, side, () => ({ items, tokens: 0, isAsking: g.status === 'active' && !isOffered, taskIds: [], doneIds: [], isLive: true, ...(isOffered ? { isOffered } : {}) }))
+        if (isOffered) return next({ ...e, context: [...(e.context ?? []), factoryOffer(items[0]!, g.text)] })
       }
       return next(e)
     }
@@ -809,6 +849,11 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     if (e.tool_name === TODO_DONE_TOOL && parseDoneResult(toolText(e.tool_response))) {
       await closeFromTodo($, String((e.tool_input as { id?: unknown } | null)?.id ?? '').trim())
+    }
+    // The person sent the item to the factory: it's the factory's run now, not a side job of the goal.
+    if (e.tool_name === FACTORY_START_TOOL && /^Factory run started/.test(toolText(e.tool_response))) {
+      const id = String((e.tool_input as { followupId?: unknown } | null)?.followupId ?? '')
+      await update($, side, cur => (cur?.isOffered && cur.items.some(it => it.id === id) ? null : cur))
     }
     return r
   }).catch(($, e, next) => next(e))
