@@ -408,6 +408,8 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    // A sub-agent's turn changes neither: no need to ask on each one.
+    if (e.agentId !== undefined) return next(e)
     await checkFollow($)
     // A theme changed in /config mid-session reaches the graph from the next prompt on.
     await readTheme($)

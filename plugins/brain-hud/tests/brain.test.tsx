@@ -838,6 +838,20 @@ describe('the session journal: in a session', () => {
     expect(files['MISTAKES.md']).toMatch(/Next steps:\*\* finish the to-do "Rotate the keys"; answer: Should the second request retry too\?/)
   })
 
+  test("a sub-agent's turn doesn't list the commands or the config again", async ($, on) => {
+    let lists = 0
+    on('config.list', () => {
+      lists++
+      return { value: [] } as never
+    })
+    engine(on, project())
+    await start($)
+    await $.turn.start({ text: 'look', turnId: 't1' } as never)
+    const before = lists
+    await $.turn.start({ text: 'sub', turnId: 't2', agentId: 'a1' } as never)
+    expect(lists).toBe(before)
+  })
+
   test("a to-do the factory takes over isn't left open in the handoff; two started together are", async ($, on) => {
     const files = project()
     engine(on, files, { commands: ['followup', 'factory'] })
