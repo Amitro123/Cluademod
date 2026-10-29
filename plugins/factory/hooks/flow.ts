@@ -284,8 +284,8 @@ export function approvePrompt(run: Run, stat = ''): string {
 export function planPrompt(run: Run): string {
   const tasks = JSON.stringify(run.tasks.map(t => ({ title: t.title, priority: t.priority, ...(t.dependsOn.length ? { dependsOn: t.dependsOn } : {}) })))
   return [
-    `The factory's spec for "${run.feature}" is in ${run.specFile}.`,
-    `Call mcp__goal-run__plan now with goal "${run.feature}", source "${FACTORY_SOURCE}", and exactly these tasks, unchanged:`,
+    `The factory's spec for ${JSON.stringify(run.feature)} is in ${run.specFile}.`,
+    `Call mcp__goal-run__plan now with goal ${JSON.stringify(run.feature)}, source "${FACTORY_SOURCE}", and exactly these tasks, unchanged:`,
     tasks,
     "Then stop: the factory's builder does the work. Don't start the tasks or edit any file.",
   ].join('\n')

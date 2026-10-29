@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cleanFeature, couldNotStart, detectChecks, detectSetup, leftOut, neverCommit, slugOf, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, specPrompt, splitChecks } from '../hooks/flow'
+import { cleanFeature, couldNotStart, detectChecks, detectSetup, leftOut, neverCommit, slugOf, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, planPrompt, specPrompt, splitChecks } from '../hooks/flow'
 import { factoryArgs, goalPrompt, startLine, factoryPlanApprovedArgs, PLAN_APPROVED_FOR_FACTORY, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
@@ -741,6 +741,11 @@ describe('the parsers', () => {
     expect(parseVerdict('VERDICT: PASS or VERDICT: CHANGES').state).toBe('changes')
     // A reviewer that changed its mind: the last verdict counts.
     expect(parseVerdict('VERDICT: CHANGES\nOn a second look it is fine.\nVERDICT: PASS').state).toBe('pass')
+  })
+
+  test('the plan prompt quotes the feature as JSON, so a quote in it stays inside the string', () => {
+    const run = { feature: 'Say "hi" on start', specFile: 'docs/specs/say-hi.md', tasks: [] } as never
+    expect(planPrompt(run)).toContain('with goal "Say \\"hi\\" on start", source')
   })
 
   test('a feature loses a paste wrapper', () => {
