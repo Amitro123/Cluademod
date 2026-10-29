@@ -173,6 +173,9 @@ def main() -> int:
     # The plugin runs this in every project: outside a mistake-brain one it is
     # silent and writes nothing.
     project_root = host_layout.project_root(payload)
+    # A factory run's agents revert and fail tests in their own worktree as part of the job.
+    if host_layout.in_factory_run(payload, project_root):
+        return 0
     if not (project_root / "MISTAKES.md").is_file():
         return 0
 

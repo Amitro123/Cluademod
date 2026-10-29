@@ -315,3 +315,28 @@ def test_tsc_version_not_matched(tmp_path):
     assert rc == 0
     assert not (tmp_path / PENDING_FILE).exists()
     assert out.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# A factory run's red tests are its own: no candidate, no nudge into its builder
+# ---------------------------------------------------------------------------
+
+def test_factory_worktree_failure_no_candidate(tmp_path):
+    _git_init(tmp_path)
+    _init_project(tmp_path)
+    worktree = tmp_path / ".factory" / "rate-limiter"
+    worktree.mkdir(parents=True)
+    for extra in ({"cwd": str(worktree)}, {"cwd": str(tmp_path), "agent_id": "a1", "agent_type": "factory:builder"}):
+        rc, out = _run_hook({**_payload("pytest tests/"), **extra}, tmp_path)
+        assert rc == 0
+        assert out == ""
+    assert not (tmp_path / PENDING_FILE).exists()
+
+
+def test_same_failure_from_project_root_still_a_candidate(tmp_path):
+    _git_init(tmp_path)
+    _init_project(tmp_path)
+    rc, out = _run_hook({**_payload("pytest tests/"), "cwd": str(tmp_path), "agent_id": "a2", "agent_type": "Explore"}, tmp_path)
+    assert rc == 0
+    assert (tmp_path / PENDING_FILE).exists()
+    assert "CANDIDATE" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
