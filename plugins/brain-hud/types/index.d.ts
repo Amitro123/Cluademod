@@ -47,9 +47,11 @@ declare module 'claude-code' {
       theme: 'dark' | 'light'
       // The unrouted count the person said "Later" to: the reminder waits until there are more.
       routeLater: number
-      // The session journal (worker reports, memory entries, to-dos done, goal steps), and how
-      // many of its entries the main agent was last told of beside a prompt.
+      // The session journal (worker reports, memory entries, to-dos done, goal steps), capped; how
+      // many entries were ever appended; and that count when the main agent was last told of it
+      // beside a prompt.
       journal: JournalEntry[]
+      total: number
       told: number
       // To-dos finished this session, whether the goal was reached, and whether the end-of-session
       // handoff draft was written: what the draft leaves out.

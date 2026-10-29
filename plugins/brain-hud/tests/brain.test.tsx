@@ -784,6 +784,17 @@ describe('the session journal: in a session', () => {
     expect(await journalOf($)).toMatch(/^Nothing in the session journal yet/)
   })
 
+  test("past the journal's cap of 200 entries, a new one still brings the line beside the next prompt", async ($, on) => {
+    const w = engine(on, project())
+    await start($)
+    for (let i = 0; i < 205; i++) await worker($, `Job ${i}`, REPORT)
+    await $.prompt.submit({ text: 'first', origin: { kind: 'user' } } as never)
+    await worker($, 'One more', REPORT)
+    await $.prompt.submit({ text: 'second', origin: { kind: 'user' } } as never)
+    expect(w.contexts[0]).toEqual([expect.stringMatching(/^\[brain-hud\] Session so far/)])
+    expect(w.contexts[1]).toEqual([expect.stringMatching(/^\[brain-hud\] Session so far.*One more/)])
+  })
+
   test('beside a prompt, one line when the journal grew, and none when it did not', async ($, on) => {
     const w = engine(on, project())
     await start($)

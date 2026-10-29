@@ -26,6 +26,8 @@ const routeLater = atom({ plugin: 'brain-hud', key: 'routeLater' } as const, 0)
 const journal = atom({ plugin: 'brain-hud', key: 'journal' } as const, [] as JournalEntry[])
 // How many journal entries the main agent was last told of, beside a prompt.
 const told = atom({ plugin: 'brain-hud', key: 'told' } as const, 0)
+// Every entry ever appended: the journal itself is capped, so its length stops growing at the cap.
+const total = atom({ plugin: 'brain-hud', key: 'total' } as const, 0)
 const doneIds = atom({ plugin: 'brain-hud', key: 'doneIds' } as const, [] as string[])
 const goalReached = atom({ plugin: 'brain-hud', key: 'goalReached' } as const, false)
 const handedOff = atom({ plugin: 'brain-hud', key: 'handedOff' } as const, false)
@@ -164,6 +166,7 @@ async function note($: EngineInterface, kind: JournalKind, text: string, call?: 
 
 async function append($: EngineInterface, entry: JournalEntry) {
   await update($, journal, list => [...list, entry].slice(-JOURNAL_MAX))
+  await update($, total, n => n + 1)
   const entries = await read($, journal)
   writing = writing.then(() => writeJournal($, entries), () => writeJournal($, entries))
   await writing
@@ -211,9 +214,10 @@ async function workerDone($: EngineInterface, agentId: string, answer: string) {
 // is more than its own bottom lines and where to read it.
 async function withJournal($: EngineInterface, e: PromptSubmitInput): Promise<PromptSubmitInput> {
   if (!journalOn || e.command) return e
+  const count = await read($, total)
+  if (count <= (await read($, told))) return e
+  await update($, told, () => count)
   const entries = await read($, journal)
-  if (entries.length <= (await read($, told))) return e
-  await update($, told, () => entries.length)
   return { ...e, context: [...(e.context ?? []), contextLine(entries, JOURNAL_TOOL)] }
 }
 
