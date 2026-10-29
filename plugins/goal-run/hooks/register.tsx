@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
-import { FACTORY_SOURCE, factoryPlanApprovedArgs, factoryTakesGoal, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, takeOverArgs, toolText } from './texts'
+import { FACTORY_SOURCE, factoryChosenForGoal, factoryPlanApprovedArgs, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
 // The goal-run tests import the start-prompt parser from here, as before it was shared.
 export { parseStartPrompt }
 
@@ -38,6 +38,7 @@ const APPROVE_RUN = 'Approve, run through'
 const APPROVE_ASK = 'Approve, ask between tasks'
 const APPROVE_BUILD = 'Approve, start building'
 const CHANGE = 'Change it'
+const RUN_FACTORY = '🏭 Run as factory'
 const ADD_IT = 'Add it'
 const NOT_NOW = 'Not now'
 const GO_ON = 'Continue'
@@ -338,13 +339,6 @@ async function checkFactory($: EngineInterface): Promise<boolean> {
 // The goal goes to the factory: marked as the factory's, so the spec's plan replaces it (instead of
 // being kept apart as the person's own), then /factory runs with its text. A refused command puts
 // the goal back as it was.
-// factory's own takeOver option (on by default): whether a goal planned here goes to the factory.
-async function factoryTakesOver($: EngineInterface): Promise<boolean> {
-  if (!(await checkFactory($))) return false
-  const row = (await $.config.list().catch(() => [])).find(r => r.key === 'factory.takeOver')
-  return String(row?.value ?? 'on') !== 'off'
-}
-
 async function runAsFactory($: EngineInterface) {
   const g = await read($, goal)
   if (!g) return
@@ -641,14 +635,10 @@ export const register: Register = (on, options) => {
     const items = planItems(input.tasks)
     if (!items.length) return { deny: 'A plan needs at least one task.' }
     const before = await read($, goal)
-    // A new goal from the main conversation, with the factory taking goals over: it builds it.
+    // A new goal from the main conversation, with the factory installed: the dialog also offers to
+    // run it through the factory instead. Never on its own: the person picks it.
     const isNew = !before || before.status === 'done' || before.status === 'planning'
-    if (!isFactory && isNew && (e as { agentId?: string }).agentId === undefined && (await factoryTakesOver($))) {
-      // A command can't run from inside a tool call, so Claude starts the run with the factory's
-      // tool. A goal still being planned stays: the factory's plan replaces it.
-      const goalText = clip(String(input.goal ?? '').trim() || before?.text || items.map(i => i.title).join('; '), 400)
-      return { result: factoryTakesGoal(goalText) }
-    }
+    const canFactory = !isFactory && isNew && (e as { agentId?: string }).agentId === undefined && (await checkFactory($))
     // A factory plan never takes over the person's own goal under way, and doesn't inherit its done
     // tasks. A goal still being planned (no plan approved yet) is the one the factory took over.
     if (isFactory && before && before.source !== FACTORY_SOURCE && before.status !== 'done' && before.status !== 'planning') return { result: PLAN_KEPT_FOR_FACTORY }
@@ -664,7 +654,7 @@ export const register: Register = (on, options) => {
     try {
       answer = isFactory
         ? await $.ui.ask(`${planText(proposed)}\n\nThe factory's spec for this goal. Approve it, and the builder starts?`, { header: 'Factory plan', options: [APPROVE_BUILD, CHANGE] })
-        : await $.ui.ask(`${planText(proposed)}\n\nApprove this plan? Run straight through the tasks, or be asked before each next one.`, { header: 'Goal plan', options: [APPROVE_RUN, APPROVE_ASK, CHANGE] })
+        : await $.ui.ask(`${planText(proposed)}\n\nApprove this plan? Run straight through the tasks, or be asked before each next one.${canFactory ? ' Or run it through the factory: spec, build on a branch, reviews, PR.' : ''}`, { header: 'Goal plan', options: canFactory ? [APPROVE_RUN, APPROVE_ASK, RUN_FACTORY, CHANGE] : [APPROVE_RUN, APPROVE_ASK, CHANGE] })
     } catch {
       answer = ''
     }
@@ -675,6 +665,12 @@ export const register: Register = (on, options) => {
       }
       if (!answer.trim()) return { result: PLAN_WAITING_FOR_FACTORY }
       return { result: planChangesForFactory(answer === CHANGE ? '' : answer) }
+    }
+    if (canFactory && answer === RUN_FACTORY) {
+      // A command can't run from inside a tool call, so Claude starts the run with the factory's tool.
+      // The goal waits as the factory's, so the spec's plan replaces this one when it comes.
+      await setGoal($, g => (g ? { ...g, status: 'planning', tasks: [], source: FACTORY_SOURCE } : g))
+      return { result: factoryChosenForGoal(clip(text, 400)) }
     }
     if (answer === APPROVE_RUN || answer === APPROVE_ASK) {
       const pace: Pace = answer === APPROVE_RUN ? 'run' : 'ask'
@@ -779,8 +775,6 @@ export const register: Register = (on, options) => {
     if (e.command) return next(e)
     const g = await read($, goal)
     if (e.origin.kind === 'plugin' && e.origin.name === TODO_PLUGIN) {
-      // A Start the factory takes over is its run, not a side job, whichever mod's hook runs first.
-      if (takeOverArgs(e.text, e.origin) && (await factoryTakesOver($))) return next(e)
       const items = parseStartPrompt(e.text)
       if (g && items.length) {
         await update($, side, () => ({ items, tokens: 0, isAsking: g.status === 'active', taskIds: [], doneIds: [], isLive: true }))

@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import { runnerX, trackText } from '../hooks/art'
 import { addSide, insertTask, mergeGoal, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan, stepTokens } from '../hooks/register'
 import type { Goal } from '../types'
-import { doneResult, factoryTakesGoal, parsePlanApprovedArgs, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory, projectFrom } from '../hooks/texts'
+import { doneResult, factoryChosenForGoal, parsePlanApprovedArgs, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory, projectFrom } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 const UPDATE = 'mcp__goal-run__update'
@@ -309,21 +309,13 @@ describe('work started from the followups to-do list', () => {
     return w
   }
 
-  test("with the factory taking items over, a one-item Start is its run, not a side job; two items still are", async ($, on) => {
-    // The goal is the person's own, planned before the factory was there to take it.
-    let loaded = false
-    on('command.list', () => ({ value: loaded ? [{ name: 'factory', description: 'f', source: 'plugin' }] : [] }) as never)
+  test("with the factory installed, a one-item Start is still a side job: only followups' 🏭 sends an item to the factory", async ($, on) => {
+    on('command.list', () => ({ value: [{ name: 'factory', description: 'f', source: 'plugin' }] }) as never)
     await halfway($, on)
-    loaded = true
     await $.prompt.submit(fromTodo)
     const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
-    expect(await texts(band)).not.toMatch(/Add to your goal/)
+    expect(await texts(band)).toMatch(/Add to your goal/)
     await band.unmount()
-    const two = ['Start these 2 items from my to-do list, one after the other:', '- id fu-1: Rotate the dev key', '- id fu-2: Update the docs', 'Do the work.'].join('\n')
-    await $.prompt.submit({ text: two, wait: false, origin: { kind: 'plugin', name: 'followups' } } as never)
-    const again = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
-    expect(await texts(again)).toMatch(/Add to your goal/)
-    await again.unmount()
   })
 
   test('kept separate: no goal reminder beside it, and its tokens counted outside the goal', async ($, on) => {
@@ -819,8 +811,6 @@ describe('a goal run through the factory', () => {
   test('Run as factory hands the goal to /factory, and the factory plan replaces it', async ($, on) => {
     const ran: string[] = []
     on('command.list', () => ({ value: [{ name: 'factory', description: 'f', source: 'plugin' }] }) as never)
-    // The factory doesn't take goals over here: the person sends this one with the button.
-    on('config.list', () => ({ value: [{ key: 'factory.takeOver', value: 'off' }] }) as never)
     on('command.run', (_, e) => {
       ran.push(`${e.command} ${e.args ?? ''}`.trim())
       return { text: '' } as never
@@ -841,74 +831,69 @@ describe('a goal run through the factory', () => {
     expect((w.saved['goal:/repo'] as Goal).tasks.map(t => t.title)).toEqual(['Bucket'])
   })
 
-  const withFactory = (on: On, takeOver?: string, said = 'Factory run started: Ship it. Branch factory/ship-it.') => {
+  const withFactory = (on: On) => {
     const ran: string[] = []
     on('command.list', () => ({ value: [{ name: 'factory', description: 'f', source: 'plugin' }] }) as never)
-    on('config.list', () => ({ value: takeOver ? [{ key: 'factory.takeOver', value: takeOver }] : [] }) as never)
     on('command.run', (_, e) => {
       ran.push(`${e.command} ${e.args ?? ''}`.trim())
-      return { text: e.command === 'factory' ? said : '' } as never
+      return { text: '' } as never
     })
     return ran
   }
 
-  test("a factory that registers after this mod started is seen: a new goal's plan goes to it", async ($, on) => {
-    let loaded = false
-    on('command.list', () => ({ value: loaded ? [{ name: 'factory', description: 'f', source: 'plugin' }] : [] }) as never)
-    on('config.list', () => ({ value: [] }) as never)
-    on('turn.start', (_, e) => ({ turnId: e.turnId }))
-    engine(on, { answers: ['Approve, run through'] })
-    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
-    loaded = true
-    const r = await $.tool.call({ tool: PLAN, goal: 'Ship it', tasks: ['One', 'Two'] } as never)
-    expect(String(r.result)).toBe(factoryTakesGoal('Ship it'))
-  })
-
-  test('the Goal pane offers the factory once it registers, from the next turn', async ($, on) => {
-    let loaded = false
-    on('command.list', () => ({ value: loaded ? [{ name: 'factory', description: 'f', source: 'plugin' }] : [] }) as never)
-    on('config.list', () => ({ value: [{ key: 'factory.takeOver', value: 'off' }] }) as never)
-    on('turn.start', (_, e) => ({ turnId: e.turnId }))
-    engine(on, { answers: ['Approve, run through'] })
-    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
-    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
-    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
-    loaded = true
-    await $.turn.start({ turnId: 't1', text: 'go on' } as never)
-    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
-    expect(await pane.find({ key: 'factory' } as never)).toBeTruthy()
-    await pane.unmount()
-  })
-
-  test('a new goal Claude plans goes to the factory when it takes goals over: no plan, no dialog', async ($, on) => {
+  test("a new goal's plan never goes to the factory by itself: the dialog offers it, and the plan stays unless picked", async ($, on) => {
     const ran = withFactory(on)
     const w = engine(on, { answers: ['Approve, run through'] })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     const r = await $.tool.call({ tool: PLAN, goal: 'Ship it', tasks: ['One', 'Two'] } as never)
-    expect(String(r.result)).toBe(factoryTakesGoal('Ship it'))
+    expect(w.asked[0]).toMatch(/Or run it through the factory/)
+    expect(String(r.result)).toMatch(/^Approved\./)
+    expect(ran).toEqual([])
+    expect((w.saved['goal:/repo'] as Goal).status).toBe('active')
+  })
+
+  test('"Run as factory" in the plan dialog has Claude start the run, and the goal waits for the factory\'s plan', async ($, on) => {
+    const ran = withFactory(on)
+    const w = engine(on, { answers: ['🏭 Run as factory', 'Approve, start building'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const r = await $.tool.call({ tool: PLAN, goal: 'Ship it', tasks: ['One', 'Two'] } as never)
+    expect(String(r.result)).toBe(factoryChosenForGoal('Ship it'))
     expect(String(r.result)).toMatch(/Call mcp__factory__start now with feature "Ship it"/)
     expect(ran).toEqual([])
-    expect(w.asked).toEqual([])
-    expect(w.saved['goal:/repo']).toBeUndefined()
+    const g = w.saved['goal:/repo'] as Goal
+    expect([g.status, g.source, g.tasks]).toEqual(['planning', 'factory', []])
+    // The factory's spec comes back as the plan, and replaces this one.
+    const f = await $.tool.call({ tool: PLAN, goal: 'Ship it', source: 'factory', tasks: [{ title: 'Bucket', priority: 'high' }] } as never)
+    expect(String(f.result).startsWith(PLAN_APPROVED_FOR_FACTORY)).toBe(true)
+    expect((w.saved['goal:/repo'] as Goal).tasks.map(t => t.title)).toEqual(['Bucket'])
   })
 
-  test("with the factory's takeOver off, or a goal already under way, Claude's plan stays a plan", async ($, on) => {
-    const ran = withFactory(on, 'off')
-    const w = engine(on, { answers: ['Approve, run through'] })
+  test("a factory that registers after this mod started is offered in the plan dialog", async ($, on) => {
+    let loaded = false
+    on('command.list', () => ({ value: loaded ? [{ name: 'factory', description: 'f', source: 'plugin' }] : [] }) as never)
+    const w = engine(on, { answers: ['🏭 Run as factory'] })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
-    await $.tool.call({ tool: PLAN, goal: 'Ship it', tasks: ['One', 'Two'] } as never)
-    expect(ran.filter(c => c.startsWith('factory'))).toEqual([])
-    expect(w.asked).toHaveLength(1)
+    loaded = true
+    const r = await $.tool.call({ tool: PLAN, goal: 'Ship it', tasks: ['One', 'Two'] } as never)
+    expect(w.asked[0]).toMatch(/Or run it through the factory/)
+    expect(String(r.result)).toBe(factoryChosenForGoal('Ship it'))
   })
 
-  test('a goal under way: re-planning it stays here, even with the factory taking goals over', async ($, on) => {
+  test('a goal under way: re-planning it offers no factory', async ($, on) => {
     withFactory(on)
     const active: Goal = { text: 'Ship it', status: 'active', tasks: [{ id: 't1', title: 'One', status: 'done', tokens: 10 }, { id: 't2', title: 'Two', status: 'pending', tokens: 0 }], activeId: null, other: 0 }
     const w = engine(on, { saved: { 'goal:/repo': active }, answers: ['Approve, run through'] })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     const r = await $.tool.call({ tool: PLAN, tasks: ['One', 'Two', 'Three'] } as never)
+    expect(w.asked.at(-1)).not.toMatch(/factory/)
     expect(String(r.result)).not.toMatch(/mcp__factory__start/)
-    expect(w.asked).toHaveLength(1)
+  })
+
+  test('without the factory installed the plan dialog offers no factory', async ($, on) => {
+    const w = engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.tool.call({ tool: PLAN, goal: 'Ship it', tasks: ['One'] } as never)
+    expect(w.asked[0]).not.toMatch(/factory/)
   })
 
   test('without the factory installed there is no button', async ($, on) => {

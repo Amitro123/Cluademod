@@ -9,7 +9,7 @@ import { diffBrain, FOLDERS, SKILL, lessonCount, logPrompt, paraStats, parseMemo
 import type { ParaFile } from './brain'
 import { clockTime, contextLine, HANDOFF_TITLE, hasLoose, handoffEntry, insertBelowMarker, journalDoc, journalFile, JOURNAL_DIR, JOURNAL_LAST, journalText, looseEnds, stampOf, workerEntry } from './journal'
 import type { JournalEntry, JournalKind } from './journal'
-import { GOAL_REACHED, parseDoneResult, parseGoalClosedNote, parseGoalPrompt, parseStartPrompt, takeOverArgs, toolText } from './texts'
+import { GOAL_REACHED, parseDoneResult, parseGoalClosedNote, parseGoalPrompt, parseStartPrompt, toolText } from './texts'
 
 const brain = atom({ plugin: 'brain-hud', key: 'brain' } as const, null as Brain | null)
 const pulse = atom({ plugin: 'brain-hud', key: 'pulse' } as const, null as Pulse | null)
@@ -335,13 +335,6 @@ async function toFollowup($: EngineInterface, title: string) {
   )
 }
 
-// The factory is installed and takes goals and to-do items over (its takeOver option, on by default).
-async function factoryTakesOver($: EngineInterface): Promise<boolean> {
-  if (!(await $.command.list().catch(() => [])).some(c => c.name === 'factory')) return false
-  const row = (await $.config.list().catch(() => [])).find(r => r.key === 'factory.takeOver')
-  return String(row?.value ?? 'on') !== 'off'
-}
-
 async function checkFollow($: EngineInterface) {
   if (await read($, canFollow)) return
   const names = (await $.command.list().catch(() => [])).map(c => c.name)
@@ -451,8 +444,7 @@ export const register: Register = (on, options) => {
   // followups' Start names the items it hands Claude, remembered so their "done" can be offered;
   // goal-run's start prompt names the goal.
   on('prompt.submit', async ($, e, next) => {
-    // A Start the factory takes over is the factory's: its PR prompt marks the item done.
-    if (e.origin.kind === 'plugin' && e.origin.name === 'followups' && !(takeOverArgs(e.text, e.origin) && (await factoryTakesOver($)))) {
+    if (e.origin.kind === 'plugin' && e.origin.name === 'followups') {
       const items = parseStartPrompt(e.text).map(i => ({ id: i.id, title: i.title, isBug: Boolean(i.isBug) }))
       if (items.length) await update($, started, l => [...l.filter(x => !items.some(i => i.id === x.id)), ...items].slice(-20))
     }

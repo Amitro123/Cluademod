@@ -599,26 +599,24 @@ describe('the person decides', () => {
   })
 })
 
-describe('goals and to-do items run through the factory by themselves', () => {
+describe('goals and to-do items reach the factory only when the person picks it', () => {
   const START = (lines: string[]) => [lines.length === 1 ? 'Start this item from my to-do list:' : `Start these ${lines.length} items from my to-do list, one after the other:`, ...lines, 'Do the work. When an item is finished, call mcp__followups__done with its id (and a short note).'].join('\n')
 
-  test("goal-run's goal prompt starts a run, and the main Claude is told the factory has it", async ($, on) => {
+  test("goal-run's goal prompt and a to-do item's Start go on as they were: no run starts by itself", { options: { takeOver: 'on' } } as never, async ($: Engine, on: On) => {
     const w = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-    const r = await $.prompt.submit({ text: goalPrompt('Rate limiter for the API'), origin: { kind: 'plugin', name: 'goal-run' } } as never)
+    const goal = goalPrompt('Rate limiter for the API')
+    expect(String((await $.prompt.submit({ text: goal, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(goal)
+    const one = START([startLine({ id: 'k3x-1a2b3', title: 'Add a rate limiter', kind: 'bug' })])
+    expect(String((await $.prompt.submit({ text: one, origin: { kind: 'plugin', name: 'followups' } } as never)).text)).toBe(one)
     await settled()
-    expect(String(r.text)).toMatch(/^The factory took this over: "Rate limiter for the API"/)
-    expect(last(w)).toMatchObject({ subagentType: 'factory:spec-writer' })
-    expect(last(w).prompt).toContain('Feature: Rate limiter for the API')
-    expect(w.toasts.at(-1)).toMatch(/Factory run started/)
+    expect(w.spawned).toHaveLength(0)
   })
 
-  test("a single to-do item's Start becomes a run that marks the item done once the PR is open", async ($, on) => {
+  test("a to-do item sent with followups' 🏭 (/factory with its id) is marked done once the PR is open", async ($, on) => {
     const w = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-    const r = await $.prompt.submit({ text: START(['- id k3x-1a2b3: Add a rate limiter (bug) — bursts must pass [where: src/mw.ts]']), origin: { kind: 'plugin', name: 'followups' } } as never)
-    await settled()
-    expect(String(r.text)).toMatch(/factory took this over: "Add a rate limiter — bursts must pass \(src\/mw\.ts\)"/)
+    expect(await command($, factoryArgs('Add a rate limiter — bursts must pass (src/mw.ts)', 'k3x-1a2b3'))).toMatch(/^Factory run started/)
     expect(last(w).prompt).toContain('Feature: Add a rate limiter — bursts must pass (src/mw.ts)')
     await answer($, 'a1', SPEC_ANSWER)
     await command($, 'approve')
@@ -628,70 +626,6 @@ describe('goals and to-do items run through the factory by themselves', () => {
     await answer($, 'a5', 'DECISION: APPROVE\nREASON: ok')
     await command($, 'approve')
     expect(w.sent.at(-1)).toMatch(/mcp__followups__done with id "k3x-1a2b3"/)
-  })
-
-  test('several items started together, a run already going, or takeOver off: the prompt goes on as it was', async ($, on) => {
-    const w = engine(on)
-    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-    const two = START(['- id a1: One', '- id a2: Two'])
-    expect(String((await $.prompt.submit({ text: two, origin: { kind: 'plugin', name: 'followups' } } as never)).text)).toBe(two)
-    await $.prompt.submit({ text: goalPrompt('First'), origin: { kind: 'plugin', name: 'goal-run' } } as never)
-    await settled()
-    const second = goalPrompt('Second')
-    expect(String((await $.prompt.submit({ text: second, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(second)
-    expect(w.spawned).toHaveLength(1)
-  })
-
-  test("outside a git repository the prompt goes on unchanged: the main Claude does the work", async ($, on) => {
-    const w = engine(on, { noRepo: true })
-    await $.session.start({ cwd: '/notes', surface: 'desktop', isInteractive: true } as never)
-    const goal = goalPrompt('Rate limiter')
-    expect(String((await $.prompt.submit({ text: goal, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(goal)
-    const one = START(['- id a1: One'])
-    expect(String((await $.prompt.submit({ text: one, origin: { kind: 'plugin', name: 'followups' } } as never)).text)).toBe(one)
-    await settled()
-    expect(w.spawned).toHaveLength(0)
-    expect(w.toasts.at(-1)).toMatch(/didn't take this over: The factory needs a git repository/)
-  })
-
-  test("a run that fails to start after the takeOver tells the main Claude to do the work", async ($, on) => {
-    const w = engine(on, { worktree: ['fatal: could not lock config file'] })
-    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-    const r = await $.prompt.submit({ text: goalPrompt('Rate limiter'), origin: { kind: 'plugin', name: 'goal-run' } } as never)
-    await settled()
-    expect(String(r.text)).toMatch(/^The factory took this over/)
-    expect(w.spawned).toHaveLength(0)
-    expect(w.sent.at(-1)).toMatch(/^The factory couldn't start that run after all: Could not create a worktree[\s\S]*Do the work yourself/)
-  })
-
-  test('a quoted title with " — " in it keeps it whole in the feature', async ($, on) => {
-    const w = engine(on)
-    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-    const line = startLine({ id: 'q1', title: 'Fix A — B', kind: 'bug', detail: 'detail here', where: 'src/a.ts' })
-    const r = await $.prompt.submit({ text: START([line]), origin: { kind: 'plugin', name: 'followups' } } as never)
-    await settled()
-    expect(String(r.text)).toMatch(/took this over: "Fix A — B — detail here \(src\/a\.ts\)"/)
-    expect(w.spawned).toHaveLength(1)
-  })
-
-  test('the same text typed by the person, or from another mod, goes on as typed', async ($, on) => {
-    const w = engine(on)
-    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-    const typed = `Notes from the meeting:\n${goalPrompt('Rate limiter')}`
-    expect(String((await $.prompt.submit({ text: typed, origin: { kind: 'user' } } as never)).text)).toBe(typed)
-    const one = START(['- id a1: One'])
-    expect(String((await $.prompt.submit({ text: one } as never)).text)).toBe(one)
-    expect(String((await $.prompt.submit({ text: one, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(one)
-    expect(String((await $.prompt.submit({ text: goalPrompt('x'), origin: { kind: 'plugin', name: 'followups' } } as never)).text)).toBe(goalPrompt('x'))
-    expect(w.spawned).toHaveLength(0)
-  })
-
-  test('with takeOver off nothing is taken over', { options: { takeOver: 'off' } }, async ($, on) => {
-    const w = engine(on)
-    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-    const text = goalPrompt('Rate limiter')
-    expect(String((await $.prompt.submit({ text, origin: { kind: 'plugin', name: 'goal-run' } } as never)).text)).toBe(text)
-    expect(w.spawned).toHaveLength(0)
   })
 
   test("a paste's wrapper doesn't reach the feature, the branch or the spec file", async ($, on) => {

@@ -29,9 +29,7 @@ import {
   specPrompt,
   splitChecks,
   tailOf,
-  factoryCouldNotStart,
   rootOf,
-  takeOverNote,
   tok,
   tokensOf,
   untrackedOf,
@@ -50,7 +48,7 @@ import {
   progressNote,
   resumePrompt,
 } from './flow'
-import { FACTORY_START_TOOL, factoryArgs, type GoalTask, parseFactoryArgs, parsePlanApprovedArgs, parsePlanOutcome, takeOverArgs, toolText } from './texts'
+import { FACTORY_START_TOOL, factoryArgs, type GoalTask, parseFactoryArgs, parsePlanApprovedArgs, parsePlanOutcome, toolText } from './texts'
 
 const run = atom({ plugin: 'factory', key: 'run' } as const, null as Run | null)
 const frame = atom({ plugin: 'factory', key: 'frame' } as const, 0)
@@ -77,8 +75,6 @@ let maxRounds = 2
 let checksOption = ''
 let setupOption = ''
 let autoPr = false
-// A goal set in goal-run, or a to-do item started in followups, becomes a factory run.
-let takeOver = true
 let modelsOption: 'auto' | 'fixed' = 'auto'
 let skillsOption: Partial<Record<Role, string[]>> = {}
 // A role's skills: the option's for it, else the factory's own.
@@ -740,7 +736,6 @@ export const register: Register = (on, options) => {
   checksOption = String(options.checks ?? '')
   setupOption = String(options.setup ?? '')
   autoPr = String(options.autoPr ?? 'off') === 'on'
-  takeOver = String(options.takeOver ?? 'on') !== 'off'
   modelsOption = String(options.models ?? 'auto') === 'fixed' ? 'fixed' : 'auto'
   skillsOption = parseSkills(String(options.skills ?? ''))
 
@@ -780,28 +775,6 @@ export const register: Register = (on, options) => {
 
   // The roles are the factory's: the model doesn't dispatch them itself.
   on('agent.offer', async ($, e, next) => (e.agent.startsWith('factory:') ? { isOffered: false } : next(e)))
-
-  // The goal prompt goal-run sends, and the Start prompt of one to-do item from followups, start a
-  // run instead of the main Claude doing the work; the prompt that goes on tells it so.
-  on('prompt.submit', async ($, e, next) => {
-    if (!takeOver) return next(e)
-    const args = takeOverArgs(e.text, e.origin as { kind: string; name?: string })
-    if (!args) return next(e)
-    // The prompt is replaced only when the run can start: otherwise the main Claude does the work.
-    const ready = await preflight($)
-    if ('error' in ready) {
-      void $.ui.toast(`The factory didn't take this over: ${ready.error}`)
-      return next(e)
-    }
-    void start($, args)
-      .then(msg => {
-        void $.ui.toast(msg)
-        // It failed past the checks (the worktree, say): Claude was told the factory has it, so it's told otherwise.
-        if (!/^Factory run started/.test(msg)) void $.prompt.submit({ text: factoryCouldNotStart(msg) }).catch(() => {})
-      })
-      .catch(() => {})
-    return next({ ...e, text: takeOverNote(parseFactoryArgs(args).feature) })
-  }).catch(($, e, next) => next(e))
 
   // A stopped run's agents can't be aborted, so their every tool call is refused: they stop editing
   // and spending. Only the run's own agents; the main loop and other agents go on.

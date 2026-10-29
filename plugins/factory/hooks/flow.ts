@@ -148,12 +148,6 @@ export const tailOf = (text: string, lines = 30) => text.trim().split('\n').slic
 export const cleanFeature = (text: string) =>
   text.replace(/<\/?pasted_content\b[^>]*>/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim()
 
-// To the main Claude, when the factory takes over a goal or a to-do item: the work is the factory's.
-// After a takeOver whose run then failed to start: the work is the main Claude's after all.
-export const factoryCouldNotStart = (why: string) => `The factory couldn't start that run after all: ${why} Do the work yourself, as first asked.`
-export const takeOverNote = (feature: string) =>
-  `The factory took this over: "${titleOf(feature, 200)}". Its spec-writer writes the spec and its builder does the work, in a worktree of its own. Don't start the work or propose a plan yourself; answer in one line that the factory is on it.`
-
 // A run's name where a line is all there is (the band, a dialog's first line): the feature's first
 // sentence, clipped. A feature is often a whole paragraph of instructions.
 export function titleOf(feature: string, n = 60): string {
