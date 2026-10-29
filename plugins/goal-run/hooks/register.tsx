@@ -510,6 +510,9 @@ export const register: Register = (on, options) => {
   // Per turn: a person is at the prompt (so a stop can be sent back), and the run-through nudge was used.
   let isInteractive = false
   let isNudged = false
+  // The turn runs on the person's own prompt or goal-run's: another mod's prompt (brain-hud's "Log
+  // as success", say) gets no goal reminder, and its stop no nudge on to the next task.
+  let isOurs = true
 
   on('session.start', async ($, e, next) => {
     isInteractive = e.isInteractive
@@ -596,7 +599,11 @@ export const register: Register = (on, options) => {
   // Another session open beside this one may have changed the goal since.
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) await checkFactory($)
-    if (e.agentId === undefined && e.text !== '') await sync($).catch(() => {})
+    if (e.agentId === undefined && e.text !== '') {
+      // A new prompt, whoever sent it, may be nudged once again.
+      isNudged = false
+      await sync($).catch(() => {})
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -780,9 +787,9 @@ export const register: Register = (on, options) => {
       }
       return next(e)
     }
-    if (e.origin.kind === 'composer') isNudged = false
     if (e.origin.kind === 'composer') await update($, side, cur => (!cur ? cur : cur.isAsking ? { ...cur, isLive: false } : null))
-    if (!g || g.status !== 'active' || g.source === FACTORY_SOURCE) return next(e)
+    isOurs = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || (e.origin.kind === 'plugin' && e.origin.name === 'goal-run')
+    if (!isOurs || !g || g.status !== 'active' || g.source === FACTORY_SOURCE) return next(e)
     return next({ ...e, context: [...(e.context ?? []), reminder(g)] })
   }).catch(($, e, next) => next(e))
 
@@ -812,7 +819,7 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     const g = await read($, goal)
     const next1 = g?.tasks.find(t => t.status === 'pending')
-    if (!isInteractive || isNudged || e.stop_hook_active || r.block || !g || g.status !== 'active' || g.source === FACTORY_SOURCE || paceOf(g) !== 'run' || !next1) return r
+    if (!isInteractive || !isOurs || isNudged || e.stop_hook_active || r.block || !g || g.status !== 'active' || g.source === FACTORY_SOURCE || paceOf(g) !== 'run' || !next1) return r
     if ((await read($, side))?.isLive) return r
     isNudged = true
     const left = g.tasks.filter(t => t.status !== 'done').length

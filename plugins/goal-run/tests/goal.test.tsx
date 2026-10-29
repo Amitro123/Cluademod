@@ -624,8 +624,22 @@ describe('after approval: run through, or ask between tasks', () => {
     expect((await $.classic.Stop(stop)).block).toBeUndefined()
     // The person's next prompt allows one more nudge.
     await $.prompt.submit({ text: 'next', wait: false, origin: { kind: 'composer' } } as never)
+    await $.turn.start({ text: 'next', turnId: 't2' } as never)
     expect((await $.classic.Stop({ stop_hook_active: true, last_assistant_message: '' } as never)).block).toBeUndefined()
     expect((await $.classic.Stop(stop)).block).toMatch(/Go on with t2/)
+  })
+
+  test("another mod's prompt gets no goal reminder, and the stop after it isn't sent on", async ($, on) => {
+    await approved($, on, 'Approve, run through')
+    const p = await $.prompt.submit({ text: 'Log this as a success: the retry fix', wait: false, origin: { kind: 'plugin', name: 'brain-hud' } } as never)
+    expect((p.context ?? []).join('\n')).not.toMatch(/Session goal/)
+    await $.turn.start({ text: 'Log this as a success: the retry fix', turnId: 't2' } as never)
+    expect((await $.classic.Stop(stop)).block).toBeUndefined()
+    // The person's own prompt: the reminder, and the nudge on to the next task.
+    const mine = await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'composer' } } as never)
+    expect((mine.context ?? []).join('\n')).toMatch(/Session goal/)
+    await $.turn.start({ text: 'go on', turnId: 't3' } as never)
+    expect((await $.classic.Stop(stop)).block).toMatch(/Go on with t1/)
   })
 
   test('ask between tasks: the person decides after each one, and no stop is sent on', async ($, on) => {
