@@ -195,3 +195,26 @@ describe('the terminal face', () => {
     }
   })
 })
+
+describe('the loop detector', () => {
+  test("a sub-agent starting mid-turn doesn't reset the main turn's count: the third same call is a loop", async ($, on) => {
+    usage(on, ENTERPRISE)
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    on('tool.call', () => ({ result: 'ok' }) as never)
+    await $.session.start({ cwd: '.' } as never)
+    await $.turn.start({ text: 'fix it', turnId: 't1' } as never)
+    const same = { tool: 'Bash', command: 'npm test' }
+    await $.tool.call(same as never)
+    await $.tool.call(same as never)
+    await $.turn.start({ text: 'look around', turnId: 't2', agentId: 'a1' } as never)
+    await $.tool.call(same as never)
+    const ui = await $.ui.mount({
+      plugin: 'clawd-hud',
+      surface: 'terminal',
+      component: 'AbovePrompt',
+      props: { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 160, scroll: { offset: 0, bodyRows: 9 }, view: {} } as never,
+    })
+    const text = (await ui.findAll({ type: 'Text' })).map(t => String((t as { text?: string }).text ?? '')).join(' | ')
+    expect(text).toContain("(@_@) ↻")
+  })
+})
