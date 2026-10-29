@@ -83,6 +83,55 @@ async function step($: Engine, w: { steps: number[] }, tokens: number, agentId?:
   await s.result
 }
 
+describe("a factory run's agents count on the factory, not on your goal", () => {
+  async function working($: Engine, on: On) {
+    const w = engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await $.tool.call({ tool: PLAN, goal: 'Ship it', tasks: ['One', 'Two'] } as never)
+    await $.tool.call({ tool: UPDATE, id: 't1', status: 'in_progress' } as never)
+    return w
+  }
+  const t1Tokens = (w: { saved: Record<string, unknown> }) => (w.saved['goal:/repo'] as Goal).tasks[0]!.tokens
+
+  test("a factory agent's steps leave the person's task alone; another sub-agent's count", async ($, on) => {
+    on('agent.spawn', (_, e) => ({ model: 'sonnet', agentId: (e as { description: string }).description.startsWith('factory') ? 'f1' : 'w1' }) as never)
+    const w = await working($, on)
+    await $.agent.spawn({ tool_use_id: 'u1', prompt: 'Build it', description: 'factory · builder, round 1', subagentType: 'factory:builder', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'm', background: true, fork: false } as never)
+    await $.agent.spawn({ tool_use_id: 'u2', prompt: 'Look', description: 'Explore the code', subagentType: 'Explore', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'm', background: true, fork: false } as never)
+    await step($, w, 4_000)
+    await step($, w, 50_000, 'f1')
+    await step($, w, 2_000, 'w1')
+    await $.tool.call({ tool: UPDATE, id: 't1', status: 'done' } as never)
+    expect(t1Tokens(w)).toBe(6_000)
+  })
+
+  test('after a reload the agent is looked up once in the session list', async ($, on) => {
+    let looked = 0
+    on('agent.list', () => {
+      looked++
+      return { value: [{ id: 'f9', description: 'factory · security review', type: 'factory:security-reviewer', status: 'running' }] } as never
+    })
+    const w = await working($, on)
+    await step($, w, 30_000, 'f9')
+    await step($, w, 30_000, 'f9')
+    await $.tool.call({ tool: UPDATE, id: 't1', status: 'done' } as never)
+    expect(t1Tokens(w)).toBe(0)
+    expect(looked).toBe(1)
+  })
+
+  test("a goal that is the factory's own counts its agents' work", async ($, on) => {
+    on('agent.spawn', () => ({ model: 'sonnet', agentId: 'f1' }) as never)
+    const w = engine(on, { answers: ['Approve, start building'] })
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await $.tool.call({ tool: PLAN, goal: 'Ship it', source: 'factory', tasks: [{ title: 'Bucket', priority: 'high' }] } as never)
+    await $.agent.spawn({ tool_use_id: 'u1', prompt: 'Build it', description: 'factory · builder, round 1', subagentType: 'factory:builder', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'm', background: true, fork: false } as never)
+    await $.tool.call({ tool: UPDATE, id: 't1', status: 'in_progress' } as never)
+    await step($, w, 7_000, 'f1')
+    await $.tool.call({ tool: UPDATE, id: 't1', status: 'done' } as never)
+    expect(t1Tokens(w)).toBe(7_000)
+  })
+})
+
 describe('from the question to the finish line', () => {
   test('ask, plan, approve, run the tasks with their tokens, reach the goal', async ($, on) => {
     const w = engine(on, { answers: ['Approve, run through'] })

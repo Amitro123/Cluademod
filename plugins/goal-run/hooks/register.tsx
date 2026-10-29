@@ -512,6 +512,23 @@ export function factoryOffer(item: { id: string; title: string; detail?: string;
   ].join('\n')
 }
 
+// Sub-agents of a factory run, by id: their tokens are the run's (the factory's pane counts them), not
+// the person's goal's, unless the goal is the factory's own. Known from their spawn; after a reload,
+// looked up once in the session's agent list.
+const isFactoryAgent = new Map<string, boolean>()
+const factoryLike = (a: { type?: string; subagentType?: string; description?: string }) =>
+  String(a.subagentType ?? a.type ?? '').startsWith('factory:') || String(a.description ?? '').startsWith('factory · ')
+
+async function fromFactory($: EngineInterface, agentId: string): Promise<boolean> {
+  const known = isFactoryAgent.get(agentId)
+  if (known !== undefined) return known
+  const list = await $.agent.list().catch(() => [])
+  const a = (Array.isArray(list) ? list : []).find(x => x.id === agentId)
+  const is = !!a && factoryLike(a as { type?: string; description?: string })
+  isFactoryAgent.set(agentId, is)
+  return is
+}
+
 const isTaskStatus = (s: unknown): s is TaskStatus => s === 'pending' || s === 'in_progress' || s === 'done'
 
 export const register: Register = (on, options) => {
@@ -764,6 +781,7 @@ export const register: Register = (on, options) => {
     const r = yield* next(e)
     const u = r.usage
     const g = await read($, goal)
+    if (u && g && e.agentId !== undefined && g.source !== FACTORY_SOURCE && (await fromFactory($, e.agentId))) return r
     const sj = await read($, side)
     if (u && g && sj?.isLive) {
       // Work started from the to-do list: its tasks' once added to the goal, else counted outside it.
@@ -787,6 +805,12 @@ export const register: Register = (on, options) => {
     }
     return r
   }).catch(async function* ($, e, next) { return yield* next(e) })
+
+  on('agent.spawn', async ($, e, next) => {
+    const r = await next(e)
+    if (r.agentId) isFactoryAgent.set(r.agentId, factoryLike(e as { subagentType?: string; description?: string }))
+    return r
+  }).catch(($, e, next) => next(e))
 
   // While a goal is worked, each of the person's prompts carries where it stands.
   // A followups Start is a side job: no goal reminder beside it, its tokens counted apart, and the

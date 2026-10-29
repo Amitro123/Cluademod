@@ -181,7 +181,8 @@ async function command($: Engine, args: string) {
 async function toReviews($: Engine) {
   await startRun($)
   await answer($, 'a1', SPEC_ANSWER)
-  await command($, 'approve')
+  // goal-run approves the plan: its dialog or pane passes it on.
+  await command($, 'plan-approved')
   await answer($, 'a2', 'built')
 }
 
@@ -548,7 +549,8 @@ describe('the person decides', () => {
     const w = engine(on, { hold: 'npm test', pkg: '{"scripts":{"test":"x","lint":"y","typecheck":"z"}}' })
     await startRun($)
     await answer($, 'a1', SPEC_ANSWER)
-    await command($, 'approve')
+    // goal-run approves the plan: its dialog or pane passes it on.
+    await command($, 'plan-approved')
     await answer($, 'a2', 'built')
     expect(w.ran.at(-1)).toBe('npm test')
     await command($, 'stop')
@@ -575,7 +577,8 @@ describe('the person decides', () => {
     expect(started).toMatch(/Factory run started: Rate limiter — bursts must pass\./)
     expect(last(w).prompt).not.toContain('followup:')
     await answer($, 'a1', SPEC_ANSWER)
-    await command($, 'approve')
+    // goal-run approves the plan: its dialog or pane passes it on.
+    await command($, 'plan-approved')
     await answer($, 'a2', 'built')
     await answer($, 'a3', PASS)
     await answer($, 'a4', PASS)
@@ -619,7 +622,8 @@ describe('goals and to-do items reach the factory only when the person picks it'
     expect(await command($, factoryArgs('Add a rate limiter — bursts must pass (src/mw.ts)', 'k3x-1a2b3'))).toMatch(/^Factory run started/)
     expect(last(w).prompt).toContain('Feature: Add a rate limiter — bursts must pass (src/mw.ts)')
     await answer($, 'a1', SPEC_ANSWER)
-    await command($, 'approve')
+    // goal-run approves the plan: its dialog or pane passes it on.
+    await command($, 'plan-approved')
     await answer($, 'a2', 'built')
     await answer($, 'a3', PASS)
     await answer($, 'a4', PASS)
@@ -664,6 +668,34 @@ describe('an agent that fails says why', () => {
     await settled()
     expect(w.spawned).toHaveLength(1)
     expect(await bandText($)).toMatch(/The spec-writer stopped: the model refused: policy/)
+  })
+})
+
+describe("a plan goal-run approves isn't approved past it", () => {
+  test("with goal-run as the gate, the pane has no Approve plan and /factory approve points to goal-run", async ($, on) => {
+    const w = engine(on)
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await pane.find({ key: 'p-approve-plan' } as never)).toBeFalsy()
+    expect(await texts(pane)).toMatch(/waits for your approval in goal-run/)
+    await pane.unmount()
+    expect(await command($, 'approve')).toMatch(/waits for your approval in goal-run/)
+    expect(w.spawned.filter(a => a.subagentType === 'factory:builder')).toHaveLength(0)
+    await command($, 'plan-approved')
+    expect(last(w)).toMatchObject({ subagentType: 'factory:builder' })
+  })
+
+  test('without goal-run the factory approves its own plan, in its band and pane', async ($, on) => {
+    const w = engine(on, { goalRun: false, answers: [''] })
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await pane.find({ key: 'p-approve-plan' } as never)).toBeTruthy()
+    await pane.unmount()
+    expect(await command($, 'approve')).toBe('Plan approved: the builder starts.')
+    await settled()
+    expect(last(w)).toMatchObject({ subagentType: 'factory:builder' })
   })
 })
 
@@ -749,7 +781,8 @@ describe('the models follow the size of the feature', () => {
     const w = engine(on)
     await startRun($)
     await answer($, 'a1', LARGE)
-    await command($, 'approve')
+    // goal-run approves the plan: its dialog or pane passes it on.
+    await command($, 'plan-approved')
     await answer($, 'a2', 'built')
     expect(models(w)).toEqual({ 'spec-writer': 'sonnet', builder: 'opus', 'security-reviewer': 'opus', 'code-reviewer': 'sonnet' })
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
@@ -767,7 +800,8 @@ describe('the models follow the size of the feature', () => {
     const w = engine(on)
     await startRun($)
     await answer($, 'a1', LARGE)
-    await command($, 'approve')
+    // goal-run approves the plan: its dialog or pane passes it on.
+    await command($, 'plan-approved')
     expect(last(w)).toMatchObject({ subagentType: 'factory:builder', model: 'sonnet' })
   })
 })
@@ -1037,7 +1071,8 @@ describe('a builder that stopped carries on, instead of starting over', () => {
   const toBuilder = async ($: Engine) => {
     await startRun($)
     await answer($, 'a1', SPEC_ANSWER)
-    await command($, 'approve')
+    // goal-run approves the plan: its dialog or pane passes it on.
+    await command($, 'plan-approved')
   }
 
   test('a spend limit: no switch to another model; Retry sends the same builder on', async ($, on) => {
@@ -1088,6 +1123,11 @@ describe("git's view of the builder's new files", () => {
     expect(untrackedOf('')).toEqual([])
   })
 
+  test('a sample .env, a test fixture key, and source in a folder named build or dist are kept', () => {
+    for (const p of ['.env.example', 'app/.env.sample', 'tests/fixtures/server.pem', 'test/certs/client.key', 'cmd/build/main.go', 'src/dist/index.ts', 'web/dist/x.js']) expect([p, neverCommit(p)]).toEqual([p, false])
+    for (const p of ['.env', 'app/.env.local', 'certs/server.key', 'deploy/prod.pem', 'node_modules/a.js', 'svc/.venv/bin/python', 'pkg/__pycache__/x.pyc']) expect([p, neverCommit(p)]).toEqual([p, true])
+  })
+
   test('in a new folder, the .env is left out and the rest kept', () => {
     const files = untrackedOf('?? app/.env\0?? app/index.js\0')
     expect(files.filter(f => !neverCommit(f))).toEqual(['app/index.js'])
@@ -1095,7 +1135,7 @@ describe("git's view of the builder's new files", () => {
   })
 
   test('what was left out reads by folder', () => {
-    expect(leftOut(['node_modules/a/b.js', 'node_modules/c.js', 'app/.env', 'web/dist/x.js', 'key.pem'])).toEqual(['node_modules/', 'app/.env', 'web/dist/', 'key.pem'])
+    expect(leftOut(['node_modules/a/b.js', 'node_modules/c.js', 'app/.env', 'key.pem'])).toEqual(['node_modules/', 'app/.env', 'key.pem'])
   })
 })
 

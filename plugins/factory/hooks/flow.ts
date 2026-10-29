@@ -320,12 +320,20 @@ export function lastLines(text: string, n: number): string {
   return text.split('\n').map(l => l.trim()).filter(Boolean).slice(-n).join(' ').slice(0, 300)
 }
 
-// What the builder may leave untracked that never goes into a commit: installed dependencies,
-// build output, and credentials.
-const NEVER_COMMIT = [/(^|\/)(node_modules|\.venv|venv|__pycache__|dist|build)(\/|$)/, /(^|\/)\.env(\.[^/]*)?$/, /\.(pem|key|p12|pfx)$/i]
-export const neverCommit = (path: string) => NEVER_COMMIT.some(re => re.test(path))
+// What never goes into a commit, even where the project's .gitignore misses it: installed dependencies
+// and credentials. Narrow on purpose: a match the builder committed stops the run. Build output
+// (dist/, build/) isn't on it: a folder of that name can be source (cmd/build/), and one that is
+// output is the .gitignore's to keep out. A sample .env (.env.example) and a key or certificate among
+// test fixtures are files a change may well add.
+const DEPENDENCIES = /(^|\/)(node_modules|\.venv|venv|__pycache__)(\/|$)/
+const ENV_FILE = /(^|\/)\.env(\.[^/]*)?$/
+const SAMPLE_ENV = /(^|\/)\.env\.(example|sample|template|dist)$/i
+const KEY_FILE = /\.(pem|key|p12|pfx)$/i
+const TEST_DIR = /(^|\/)(tests?|__tests__|spec|fixtures|__fixtures__|testdata)\//i
+export const neverCommit = (path: string) =>
+  DEPENDENCIES.test(path) || (ENV_FILE.test(path) && !SAMPLE_ENV.test(path)) || (KEY_FILE.test(path) && !TEST_DIR.test(path))
 
-// The files left out, as a person reads them: a file inside an excluded folder (node_modules/, dist/)
+// The files left out, as a person reads them: a file inside an excluded folder (node_modules/)
 // as that folder, once, so a whole install doesn't list file by file.
 export function leftOut(paths: readonly string[]): string[] {
   const out: string[] = []

@@ -651,9 +651,15 @@ async function addTokens($: EngineInterface, agentId: string, n: number) {
 
 // Approve: the plan, the PR the approver approved, or a change the approver escalated. Anything else
 // that stopped the run isn't approved past: it's retried or the run is stopped.
-async function approveNow($: EngineInterface, goalTasks?: GoalTask[]): Promise<string> {
+// A plan whose gate is goal-run is approved there (its dialog or Goal pane, which passes the goal's task
+// ids on with /factory plan-approved): approved here, goal-run's goal would stay proposed and refuse
+// every task the builder marks. Only when goal-run is gone meanwhile does the factory approve it itself.
+const PLAN_IN_GOAL_RUN = "The plan waits for your approval in goal-run: its dialog, or Approve in the Goal pane (/session-goal opens it)."
+
+async function approveNow($: EngineInterface, goalTasks?: GoalTask[], fromGoalRun = false): Promise<string> {
   const r = await read($, run)
   if (!r) return 'No factory run.'
+  if (r.phase === 'plan' && r.gate === 'goal-run' && !fromGoalRun && (await goalRunThere($))) return PLAN_IN_GOAL_RUN
   // Queued, not awaited: a prompt submitted while the command's hook still runs is refused.
   if (r.phase === 'plan') {
     void serial(() => onPlan($, goalTasks ? { approved: true, goalTasks } : { approved: true }))
@@ -800,7 +806,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'factory' }, async ($, e) => {
     const arg = e.args.trim()
     const approved = parsePlanApprovedArgs(arg)
-    if (arg === 'approve' || approved) return { text: await approveNow($, approved?.goalTasks) }
+    if (arg === 'approve' || approved) return { text: await approveNow($, approved?.goalTasks, !!approved) }
     if (arg === 'retry') return { text: await retryNow($) }
     if (arg === 'stop') return { text: await stopNow($) }
     if (arg === 'rework' || arg.startsWith('rework ')) return { text: await reworkNow($, arg.slice(6).trim()) }
@@ -927,7 +933,8 @@ export const register: Register = (on, options) => {
           </Box>
         ) : null}
         <Box flexDirection="row" gap={1}>
-          {r.phase === 'plan' ? <Button key="p-approve-plan" label="Approve plan" variant="primary" onPress={() => approveNow($)} /> : null}
+          {r.phase === 'plan' && r.gate === 'factory' ? <Button key="p-approve-plan" label="Approve plan" variant="primary" onPress={() => approveNow($)} /> : null}
+          {r.phase === 'plan' && r.gate === 'goal-run' ? <Text dimColor>{PLAN_IN_GOAL_RUN}</Text> : null}
           {actions($, r).map(a => <Button key={`p-${a.key}`} label={a.label} variant="primary" onPress={a.press} />)}
           {isLive(r.phase) ? <Button key="p-stop" label="Stop" onPress={() => stopNow($)} /> : null}
         </Box>
