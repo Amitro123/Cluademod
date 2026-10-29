@@ -82,10 +82,21 @@ export const skillsLine = (names: readonly string[]) =>
 
 export const modelOf = (run: Pick<Run, 'models'> | null | undefined, role: Role) => run?.models?.[role] ?? ROLES[role].model
 
+// The answer's last line that holds exactly one `KEY: <option>`: an answer that echoes the prompt's
+// template ("VERDICT: PASS or VERDICT: CHANGES", a line with both) before its own isn't read as it.
+function lastSingle(answer: string, key: string, options: string): string | undefined {
+  let found: string | undefined
+  for (const line of answer.split('\n')) {
+    const all = [...line.matchAll(new RegExp(`${key}:\\s*(${options})`, 'gi'))]
+    if (all.length === 1) found = all[0]![1]!.toUpperCase()
+  }
+  return found
+}
+
 // A reviewer ends with:  VERDICT: PASS | CHANGES  and  FINDINGS:  "- [major] path:line what and why".
 // No verdict reads as CHANGES, so a confused reviewer can't wave a change through.
 export function parseVerdict(answer: string): { state: 'pass' | 'changes'; findings: Finding[] } {
-  const verdict = /VERDICT:\s*(PASS|CHANGES)/i.exec(answer)?.[1]?.toUpperCase()
+  const verdict = lastSingle(answer, 'VERDICT', 'PASS|CHANGES')
   const findings: Finding[] = []
   for (const raw of answer.split('\n')) {
     const m = /^\s*[-*]\s*\[(blocker|major|minor)\]\s+(\S+)\s+[—–-]?\s*(.+)$/i.exec(raw)
@@ -99,8 +110,8 @@ export function parseVerdict(answer: string): { state: 'pass' | 'changes'; findi
 
 // The approver ends with:  DECISION: APPROVE | ESCALATE  and  REASON: one line.
 export function parseDecision(answer: string): { decision: 'APPROVE' | 'ESCALATE'; reason: string } {
-  const decision = /DECISION:\s*(APPROVE|ESCALATE)/i.exec(answer)?.[1]?.toUpperCase() === 'APPROVE' ? 'APPROVE' : 'ESCALATE'
-  const reason = /REASON:\s*(.+)/i.exec(answer)?.[1]?.trim() ?? (decision === 'ESCALATE' ? 'The approver gave no clear decision.' : '')
+  const decision = lastSingle(answer, 'DECISION', 'APPROVE|ESCALATE') === 'APPROVE' ? 'APPROVE' : 'ESCALATE'
+  const reason = [...answer.matchAll(/REASON:\s*(.+)/gi)].at(-1)?.[1]?.trim() ?? (decision === 'ESCALATE' ? 'The approver gave no clear decision.' : '')
   return { decision, reason }
 }
 
@@ -131,6 +142,8 @@ export const cleanFeature = (text: string) =>
   text.replace(/<\/?pasted_content\b[^>]*>/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim()
 
 // To the main Claude, when the factory takes over a goal or a to-do item: the work is the factory's.
+// After a takeOver whose run then failed to start: the work is the main Claude's after all.
+export const factoryCouldNotStart = (why: string) => `The factory couldn't start that run after all: ${why} Do the work yourself, as first asked.`
 export const takeOverNote = (feature: string) =>
   `The factory took this over: "${titleOf(feature, 200)}". Its spec-writer writes the spec and its builder does the work, in a worktree of its own. Don't start the work or propose a plan yourself; answer in one line that the factory is on it.`
 
@@ -195,7 +208,8 @@ export const isLimitError = (why: string) => /spend limit|rate limit|usage limit
 // The builder's prompt: the whole job for a new builder; for the builder that built it before
 // (`again`), only what to fix this round. A note is the person's own, sent back with /factory rework.
 export function buildPrompt(run: Run, findings: Finding[], failed: Check[], { again = false, note = '' } = {}): string {
-  const tasks = run.tasks.map((t, i) => `- t${i + 1}: ${t.title}`)
+  // In the session goal, goal-run's ids: it numbers the tasks in its own order, not the spec's.
+  const tasks = run.gate === 'goal-run' && run.goalTasks?.length ? run.goalTasks.map(t => `- ${t.id}: ${t.title}`) : run.tasks.map((t, i) => `- t${i + 1}: ${t.title}`)
   const head = again
     ? [`Another round on the change you built for: ${titleOf(run.feature, 200)}`, `Same branch ${run.branch} and worktree. Fix what follows, keep the rest as it is, and commit.`]
     : [
@@ -270,8 +284,8 @@ export function approvePrompt(run: Run, stat = ''): string {
 export function planPrompt(run: Run): string {
   const tasks = JSON.stringify(run.tasks.map(t => ({ title: t.title, priority: t.priority, ...(t.dependsOn.length ? { dependsOn: t.dependsOn } : {}) })))
   return [
-    `The factory's spec for "${run.feature}" is in ${run.specFile}.`,
-    `Call mcp__goal-run__plan now with goal "${run.feature}", source "${FACTORY_SOURCE}", and exactly these tasks, unchanged:`,
+    `The factory's spec for ${JSON.stringify(run.feature)} is in ${run.specFile}.`,
+    `Call mcp__goal-run__plan now with goal ${JSON.stringify(run.feature)}, source "${FACTORY_SOURCE}", and exactly these tasks, unchanged:`,
     tasks,
     "Then stop: the factory's builder does the work. Don't start the tasks or edit any file.",
   ].join('\n')
@@ -296,6 +310,8 @@ export function prPrompt(run: Run, reason: string): string {
 // working directory, so the agents' edits get the same permissions and sandbox as the person's.
 export const worktreeOf = (root: string, slug: string) => `${root.replace(/[\\/]+$/, '')}/.factory/${slug}`
 // Beside the worktree, never in it: a slug has no dot, so no run's worktree is named so.
+// The main repository a run's worktree belongs to: worktreeOf turned back.
+export const rootOf = (run: { worktree: string; slug: string }) => run.worktree.slice(0, -`/.factory/${run.slug}`.length)
 export const recordOf = (root: string, slug: string) => `${root.replace(/[\\/]+$/, '')}/.factory/${slug}.record`
 
 // An agent's closing lines: the builder ends with a two-line summary of what it changed.

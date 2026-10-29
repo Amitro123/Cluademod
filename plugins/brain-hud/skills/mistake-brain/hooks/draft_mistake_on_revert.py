@@ -145,6 +145,9 @@ def main() -> int:
 
     project_dir = host_layout.project_root(payload)
     mistakes_path = project_dir / "MISTAKES.md"
+    # A factory run's agents revert and fail tests in their own worktree as part of the job.
+    if host_layout.in_factory_run(payload, project_dir):
+        return 0
     if not mistakes_path.exists():
         return 0
 

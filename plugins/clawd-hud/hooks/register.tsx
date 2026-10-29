@@ -249,6 +249,8 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    // A sub-agent's start is not a new turn: the main turn's counts, loop and timer go on.
+    if (e.agentId !== undefined) return next(e)
     await update($, toolCounts, () => ({}))
     await update($, loopSince, () => null)
     await setMood($, 'working')

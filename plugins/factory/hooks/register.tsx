@@ -29,6 +29,8 @@ import {
   specPrompt,
   splitChecks,
   tailOf,
+  factoryCouldNotStart,
+  rootOf,
   takeOverNote,
   tok,
   tokensOf,
@@ -48,7 +50,7 @@ import {
   progressNote,
   resumePrompt,
 } from './flow'
-import { FACTORY_PLAN_APPROVED_ARG, FACTORY_START_TOOL, factoryArgs, parseFactoryArgs, parseGoalPrompt, parsePlanOutcome, parseStartPrompt, toolText } from './texts'
+import { FACTORY_START_TOOL, factoryArgs, type GoalTask, parseFactoryArgs, parsePlanApprovedArgs, parsePlanOutcome, takeOverArgs, toolText } from './texts'
 
 const run = atom({ plugin: 'factory', key: 'run' } as const, null as Run | null)
 const frame = atom({ plugin: 'factory', key: 'frame' } as const, 0)
@@ -178,19 +180,16 @@ export function whyEnded(e: { reason: string; answer: string; refusal?: { explan
   return `an API error ended it${said ? `: ${tailOf(said, 1)}` : ''}`
 }
 
-// What a goal prompt or a one-item Start prompt hands the factory: /factory's arguments, else null.
-// Several items started together stay the main Claude's.
-// Only the mods' own prompts: a message the person types that happens to hold a line like
-// "My goal for this session:" or "- id x:" goes on as typed.
-export function takeOverArgs(text: string, origin?: { kind: string; name?: string }): string | null {
-  if (origin?.kind !== 'plugin') return null
-  const goal = origin.name === 'goal-run' ? parseGoalPrompt(text) : null
-  if (goal) return goal
-  if (origin.name !== 'followups') return null
-  const items = parseStartPrompt(text)
-  if (items.length !== 1) return null
-  const it = items[0]!
-  return factoryArgs(`${it.title}${it.detail ? ` — ${it.detail}` : ''}${it.where ? ` (${it.where})` : ''}`, it.id)
+// What a run needs before it can start, checked cheaply: no run going, a git repository with a commit.
+async function preflight($: EngineInterface): Promise<{ root: string; head: string } | { error: string }> {
+  const cur = await read($, run)
+  if (cur && isLive(cur.phase)) return { error: `A factory run is already going: ${titleOf(cur.feature, 120)}. /factory stop ends it.` }
+  const top = await git($, ['rev-parse', '--show-toplevel'], await $.session.root())
+  if (top.exitCode !== 0) return { error: 'The factory needs a git repository: it builds on a branch, in a worktree of its own.' }
+  const root = top.stdout.trim()
+  const head = await git($, ['rev-parse', 'HEAD'], root)
+  if (head.exitCode !== 0) return { error: 'The repository has no commit yet to build from.' }
+  return { root, head: head.stdout.trim() }
 }
 
 async function start($: EngineInterface, args: string): Promise<string> {
@@ -198,19 +197,15 @@ async function start($: EngineInterface, args: string): Promise<string> {
   const feature = cleanFeature(parsed.feature)
   const followupId = parsed.followupId
   if (!feature) return 'What should the factory build? /factory <feature>'
-  const cur = await read($, run)
-  if (cur && isLive(cur.phase)) return `A factory run is already going: ${titleOf(cur.feature, 120)}. /factory stop ends it.`
-  const top = await git($, ['rev-parse', '--show-toplevel'])
-  if (top.exitCode !== 0) return 'The factory needs a git repository: it builds on a branch, in a worktree of its own.'
-  const root = top.stdout.trim()
-  const head = await git($, ['rev-parse', 'HEAD'], root)
-  if (head.exitCode !== 0) return 'The repository has no commit yet to build from.'
+  const ready = await preflight($)
+  if ('error' in ready) return ready.error
+  const { root, head } = ready
   const at = await $.clock.now()
   const slug = slugOf(feature)
   let r: Run | null = null
   // A branch or folder name already taken gets a number; any other failure is reported as it is.
   for (let k = 1; k <= MAX_SLUG_TRIES && !r; k++) {
-    const next = newRun(feature, at, head.stdout.trim(), root, k === 1 ? slug : `${slug}-${k}`)
+    const next = newRun(feature, at, head, root, k === 1 ? slug : `${slug}-${k}`)
     const added = await git($, ['worktree', 'add', '-b', next.branch, next.worktree, next.base], root)
     if (added.exitCode === 0) r = next
     else if (!/already exists/i.test(added.stderr)) return `Could not create a worktree for the run: ${tailOf(added.stderr, 3)}`
@@ -314,10 +309,13 @@ async function askPlan($: EngineInterface) {
   if (answer && answer !== NOT_NOW) return void serial(() => respec($, answer))
 }
 
-async function onPlan($: EngineInterface, outcome: { approved: true } | { changes: string } | { kept: true }) {
+async function onPlan($: EngineInterface, outcome: { approved: true; goalTasks?: GoalTask[] } | { changes: string } | { kept: true }) {
   const r = await read($, run)
   if (!r || r.phase !== 'plan') return
-  if ('approved' in outcome) return startBuild($, [], [])
+  if ('approved' in outcome) {
+    if (outcome.goalTasks) await patch($, cur => ({ ...cur, goalTasks: outcome.goalTasks }))
+    return startBuild($, [], [])
+  }
   // The person has a goal of their own in goal-run: the factory's band asks instead.
   if ('kept' in outcome) {
     await patch($, cur => ({ ...cur, gate: 'factory', note: 'waiting for you to approve the plan (here: goal-run keeps your own goal)' }))
@@ -395,7 +393,10 @@ async function checkCommands($: EngineInterface, r: Run): Promise<DetectedChecks
       list: async dir => (await $.fs.list(dir).catch(() => [])).map(f => ({ name: f.name, isDir: String((f as { kind?: string }).kind) === 'dir' || String((f as { kind?: string }).kind) === 'directory' })),
       read: path => $.fs.read(path).then(t => String(t), () => null),
     }
-    return await detectProjectChecks(io, r.worktree, { explicit: checksOption, touched, spec })
+    // The person's checks file sits in the main repository; .factory/ is git-excluded, so a worktree
+    // never has it, and one the builder writes there must not count.
+    const checksFile = await $.fs.read(`${rootOf(r)}/.factory/checks.json`).then(t => String(t), () => null)
+    return await detectProjectChecks(io, r.worktree, { explicit: checksOption, touched, spec, checksFile })
   } catch (e) {
     return { checks: [], warnings: [String(e)], sources: {}, reason: `${NOTHING_RAN} Warning: ${String(e).slice(0, 120)}` }
   }
@@ -638,12 +639,12 @@ async function addTokens($: EngineInterface, agentId: string, n: number) {
 
 // Approve: the plan, the PR the approver approved, or a change the approver escalated. Anything else
 // that stopped the run isn't approved past: it's retried or the run is stopped.
-async function approveNow($: EngineInterface): Promise<string> {
+async function approveNow($: EngineInterface, goalTasks?: GoalTask[]): Promise<string> {
   const r = await read($, run)
   if (!r) return 'No factory run.'
   // Queued, not awaited: a prompt submitted while the command's hook still runs is refused.
   if (r.phase === 'plan') {
-    void serial(() => onPlan($, { approved: true }))
+    void serial(() => onPlan($, goalTasks ? { approved: true, goalTasks } : { approved: true }))
     return 'Plan approved: the builder starts.'
   }
   if (r.phase === 'ready' || (r.phase === 'needs-human' && r.blocked?.on === 'escalate')) {
@@ -770,9 +771,19 @@ export const register: Register = (on, options) => {
     if (!takeOver) return next(e)
     const args = takeOverArgs(e.text, e.origin as { kind: string; name?: string })
     if (!args) return next(e)
-    const cur = await read($, run)
-    if (cur && isLive(cur.phase)) return next(e)
-    void start($, args).then(msg => $.ui.toast(msg)).catch(() => {})
+    // The prompt is replaced only when the run can start: otherwise the main Claude does the work.
+    const ready = await preflight($)
+    if ('error' in ready) {
+      void $.ui.toast(`The factory didn't take this over: ${ready.error}`)
+      return next(e)
+    }
+    void start($, args)
+      .then(msg => {
+        void $.ui.toast(msg)
+        // It failed past the checks (the worktree, say): Claude was told the factory has it, so it's told otherwise.
+        if (!/^Factory run started/.test(msg)) void $.prompt.submit({ text: factoryCouldNotStart(msg) }).catch(() => {})
+      })
+      .catch(() => {})
     return next({ ...e, text: takeOverNote(parseFactoryArgs(args).feature) })
   }).catch(($, e, next) => next(e))
 
@@ -799,7 +810,8 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'factory' }, async ($, e) => {
     const arg = e.args.trim()
-    if (arg === 'approve' || arg === FACTORY_PLAN_APPROVED_ARG) return { text: await approveNow($) }
+    const approved = parsePlanApprovedArgs(arg)
+    if (arg === 'approve' || approved) return { text: await approveNow($, approved?.goalTasks) }
     if (arg === 'retry') return { text: await retryNow($) }
     if (arg === 'stop') return { text: await stopNow($) }
     if (arg === 'rework' || arg.startsWith('rework ')) return { text: await reworkNow($, arg.slice(6).trim()) }

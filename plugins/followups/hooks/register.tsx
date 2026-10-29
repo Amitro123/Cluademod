@@ -63,6 +63,8 @@ const END = '<!-- followups:end -->'
 // ---------- helpers ----------
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
+// A flag's title, detail or where: one line, so no field can end a code span or split a Start line.
+const field = (v: unknown, n: number) => clip(String(v ?? '').replace(/\s+/g, ' ').trim(), n)
 const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ')
 export const isStatus = (s: unknown): s is Status => s === 'open' || s === 'in_progress' || s === 'done'
 
@@ -171,9 +173,9 @@ export function parseFindings(text: string): Omit<Flag, 'id' | 'at'>[] {
   return raw
     .filter((f): f is Record<string, unknown> => !!f && typeof f === 'object' && typeof (f as { title?: unknown }).title === 'string')
     .map(f => ({
-      title: clip(String(f.title).trim(), 120),
-      detail: clip(String(f.detail ?? '').trim(), 300),
-      where: clip(String(f.where ?? '').trim(), 160),
+      title: field(f.title, 120),
+      detail: field(f.detail, 300),
+      where: field(f.where, 160),
       kind: f.kind === 'bug' ? ('bug' as const) : ('task' as const),
     }))
     .filter(f => f.title)
@@ -372,8 +374,14 @@ async function start($: EngineInterface, which: Item[]) {
   $.prompt.submit({ text: startPrompt(which) }).catch(() => setStatus($, new Set(which.map(i => i.id)), 'open'))
 }
 
-// Whether the factory mod is installed: an open item can be run through it instead of started.
-let hasFactory = false
+// Whether the factory mod is installed: an open item can be run through it instead of started (🏭).
+// Mods start in no set order, so it's asked again until it's there (checkFactory).
+const hasFactory = atom({ plugin: 'followups', key: 'hasFactory' } as const, false)
+
+async function checkFactory($: EngineInterface) {
+  if (await read($, hasFactory)) return
+  if ((await $.command.list().catch(() => [])).some(c => c.name === 'factory')) await update($, hasFactory, () => true)
+}
 
 // An item run through the factory: /factory with what the item says, its id carried along so the
 // run's PR prompt has Claude mark it done. In progress meanwhile; back to open if it can't start.
@@ -397,7 +405,7 @@ export function section(target: Target, list: Item[]): string {
   const t = TARGETS[target]
   const asCode = target === 'memory'
   const lines = list.map(i => {
-    const extra = [i.detail && (asCode ? quoted(i.detail) : i.detail), i.where && `\`${i.where}\``].filter(Boolean).join(' · ')
+    const extra = [i.detail && (asCode ? quoted(i.detail) : i.detail), i.where && quoted(i.where)].filter(Boolean).join(' · ')
     const tags = `${i.kind === 'bug' ? ' _(bug)_' : ''}${i.status === 'in_progress' ? ' _(in progress)_' : ''}`
     return `- [${i.status === 'done' ? 'x' : ' '}] ${asCode ? quoted(i.title) : i.title}${tags}${extra ? ` — ${extra}` : ''}`
   })
@@ -477,7 +485,8 @@ export const register: Register = (on, options) => {
     if (held.some(i => !isStatus((i as { status?: unknown }).status))) await update($, items, l => migrate(l))
     await migrateKey($, 'items')
     await migrateKey($, 'skipped')
-    hasFactory = (await $.command.list().catch(() => [])).some(c => c.name === 'factory')
+    await update($, hasFactory, () => false)
+    await checkFactory($)
     // Items kept in this project carry over to a new session; a resumed one, which comes back with
     // the list it had, takes in what other sessions changed meanwhile.
     await sync($)
@@ -499,6 +508,7 @@ export const register: Register = (on, options) => {
 
   // A new turn from the person (a continuation after a stop has no text) starts the check afresh.
   on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await checkFactory($)
     if (e.agentId === undefined && e.text !== '') {
       isFlagged = false
       isBlocked = false
@@ -511,7 +521,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: TOOL }, async ($, e) => {
     isFlagged = true // any call counts, even one the person turns down
     const input = e as unknown as { title?: unknown; detail?: unknown; where?: unknown; kind?: unknown }
-    const title = clip(String(input.title ?? '').trim(), 120)
+    const title = field(input.title, 120)
     if (!title) return { deny: 'A follow-up needs a title.' }
     if ((await read($, skipped)).includes(norm(title))) {
       return { result: `The person already said "${title}" isn't needed. Don't raise it again.` }
@@ -525,8 +535,8 @@ export const register: Register = (on, options) => {
       id: newId(at),
       kind: input.kind === 'bug' ? 'bug' : 'task',
       title,
-      detail: clip(String(input.detail ?? '').trim(), 300),
-      where: clip(String(input.where ?? '').trim(), 160),
+      detail: field(input.detail, 300),
+      where: field(input.where, 160),
       at,
     }
     return { result: await ask($, flag) }
@@ -641,6 +651,7 @@ export const register: Register = (on, options) => {
     const list = await read($, items)
     const here = await read($, startedHere)
     const note = await read($, exported)
+    const canFactory = await read($, hasFactory)
     const count = (st: Status) => list.filter(i => i.status === st).length
     const [open, doing, done] = [count('open'), count('in_progress'), count('done')]
     const toggle = (id: string) => async () => {
@@ -672,7 +683,7 @@ export const register: Register = (on, options) => {
                   <Box flexDirection="row" gap={1}>
                     {i.status === 'open' ? <Button key={`s-${i.id}`} label="▶ Start" plain onPress={() => start($, [i])} /> : null}
                     {i.status === 'in_progress' && !here.includes(i.id) ? <Button key={`s-${i.id}`} label="▶ Start again" plain onPress={() => start($, [i])} /> : null}
-                    {i.status === 'open' && hasFactory ? <Button key={`f-${i.id}`} label="🏭" plain onPress={() => toFactory($, i)} /> : null}
+                    {i.status === 'open' && canFactory ? <Button key={`f-${i.id}`} label="🏭" plain onPress={() => toFactory($, i)} /> : null}
                     <Button key={`t-${i.id}`} label={i.status === 'done' ? '↺ Reopen' : '✓ Done'} plain onPress={toggle(i.id)} />
                     <Button key={`x-${i.id}`} label="✕" plain onPress={remove(i.id)} />
                   </Box>

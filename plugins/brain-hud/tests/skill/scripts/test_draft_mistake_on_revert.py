@@ -160,3 +160,35 @@ def test_space_separated_secret_flags_are_redacted():
         assert "[redacted]" in out
     # A flag followed by another flag isn't a value: left alone.
     assert safe_for_markdown("git checkout -- a && tool --token --verbose") == "git checkout -- a && tool --token --verbose"
+
+
+def _run_payload(payload: dict) -> str:
+    result = subprocess.run(
+        [sys.executable, str(HOOK)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    return result.stdout
+
+
+def test_a_revert_inside_a_factory_worktree_drafts_nothing(tmp_path):
+    mistakes = _inbox(tmp_path)
+    worktree = tmp_path / ".factory" / "rate-limiter"
+    worktree.mkdir(parents=True)
+    payload = {"tool_name": "Bash", "tool_input": {"command": "git restore src/mw.ts"}, "cwd": str(worktree)}
+    assert _run_payload(payload) == ""
+    # From the project root, by cd into the worktree, or by a factory agent: still the run's.
+    assert _run_payload({**payload, "cwd": str(tmp_path), "tool_input": {"command": "cd .factory/rate-limiter && git restore src/mw.ts"}}) == ""
+    assert _run_payload({**payload, "cwd": str(tmp_path), "agent_id": "a1", "agent_type": "factory:builder"}) == ""
+    assert "[auto-draft]" not in mistakes.read_text(encoding="utf-8")
+
+
+def test_the_same_revert_from_the_project_root_still_drafts(tmp_path):
+    mistakes = _inbox(tmp_path)
+    payload = {"tool_name": "Bash", "tool_input": {"command": "git restore src/mw.ts"}, "cwd": str(tmp_path)}
+    assert _run_payload(payload).strip()
+    # Another sub-agent working in the project itself is not the factory's.
+    assert _run_payload({**payload, "agent_id": "a2", "agent_type": "Explore"}).strip()
+    assert mistakes.read_text(encoding="utf-8").count("[auto-draft]") == 2

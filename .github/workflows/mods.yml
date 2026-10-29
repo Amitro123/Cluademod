@@ -1,0 +1,17 @@
+name: mods
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mod: [brain-hud, clawd-hud, factory, followups, goal-run, rtl-toggle, task-hud]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The test kit ships in the CLI and runs offline: no credentials needed.
+      - run: npm i -g @anthropic-ai/claude-code
+      - run: claude plugin test plugins/${{ matrix.mod }}

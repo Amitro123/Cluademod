@@ -62,6 +62,8 @@ declare module 'claude-code' {
       goal: Goal | null
       heldAt: number
       superseded: boolean
+      // The factory mod is installed (its /factory command is registered).
+      hasFactory: boolean
       seen: string
       asking: Asking
       side: Side | null

@@ -62,6 +62,29 @@ export const parseGoalClosedNote = (text: string) => /^That closed the last task
 export const FACTORY_SOURCE = 'factory' as const
 export const FACTORY_PLAN_APPROVED_ARG = 'plan-approved'
 export const PLAN_APPROVED_FOR_FACTORY = "Approved. The factory's builder does the work: don't start the tasks yourself, and don't propose another plan."
+// goal-run orders a plan by priority and dependencies and numbers it in that order, so the builder
+// marks tasks by the ids goal-run gave them, carried in the approval (the tool's answer, or the
+// arguments of /factory plan-approved).
+export type GoalTask = { id: string; title: string }
+export const planApprovedForFactory = (tasks: GoalTask[]) => `${PLAN_APPROVED_FOR_FACTORY}\nGoal tasks: ${JSON.stringify(tasks)}`
+export const factoryPlanApprovedArgs = (tasks: GoalTask[]) => `${FACTORY_PLAN_APPROVED_ARG} ${JSON.stringify(tasks)}`
+function goalTasksIn(json: string): GoalTask[] | undefined {
+  try {
+    const v: unknown = JSON.parse(json)
+    if (!Array.isArray(v)) return undefined
+    const tasks = v.filter((t): t is GoalTask => !!t && typeof t.id === 'string' && typeof t.title === 'string').map(t => ({ id: t.id, title: t.title }))
+    return tasks.length ? tasks : undefined
+  } catch {
+    return undefined
+  }
+}
+// /factory's arguments when goal-run passes on a plan approved in its pane: null for other arguments.
+export function parsePlanApprovedArgs(args: string): { goalTasks?: GoalTask[] } | null {
+  const m = new RegExp(`^${FACTORY_PLAN_APPROVED_ARG}(?:\\s+([\\s\\S]*))?$`).exec(args.trim())
+  if (!m) return null
+  const goalTasks = m[1] ? goalTasksIn(m[1]) : undefined
+  return goalTasks ? { goalTasks } : {}
+}
 export const planChangesForFactory = (said: string) => `The person wants changes: ${said}\nThe factory's spec-writer revises the spec; don't propose a plan yourself.`
 export const PLAN_WAITING_FOR_FACTORY = "The person hasn't answered; the plan waits for approval in the Goal pane, and the factory waits with it."
 // The person has a goal of their own: goal-run keeps it, and the factory asks for approval itself.
@@ -74,8 +97,11 @@ export const PLAN_KEPT_FOR_FACTORY = "The person has a session goal of their own
 
 // Only the factory's own wording counts: a regular plan's "Approved. …" or "The person wants changes
 // to the plan" is the main loop's, not the factory's.
-export function parsePlanOutcome(text: string): { approved: true } | { changes: string } | { kept: true } | null {
-  if (text.startsWith(PLAN_APPROVED_FOR_FACTORY)) return { approved: true }
+export function parsePlanOutcome(text: string): { approved: true; goalTasks?: GoalTask[] } | { changes: string } | { kept: true } | null {
+  if (text.startsWith(PLAN_APPROVED_FOR_FACTORY)) {
+    const goalTasks = goalTasksIn(/^Goal tasks: (.+)$/m.exec(text)?.[1] ?? '')
+    return goalTasks ? { approved: true, goalTasks } : { approved: true }
+  }
   if (text.startsWith(PLAN_KEPT_FOR_FACTORY)) return { kept: true }
   const m = /^The person wants changes: ([\s\S]*?)\nThe factory's spec-writer revises the spec/.exec(text)
   return m ? { changes: m[1]!.trim() } : null
@@ -89,13 +115,41 @@ export function parseFactoryArgs(args: string): { feature: string; followupId?: 
   return m ? { feature: m[1]!.trim(), followupId: m[2]! } : { feature: args.trim() }
 }
 
+// factory's takeOver: what a goal prompt or a one-item Start prompt hands the factory, as /factory's
+// arguments, else null. Shared so that goal-run and brain-hud, which also read these prompts, can tell
+// the factory takes one whatever order the mods' hooks run in.
+// Several items started together stay the main Claude's.
+// Only the mods' own prompts: a message the person types that happens to hold a line like
+// "My goal for this session:" or "- id x:" goes on as typed.
+export function takeOverArgs(text: string, origin?: { kind: string; name?: string }): string | null {
+  if (origin?.kind !== 'plugin') return null
+  const goal = origin.name === 'goal-run' ? parseGoalPrompt(text) : null
+  if (goal) return goal
+  if (origin.name !== 'followups') return null
+  const items = parseStartPrompt(text)
+  if (items.length !== 1) return null
+  const it = items[0]!
+  return factoryArgs(`${it.title}${it.detail ? ` — ${it.detail}` : ''}${it.where ? ` (${it.where})` : ''}`, it.id)
+}
+
 // What a project's saved goal and to-do list are keyed by: the main repository, the same for each of
 // its git worktrees (a session in a worktree has a root of its own), else the session's root.
 // `git` answers `--git-common-dir` relative to the root in the main checkout, absolute in a worktree.
+// From a subfolder git answers `../.git`, so `.` and `..` are resolved (older gits lack
+// --path-format=absolute). The result keeps the root's separator.
 export function projectFrom(root: string, commonDir: string): string {
   const r = root.replace(/[\\/]+$/, '')
   const dir = commonDir.trim()
   if (!dir) return r
-  const abs = /^([a-zA-Z]:)?[\\/]/.test(dir) ? dir : `${r}/${dir}`
-  return abs.replace(/[\\/]+$/, '').replace(/[\\/]\.git$/, '').replace(/[\\/]\.$/, '')
+  const sep = r.includes('\\') ? '\\' : '/'
+  const abs = /^([a-zA-Z]:)?[\\/]/.test(dir) ? dir : `${r}${sep}${dir}`
+  const lead = /^([a-zA-Z]:)?[\\/]/.exec(abs)?.[0] ?? ''
+  const parts: string[] = []
+  for (const part of abs.slice(lead.length).split(/[\\/]+/)) {
+    if (!part || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  if (parts.at(-1) === '.git') parts.pop()
+  return lead.replace(/[\\/]$/, sep) + parts.join(sep)
 }

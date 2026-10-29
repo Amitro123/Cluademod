@@ -1,6 +1,6 @@
 {
   "name": "followups",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Claude flags what it notices along the way, asks whether to keep each one, and keeps a to-do you can export to memory, docs or the README",
   "author": {
     "name": "Amit Rosen",

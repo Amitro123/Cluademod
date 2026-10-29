@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
-import { FACTORY_PLAN_APPROVED_ARG, FACTORY_SOURCE, factoryTakesGoal, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
+import { FACTORY_SOURCE, factoryPlanApprovedArgs, factoryTakesGoal, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, takeOverArgs, toolText } from './texts'
 // The goal-run tests import the start-prompt parser from here, as before it was shared.
 export { parseStartPrompt }
 
@@ -324,15 +324,23 @@ async function save($: EngineInterface) {
   if (await read($, superseded)) await update($, superseded, () => false)
 }
 
-// Whether the factory mod is installed: the Goal pane offers to run the goal through it.
-let hasFactory = false
+// Whether the factory mod is installed: the Goal pane offers to run the goal through it. Mods start in
+// no set order, so it's asked again until it's there (checkFactory), not only at session start.
+const hasFactory = atom({ plugin: 'goal-run', key: 'hasFactory' } as const, false)
+
+async function checkFactory($: EngineInterface): Promise<boolean> {
+  if (await read($, hasFactory)) return true
+  const found = (await $.command.list().catch(() => [])).some(c => c.name === 'factory')
+  if (found) await update($, hasFactory, () => true)
+  return found
+}
 
 // The goal goes to the factory: marked as the factory's, so the spec's plan replaces it (instead of
 // being kept apart as the person's own), then /factory runs with its text. A refused command puts
 // the goal back as it was.
 // factory's own takeOver option (on by default): whether a goal planned here goes to the factory.
 async function factoryTakesOver($: EngineInterface): Promise<boolean> {
-  if (!hasFactory) return false
+  if (!(await checkFactory($))) return false
   const row = (await $.config.list().catch(() => [])).find(r => r.key === 'factory.takeOver')
   return String(row?.value ?? 'on') !== 'off'
 }
@@ -408,11 +416,15 @@ async function startGoal($: EngineInterface, text: string) {
   }).catch(() => {})
 }
 
+// The ids the builder marks: goal-run's own, in its order, for the tasks still to do.
+const goalTasksOf = (g: Goal | null) => (g?.tasks ?? []).filter(t => t.status !== 'done').map(t => ({ id: t.id, title: t.title }))
+
 async function approve($: EngineInterface, pace: Pace) {
   await setGoal($, g => (g ? { ...g, status: 'active', pace } : g))
   // A factory's plan: the factory starts its builder; the main loop is not asked to work.
-  if ((await read($, goal))?.source === FACTORY_SOURCE) {
-    void $.command.run({ command: 'factory', args: FACTORY_PLAN_APPROVED_ARG }).catch(() => {})
+  const g = await read($, goal)
+  if (g?.source === FACTORY_SOURCE) {
+    void $.command.run({ command: 'factory', args: factoryPlanApprovedArgs(goalTasksOf(g)) }).catch(() => {})
     return
   }
   void $.prompt.submit({ text: `The plan is approved (${PACE_TEXT[pace]}). Start with the first pending task.` }).catch(() => {})
@@ -498,6 +510,9 @@ export const register: Register = (on, options) => {
   // Per turn: a person is at the prompt (so a stop can be sent back), and the run-through nudge was used.
   let isInteractive = false
   let isNudged = false
+  // The turn runs on the person's own prompt or goal-run's: another mod's prompt (brain-hud's "Log
+  // as success", say) gets no goal reminder, and its stop no nudge on to the next task.
+  let isOurs = true
 
   on('session.start', async ($, e, next) => {
     isInteractive = e.isInteractive
@@ -557,7 +572,8 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
     await $.command.register({ name: 'session-goal', description: 'Set a session goal, or show it', argumentHint: '[goal | clear]' })
-    hasFactory = (await $.command.list().catch(() => [])).some(c => c.name === 'factory')
+    await update($, hasFactory, () => false)
+    await checkFactory($)
 
     // A goal kept for this project from an earlier session: offered to continue, or a new one asked for.
     const key = await storeKey($)
@@ -582,7 +598,12 @@ export const register: Register = (on, options) => {
 
   // Another session open beside this one may have changed the goal since.
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined && e.text !== '') await sync($).catch(() => {})
+    if (e.agentId === undefined) await checkFactory($)
+    if (e.agentId === undefined && e.text !== '') {
+      // A new prompt, whoever sent it, may be nudged once again.
+      isNudged = false
+      await sync($).catch(() => {})
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -650,7 +671,7 @@ export const register: Register = (on, options) => {
     if (isFactory) {
       if (answer === APPROVE_BUILD) {
         await setGoal($, g => (g ? { ...g, status: 'active', pace: 'run' } : g))
-        return { result: PLAN_APPROVED_FOR_FACTORY }
+        return { result: planApprovedForFactory(goalTasksOf(await read($, goal))) }
       }
       if (!answer.trim()) return { result: PLAN_WAITING_FOR_FACTORY }
       return { result: planChangesForFactory(answer === CHANGE ? '' : answer) }
@@ -758,15 +779,17 @@ export const register: Register = (on, options) => {
     if (e.command) return next(e)
     const g = await read($, goal)
     if (e.origin.kind === 'plugin' && e.origin.name === TODO_PLUGIN) {
+      // A Start the factory takes over is its run, not a side job, whichever mod's hook runs first.
+      if (takeOverArgs(e.text, e.origin) && (await factoryTakesOver($))) return next(e)
       const items = parseStartPrompt(e.text)
       if (g && items.length) {
         await update($, side, () => ({ items, tokens: 0, isAsking: g.status === 'active', taskIds: [], doneIds: [], isLive: true }))
       }
       return next(e)
     }
-    if (e.origin.kind === 'composer') isNudged = false
     if (e.origin.kind === 'composer') await update($, side, cur => (!cur ? cur : cur.isAsking ? { ...cur, isLive: false } : null))
-    if (!g || g.status !== 'active' || g.source === FACTORY_SOURCE) return next(e)
+    isOurs = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || (e.origin.kind === 'plugin' && e.origin.name === 'goal-run')
+    if (!isOurs || !g || g.status !== 'active' || g.source === FACTORY_SOURCE) return next(e)
     return next({ ...e, context: [...(e.context ?? []), reminder(g)] })
   }).catch(($, e, next) => next(e))
 
@@ -796,7 +819,7 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     const g = await read($, goal)
     const next1 = g?.tasks.find(t => t.status === 'pending')
-    if (!isInteractive || isNudged || e.stop_hook_active || r.block || !g || g.status !== 'active' || g.source === FACTORY_SOURCE || paceOf(g) !== 'run' || !next1) return r
+    if (!isInteractive || !isOurs || isNudged || e.stop_hook_active || r.block || !g || g.status !== 'active' || g.source === FACTORY_SOURCE || paceOf(g) !== 'run' || !next1) return r
     if ((await read($, side))?.isLive) return r
     isNudged = true
     const left = g.tasks.filter(t => t.status !== 'done').length
@@ -877,6 +900,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const g = await read($, goal)
+    const canRunAsFactory = await read($, hasFactory)
     const frame = Math.floor((await read($, tick)) / FRAME_MS)
     const Svg = e.surface === 'terminal' ? null : $.ui.resolve(e as typeof e & { surface: 'desktop' }).Svg
 
@@ -950,7 +974,7 @@ export const register: Register = (on, options) => {
           {g.status === 'active' ? (
             <Button key="pace" label={paceOf(g) === 'run' ? '⏩ Runs through · ask between' : '⏸ Asks between · run through'} plain onPress={() => setGoal($, cur => (cur ? { ...cur, pace: paceOf(cur) === 'run' ? 'ask' : 'run' } : cur))} />
           ) : null}
-          {hasFactory && g.status !== 'done' && g.source !== FACTORY_SOURCE ? (
+          {canRunAsFactory && g.status !== 'done' && g.source !== FACTORY_SOURCE ? (
             <Button key="factory" label="🏭 Run as factory" plain onPress={() => runAsFactory($)} />
           ) : null}
           <Button key="clear" label="Clear goal" plain onPress={() => setGoal($, () => null)} />

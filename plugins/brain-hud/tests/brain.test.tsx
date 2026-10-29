@@ -784,6 +784,17 @@ describe('the session journal: in a session', () => {
     expect(await journalOf($)).toMatch(/^Nothing in the session journal yet/)
   })
 
+  test("past the journal's cap of 200 entries, a new one still brings the line beside the next prompt", async ($, on) => {
+    const w = engine(on, project())
+    await start($)
+    for (let i = 0; i < 205; i++) await worker($, `Job ${i}`, REPORT)
+    await $.prompt.submit({ text: 'first', origin: { kind: 'user' } } as never)
+    await worker($, 'One more', REPORT)
+    await $.prompt.submit({ text: 'second', origin: { kind: 'user' } } as never)
+    expect(w.contexts[0]).toEqual([expect.stringMatching(/^\[brain-hud\] Session so far/)])
+    expect(w.contexts[1]).toEqual([expect.stringMatching(/^\[brain-hud\] Session so far.*One more/)])
+  })
+
   test('beside a prompt, one line when the journal grew, and none when it did not', async ($, on) => {
     const w = engine(on, project())
     await start($)
@@ -825,6 +836,33 @@ describe('the session journal: in a session', () => {
     expect(list.filter(e => e.title === HANDOFF_TITLE).map(e => [e.at, e.type, e.status])).toEqual([['2026-10-24 09:00', 'handoff', 'unrouted']])
     expect(list[0]!.title).toBe(HANDOFF_TITLE)
     expect(files['MISTAKES.md']).toMatch(/Next steps:\*\* finish the to-do "Rotate the keys"; answer: Should the second request retry too\?/)
+  })
+
+  test("a sub-agent's turn doesn't list the commands or the config again", async ($, on) => {
+    let lists = 0
+    on('config.list', () => {
+      lists++
+      return { value: [] } as never
+    })
+    engine(on, project())
+    await start($)
+    await $.turn.start({ text: 'look', turnId: 't1' } as never)
+    const before = lists
+    await $.turn.start({ text: 'sub', turnId: 't2', agentId: 'a1' } as never)
+    expect(lists).toBe(before)
+  })
+
+  test("a to-do the factory takes over isn't left open in the handoff; two started together are", async ($, on) => {
+    const files = project()
+    engine(on, files, { commands: ['followup', 'factory'] })
+    await start($)
+    await $.prompt.submit({ text: startLine({ id: 'k9', title: 'Rotate the keys' }), origin: { kind: 'plugin', name: 'followups' } } as never)
+    await $.prompt.submit({ text: [startLine({ id: 'k1', title: 'Fix the upload' }), startLine({ id: 'k2', title: 'Docs' })].join('\n'), origin: { kind: 'plugin', name: 'followups' } } as never)
+    await worker($, 'Check the upload retry', REPORT)
+    await $.session.end({ reason: 'other', sessionId: 's-1', resume: {} } as never)
+    expect(files['MISTAKES.md']).toMatch(/finish the to-do "Fix the upload"/)
+    expect(files['MISTAKES.md']).toMatch(/finish the to-do "Docs"/)
+    expect(files['MISTAKES.md']).not.toMatch(/Rotate the keys/)
   })
 
   test('nothing left open, no handoff; and a project without the memory gets none', async ($, on) => {

@@ -19,6 +19,8 @@ declare module 'claude-code' {
       // The items this session started: one still in progress that it didn't start (an earlier
       // session's, whose start may never have run) can be started again.
       startedHere: string[]
+      // The factory mod is installed (its /factory command is registered).
+      hasFactory: boolean
     }
   }
 }

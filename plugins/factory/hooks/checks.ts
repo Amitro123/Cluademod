@@ -242,6 +242,9 @@ export type DetectOptions = {
   touched?: string[]
   // The spec's text, for the commands in its acceptance criteria.
   spec?: string | null
+  // The text of the main repository's .factory/checks.json (null: none there). Given, it is the only
+  // checks file read: the one under `root` (a worktree) is the builder's to write, so it doesn't count.
+  checksFile?: string | null
 }
 
 export const NOTHING_RAN = 'No checks were run: no test, lint or build command was found in the repository and the spec names no command that checks the change. Nothing was verified by running it.'
@@ -366,7 +369,9 @@ export async function detectProjectChecks(io: ChecksIO, root: string, opts: Dete
 
     // The project's own list wins over detection; it is read only when the root has a .factory folder.
     let listed: string[][] = []
-    if (rootHasFactory) {
+    if (opts.checksFile !== undefined) {
+      if (opts.checksFile !== null) listed = parseChecksFile(opts.checksFile, warnings)
+    } else if (rootHasFactory) {
       const fileText = await read(`${abs('.factory')}/checks.json`)
       if (fileText !== null) listed = parseChecksFile(fileText, warnings)
     }

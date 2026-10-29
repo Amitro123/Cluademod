@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import { runnerX, trackText } from '../hooks/art'
 import { addSide, insertTask, mergeGoal, movePending, orderPlan, parseStartPrompt, planItems, poseOf, reminder, replan, stepTokens } from '../hooks/register'
 import type { Goal } from '../types'
-import { doneResult, factoryTakesGoal, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory, projectFrom } from '../hooks/texts'
+import { doneResult, factoryTakesGoal, parsePlanApprovedArgs, parsePlanOutcome, PLAN_APPROVED_FOR_FACTORY, PLAN_KEPT_FOR_FACTORY, planChangesForFactory, projectFrom } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 const UPDATE = 'mcp__goal-run__update'
@@ -309,6 +309,23 @@ describe('work started from the followups to-do list', () => {
     return w
   }
 
+  test("with the factory taking items over, a one-item Start is its run, not a side job; two items still are", async ($, on) => {
+    // The goal is the person's own, planned before the factory was there to take it.
+    let loaded = false
+    on('command.list', () => ({ value: loaded ? [{ name: 'factory', description: 'f', source: 'plugin' }] : [] }) as never)
+    await halfway($, on)
+    loaded = true
+    await $.prompt.submit(fromTodo)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(band)).not.toMatch(/Add to your goal/)
+    await band.unmount()
+    const two = ['Start these 2 items from my to-do list, one after the other:', '- id fu-1: Rotate the dev key', '- id fu-2: Update the docs', 'Do the work.'].join('\n')
+    await $.prompt.submit({ text: two, wait: false, origin: { kind: 'plugin', name: 'followups' } } as never)
+    const again = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(again)).toMatch(/Add to your goal/)
+    await again.unmount()
+  })
+
   test('kept separate: no goal reminder beside it, and its tokens counted outside the goal', async ($, on) => {
     const w = await halfway($, on)
     const r = await $.prompt.submit(fromTodo)
@@ -607,8 +624,22 @@ describe('after approval: run through, or ask between tasks', () => {
     expect((await $.classic.Stop(stop)).block).toBeUndefined()
     // The person's next prompt allows one more nudge.
     await $.prompt.submit({ text: 'next', wait: false, origin: { kind: 'composer' } } as never)
+    await $.turn.start({ text: 'next', turnId: 't2' } as never)
     expect((await $.classic.Stop({ stop_hook_active: true, last_assistant_message: '' } as never)).block).toBeUndefined()
     expect((await $.classic.Stop(stop)).block).toMatch(/Go on with t2/)
+  })
+
+  test("another mod's prompt gets no goal reminder, and the stop after it isn't sent on", async ($, on) => {
+    await approved($, on, 'Approve, run through')
+    const p = await $.prompt.submit({ text: 'Log this as a success: the retry fix', wait: false, origin: { kind: 'plugin', name: 'brain-hud' } } as never)
+    expect((p.context ?? []).join('\n')).not.toMatch(/Session goal/)
+    await $.turn.start({ text: 'Log this as a success: the retry fix', turnId: 't2' } as never)
+    expect((await $.classic.Stop(stop)).block).toBeUndefined()
+    // The person's own prompt: the reminder, and the nudge on to the next task.
+    const mine = await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'composer' } } as never)
+    expect((mine.context ?? []).join('\n')).toMatch(/Session goal/)
+    await $.turn.start({ text: 'go on', turnId: 't3' } as never)
+    expect((await $.classic.Stop(stop)).block).toMatch(/Go on with t1/)
   })
 
   test('ask between tasks: the person decides after each one, and no stop is sent on', async ($, on) => {
@@ -644,8 +675,8 @@ describe('a plan from a factory run', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks } as never)
     expect(w.asked.at(-1)).toMatch(/The factory's spec for this goal\. Approve it, and the builder starts\?/)
-    expect(String(r.result)).toBe(PLAN_APPROVED_FOR_FACTORY)
-    expect(parsePlanOutcome(String(r.result))).toEqual({ approved: true })
+    expect(String(r.result).startsWith(PLAN_APPROVED_FOR_FACTORY)).toBe(true)
+    expect(parsePlanOutcome(String(r.result))).toEqual({ approved: true, goalTasks: [{ id: 't1', title: 'Token bucket core' }, { id: 't2', title: 'Middleware with Retry-After' }] })
     // No goal reminder on the person's prompts, no nudge at a stop, no question between tasks.
     const p = await $.prompt.submit({ text: 'how is it going?', origin: { kind: 'composer' } } as never)
     expect((p.context ?? []).join('\n')).not.toMatch(/Session goal/)
@@ -684,7 +715,7 @@ describe('a plan from a factory run', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     await $.command.run({ command: 'session-goal', args: 'Rate limiter' } as never)
     const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks } as never)
-    expect(String(r.result)).toBe(PLAN_APPROVED_FOR_FACTORY)
+    expect(String(r.result).startsWith(PLAN_APPROVED_FOR_FACTORY)).toBe(true)
     expect((w.saved['goal:/repo'] as Goal).source).toBe('factory')
   })
 
@@ -724,9 +755,29 @@ describe('a plan from a factory run', () => {
     expect(parsePlanOutcome(String(r.result))).toBeNull()
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
     await pane.press({ key: 'approve' })
-    expect(ran).toContain('factory plan-approved')
+    expect(ran).toContain(`factory plan-approved ${JSON.stringify([{ id: 't1', title: 'Token bucket core' }, { id: 't2', title: 'Middleware with Retry-After' }])}`)
     expect(w.sent.some(t => /Start with the first pending task/.test(t))).toBe(false)
     await pane.unmount()
+  })
+
+  test("the factory is given goal-run's ids, in goal-run's order, on both paths", async ($, on) => {
+    const ran: string[] = []
+    on('command.run', (_, e) => {
+      ran.push(String(e.args ?? ''))
+      return { text: '' } as never
+    })
+    // The spec's order puts the low-priority docs first; goal-run puts the core first.
+    const outOfOrder = [{ title: 'Write docs', priority: 'low' }, { title: 'Core', priority: 'high' }]
+    const ids = [{ id: 't1', title: 'Core' }, { id: 't2', title: 'Write docs' }]
+    engine(on, { answers: ['Approve, start building', null] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const r = await $.tool.call({ tool: PLAN, goal: 'Docs', source: 'factory', tasks: outOfOrder } as never)
+    expect(parsePlanOutcome(String(r.result))).toEqual({ approved: true, goalTasks: ids })
+    await $.tool.call({ tool: PLAN, goal: 'Docs', source: 'factory', tasks: outOfOrder } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    await pane.press({ key: 'approve' })
+    await pane.unmount()
+    expect(parsePlanApprovedArgs(ran.at(-1)!)).toEqual({ goalTasks: ids })
   })
 })
 
@@ -740,6 +791,10 @@ describe('one goal per repository, whichever worktree the session is in', () => 
     expect(projectFrom('/repo/.claude/worktrees/a', '/repo/.git')).toBe('/repo')
     expect(projectFrom('C:\\work\\api-wt', 'C:\\work\\api\\.git')).toBe('C:\\work\\api')
     expect(projectFrom('/scratch', '')).toBe('/scratch')
+    // A session rooted in a subfolder: git answers relative to it.
+    expect(projectFrom('/repo/sub', '../.git')).toBe('/repo')
+    expect(projectFrom('/repo/a/b', '../../.git\n')).toBe('/repo')
+    expect(projectFrom('C:\\repo\\sub', '..\\.git')).toBe('C:\\repo')
   })
 
   test("a goal saved from the main checkout is there in a worktree session", async ($, on) => {
@@ -782,7 +837,7 @@ describe('a goal run through the factory', () => {
     expect(await pane.find({ key: 'factory' } as never)).toBeFalsy()
     await pane.unmount()
     const r = await $.tool.call({ tool: PLAN, goal: 'Rate limiter', source: 'factory', tasks: [{ title: 'Bucket', priority: 'high' }] } as never)
-    expect(String(r.result)).toBe(PLAN_APPROVED_FOR_FACTORY)
+    expect(String(r.result).startsWith(PLAN_APPROVED_FOR_FACTORY)).toBe(true)
     expect((w.saved['goal:/repo'] as Goal).tasks.map(t => t.title)).toEqual(['Bucket'])
   })
 
@@ -796,6 +851,34 @@ describe('a goal run through the factory', () => {
     })
     return ran
   }
+
+  test("a factory that registers after this mod started is seen: a new goal's plan goes to it", async ($, on) => {
+    let loaded = false
+    on('command.list', () => ({ value: loaded ? [{ name: 'factory', description: 'f', source: 'plugin' }] : [] }) as never)
+    on('config.list', () => ({ value: [] }) as never)
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    loaded = true
+    const r = await $.tool.call({ tool: PLAN, goal: 'Ship it', tasks: ['One', 'Two'] } as never)
+    expect(String(r.result)).toBe(factoryTakesGoal('Ship it'))
+  })
+
+  test('the Goal pane offers the factory once it registers, from the next turn', async ($, on) => {
+    let loaded = false
+    on('command.list', () => ({ value: loaded ? [{ name: 'factory', description: 'f', source: 'plugin' }] : [] }) as never)
+    on('config.list', () => ({ value: [{ key: 'factory.takeOver', value: 'off' }] }) as never)
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    engine(on, { answers: ['Approve, run through'] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.command.run({ command: 'session-goal', args: 'Ship it' } as never)
+    await $.tool.call({ tool: PLAN, tasks: ['One', 'Two'] } as never)
+    loaded = true
+    await $.turn.start({ turnId: 't1', text: 'go on' } as never)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await pane.find({ key: 'factory' } as never)).toBeTruthy()
+    await pane.unmount()
+  })
 
   test('a new goal Claude plans goes to the factory when it takes goals over: no plan, no dialog', async ($, on) => {
     const ran = withFactory(on)

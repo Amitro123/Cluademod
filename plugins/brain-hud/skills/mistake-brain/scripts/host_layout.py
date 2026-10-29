@@ -106,6 +106,37 @@ def project_root(payload: dict | None = None) -> Path:
     return start
 
 
+_CD = re.compile(r"""(?:^|[;&|(]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|)]+))""")
+
+
+def in_factory_run(payload: dict | None, project_dir: Path) -> bool:
+    """A tool call made for a factory run: its agents work in worktrees under
+    ``<project>/.factory/``, where a revert or a red test is the run's own
+    business, not a mistake of the person's session.
+
+    A sub-agent's call carries ``agent_type`` (the factory's are ``factory:*``);
+    a call from anywhere else counts when its ``cwd``, or a ``cd`` in its
+    command, is inside a ``.factory/`` folder. That is checked by path, not
+    against ``project_dir``: from inside a worktree, without
+    ``CLAUDE_PROJECT_DIR``, the project resolves to the worktree itself.
+    Other sub-agents' calls in the project itself still count.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    if str(payload.get("agent_type") or "").startswith("factory:"):
+        return True
+    cwd = Path(str(payload.get("cwd") or project_dir))
+    command = str((payload.get("tool_input") or {}).get("command") or "")
+    targets = [cwd] + [cwd / next(g for g in m.groups() if g) for m in _CD.finditer(command)]
+    for target in targets:
+        try:
+            resolved = target.expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if ".factory" in resolved.parts:
+            return True
+    return False
+
+
 def is_brain_project(project_dir: Path) -> bool:
     """True when the project uses mistake-brain: it has the inbox or the lesson store.
 

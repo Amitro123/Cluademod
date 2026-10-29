@@ -9,7 +9,7 @@ import { diffBrain, FOLDERS, SKILL, lessonCount, logPrompt, paraStats, parseMemo
 import type { ParaFile } from './brain'
 import { clockTime, contextLine, HANDOFF_TITLE, hasLoose, handoffEntry, insertBelowMarker, journalDoc, journalFile, JOURNAL_DIR, JOURNAL_LAST, journalText, looseEnds, stampOf, workerEntry } from './journal'
 import type { JournalEntry, JournalKind } from './journal'
-import { GOAL_REACHED, parseDoneResult, parseGoalClosedNote, parseGoalPrompt, parseStartPrompt, toolText } from './texts'
+import { GOAL_REACHED, parseDoneResult, parseGoalClosedNote, parseGoalPrompt, parseStartPrompt, takeOverArgs, toolText } from './texts'
 
 const brain = atom({ plugin: 'brain-hud', key: 'brain' } as const, null as Brain | null)
 const pulse = atom({ plugin: 'brain-hud', key: 'pulse' } as const, null as Pulse | null)
@@ -26,6 +26,8 @@ const routeLater = atom({ plugin: 'brain-hud', key: 'routeLater' } as const, 0)
 const journal = atom({ plugin: 'brain-hud', key: 'journal' } as const, [] as JournalEntry[])
 // How many journal entries the main agent was last told of, beside a prompt.
 const told = atom({ plugin: 'brain-hud', key: 'told' } as const, 0)
+// Every entry ever appended: the journal itself is capped, so its length stops growing at the cap.
+const total = atom({ plugin: 'brain-hud', key: 'total' } as const, 0)
 const doneIds = atom({ plugin: 'brain-hud', key: 'doneIds' } as const, [] as string[])
 const goalReached = atom({ plugin: 'brain-hud', key: 'goalReached' } as const, false)
 const handedOff = atom({ plugin: 'brain-hud', key: 'handedOff' } as const, false)
@@ -164,6 +166,7 @@ async function note($: EngineInterface, kind: JournalKind, text: string, call?: 
 
 async function append($: EngineInterface, entry: JournalEntry) {
   await update($, journal, list => [...list, entry].slice(-JOURNAL_MAX))
+  await update($, total, n => n + 1)
   const entries = await read($, journal)
   writing = writing.then(() => writeJournal($, entries), () => writeJournal($, entries))
   await writing
@@ -211,9 +214,10 @@ async function workerDone($: EngineInterface, agentId: string, answer: string) {
 // is more than its own bottom lines and where to read it.
 async function withJournal($: EngineInterface, e: PromptSubmitInput): Promise<PromptSubmitInput> {
   if (!journalOn || e.command) return e
+  const count = await read($, total)
+  if (count <= (await read($, told))) return e
+  await update($, told, () => count)
   const entries = await read($, journal)
-  if (entries.length <= (await read($, told))) return e
-  await update($, told, () => entries.length)
   return { ...e, context: [...(e.context ?? []), contextLine(entries, JOURNAL_TOOL)] }
 }
 
@@ -331,6 +335,13 @@ async function toFollowup($: EngineInterface, title: string) {
   )
 }
 
+// The factory is installed and takes goals and to-do items over (its takeOver option, on by default).
+async function factoryTakesOver($: EngineInterface): Promise<boolean> {
+  if (!(await $.command.list().catch(() => [])).some(c => c.name === 'factory')) return false
+  const row = (await $.config.list().catch(() => [])).find(r => r.key === 'factory.takeOver')
+  return String(row?.value ?? 'on') !== 'off'
+}
+
 async function checkFollow($: EngineInterface) {
   if (await read($, canFollow)) return
   const names = (await $.command.list().catch(() => [])).map(c => c.name)
@@ -397,6 +408,8 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    // A sub-agent's turn changes neither: no need to ask on each one.
+    if (e.agentId !== undefined) return next(e)
     await checkFollow($)
     // A theme changed in /config mid-session reaches the graph from the next prompt on.
     await readTheme($)
@@ -438,7 +451,8 @@ export const register: Register = (on, options) => {
   // followups' Start names the items it hands Claude, remembered so their "done" can be offered;
   // goal-run's start prompt names the goal.
   on('prompt.submit', async ($, e, next) => {
-    if (e.origin.kind === 'plugin' && e.origin.name === 'followups') {
+    // A Start the factory takes over is the factory's: its PR prompt marks the item done.
+    if (e.origin.kind === 'plugin' && e.origin.name === 'followups' && !(takeOverArgs(e.text, e.origin) && (await factoryTakesOver($)))) {
       const items = parseStartPrompt(e.text).map(i => ({ id: i.id, title: i.title, isBug: Boolean(i.isBug) }))
       if (items.length) await update($, started, l => [...l.filter(x => !items.some(i => i.id === x.id)), ...items].slice(-20))
     }
