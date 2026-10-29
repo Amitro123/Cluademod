@@ -63,6 +63,8 @@ const END = '<!-- followups:end -->'
 // ---------- helpers ----------
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
+// A flag's title, detail or where: one line, so no field can end a code span or split a Start line.
+const field = (v: unknown, n: number) => clip(String(v ?? '').replace(/\s+/g, ' ').trim(), n)
 const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ')
 export const isStatus = (s: unknown): s is Status => s === 'open' || s === 'in_progress' || s === 'done'
 
@@ -171,9 +173,9 @@ export function parseFindings(text: string): Omit<Flag, 'id' | 'at'>[] {
   return raw
     .filter((f): f is Record<string, unknown> => !!f && typeof f === 'object' && typeof (f as { title?: unknown }).title === 'string')
     .map(f => ({
-      title: clip(String(f.title).trim(), 120),
-      detail: clip(String(f.detail ?? '').trim(), 300),
-      where: clip(String(f.where ?? '').trim(), 160),
+      title: field(f.title, 120),
+      detail: field(f.detail, 300),
+      where: field(f.where, 160),
       kind: f.kind === 'bug' ? ('bug' as const) : ('task' as const),
     }))
     .filter(f => f.title)
@@ -403,7 +405,7 @@ export function section(target: Target, list: Item[]): string {
   const t = TARGETS[target]
   const asCode = target === 'memory'
   const lines = list.map(i => {
-    const extra = [i.detail && (asCode ? quoted(i.detail) : i.detail), i.where && `\`${i.where}\``].filter(Boolean).join(' · ')
+    const extra = [i.detail && (asCode ? quoted(i.detail) : i.detail), i.where && quoted(i.where)].filter(Boolean).join(' · ')
     const tags = `${i.kind === 'bug' ? ' _(bug)_' : ''}${i.status === 'in_progress' ? ' _(in progress)_' : ''}`
     return `- [${i.status === 'done' ? 'x' : ' '}] ${asCode ? quoted(i.title) : i.title}${tags}${extra ? ` — ${extra}` : ''}`
   })
@@ -519,7 +521,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: TOOL }, async ($, e) => {
     isFlagged = true // any call counts, even one the person turns down
     const input = e as unknown as { title?: unknown; detail?: unknown; where?: unknown; kind?: unknown }
-    const title = clip(String(input.title ?? '').trim(), 120)
+    const title = field(input.title, 120)
     if (!title) return { deny: 'A follow-up needs a title.' }
     if ((await read($, skipped)).includes(norm(title))) {
       return { result: `The person already said "${title}" isn't needed. Don't raise it again.` }
@@ -533,8 +535,8 @@ export const register: Register = (on, options) => {
       id: newId(at),
       kind: input.kind === 'bug' ? 'bug' : 'task',
       title,
-      detail: clip(String(input.detail ?? '').trim(), 300),
-      where: clip(String(input.where ?? '').trim(), 160),
+      detail: field(input.detail, 300),
+      where: field(input.where, 160),
       at,
     }
     return { result: await ask($, flag) }
