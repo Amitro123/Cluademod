@@ -750,18 +750,21 @@ describe('the parsers', () => {
     expect(parseVerdict('VERDICT: PASS\n- [blocker] a.ts:1 secret in code').state).toBe('changes')
   })
 
-  test('decisions: anything unclear escalates', () => {
+  test('decisions: no decision is none (null); both is an escalation', () => {
     expect(parseDecision('DECISION: APPROVE\nREASON: good')).toEqual({ decision: 'APPROVE', reason: 'good' })
-    expect(parseDecision('hmm').decision).toBe('ESCALATE')
+    expect(parseDecision('hmm').decision).toBeNull()
+    expect(parseDecision('DECISION: APPROVE\nOn reflection:\nDECISION: ESCALATE').decision).toBe('ESCALATE')
+    expect(parseDecision('DECISION: ESCALATE\nDECISION: APPROVE\nREASON: fine').decision).toBe('ESCALATE')
   })
 
-  test("an answer that echoes the prompt's template is read by its own last line, not the template's first option", () => {
+  test("an answer that echoes the prompt's template is read by its own line, not the template's first option", () => {
     expect(parseDecision('End with DECISION: APPROVE or DECISION: ESCALATE and a REASON: line.\nDECISION: ESCALATE\nREASON: x')).toEqual({ decision: 'ESCALATE', reason: 'x' })
-    expect(parseDecision('DECISION: APPROVE or DECISION: ESCALATE').decision).toBe('ESCALATE')
+    expect(parseDecision('DECISION: APPROVE or DECISION: ESCALATE').decision).toBeNull()
     expect(parseVerdict('The format is VERDICT: PASS or VERDICT: CHANGES.\nVERDICT: CHANGES\nFINDINGS:\n- [major] a.ts:1 wrong').state).toBe('changes')
     expect(parseVerdict('VERDICT: PASS or VERDICT: CHANGES').state).toBe('changes')
-    // A reviewer that changed its mind: the last verdict counts.
-    expect(parseVerdict('VERDICT: CHANGES\nOn a second look it is fine.\nVERDICT: PASS').state).toBe('pass')
+    // Two verdicts that disagree: changes, whichever came last.
+    expect(parseVerdict('VERDICT: CHANGES\nOn a second look it is fine.\nVERDICT: PASS')).toMatchObject({ state: 'changes', findings: [{ text: 'The reviewer gave both VERDICT: PASS and VERDICT: CHANGES.' }] })
+    expect(parseVerdict('Last round: VERDICT: PASS\nVERDICT: CHANGES\n- [major] a.ts:1 wrong').state).toBe('changes')
   })
 
   test('the plan prompt quotes the feature as JSON, so a quote in it stays inside the string', () => {
@@ -892,6 +895,20 @@ describe('a reviewer or the approver that fails is retried, never approved past'
     expect(await command($, 'approve')).toMatch(/^Nothing to approve/)
     await command($, 'retry')
     expect(last(w)).toMatchObject({ id: 'a7', subagentType: 'factory:approver' })
+  })
+
+  test('an approver that answered with no DECISION decided nothing: Retry, not Approve PR', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    await answer($, 'a5', 'The change looks reasonable overall.')
+    const t = await bandText($)
+    expect(t).toMatch(/gave no DECISION line\. Retry runs it again/)
+    expect(t).not.toMatch(/Approve PR/)
+    expect(await command($, 'approve')).toMatch(/^Nothing to approve/)
+    await command($, 'retry')
+    expect(last(w)).toMatchObject({ subagentType: 'factory:approver' })
   })
 
   test("a reviewer that failed doesn't send the builder back: Retry runs that reviewer alone", async ($, on) => {

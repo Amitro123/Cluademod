@@ -82,36 +82,43 @@ export const skillsLine = (names: readonly string[]) =>
 
 export const modelOf = (run: Pick<Run, 'models'> | null | undefined, role: Role) => run?.models?.[role] ?? ROLES[role].model
 
-// The answer's last line that holds exactly one `KEY: <option>`: an answer that echoes the prompt's
-// template ("VERDICT: PASS or VERDICT: CHANGES", a line with both) before its own isn't read as it.
-function lastSingle(answer: string, key: string, options: string): string | undefined {
-  let found: string | undefined
+// The answer's markers (`KEY: <option>`), from the lines that hold exactly one: a line holding both
+// options ("VERDICT: PASS or VERDICT: CHANGES") is the prompt's template echoed, not an answer.
+// None found: undefined. Markers that disagree: `safe`, the outcome that can't wave a change through.
+function marker(answer: string, key: string, options: string, safe: string): { value?: string; mixed: boolean } {
+  const found = new Set<string>()
   for (const line of answer.split('\n')) {
     const all = [...line.matchAll(new RegExp(`${key}:\\s*(${options})`, 'gi'))]
-    if (all.length === 1) found = all[0]![1]!.toUpperCase()
+    if (all.length === 1) found.add(all[0]![1]!.toUpperCase())
   }
-  return found
+  if (found.size > 1) return { value: safe, mixed: true }
+  return { value: [...found][0], mixed: false }
 }
 
 // A reviewer ends with:  VERDICT: PASS | CHANGES  and  FINDINGS:  "- [major] path:line what and why".
-// No verdict reads as CHANGES, so a confused reviewer can't wave a change through.
+// No verdict, or both, reads as CHANGES, so a confused reviewer can't wave a change through.
 export function parseVerdict(answer: string): { state: 'pass' | 'changes'; findings: Finding[] } {
-  const verdict = lastSingle(answer, 'VERDICT', 'PASS|CHANGES')
+  const verdict = marker(answer, 'VERDICT', 'PASS|CHANGES', 'CHANGES')
   const findings: Finding[] = []
   for (const raw of answer.split('\n')) {
     const m = /^\s*[-*]\s*\[(blocker|major|minor)\]\s+(\S+)\s+[—–-]?\s*(.+)$/i.exec(raw)
     if (m) findings.push({ severity: m[1]!.toLowerCase() as Severity, where: m[2]!, text: m[3]!.trim() })
   }
-  if (!verdict) return { state: 'changes', findings: [{ severity: 'major', where: '-', text: 'The reviewer gave no VERDICT line.' }, ...findings] }
+  if (!verdict.value) return { state: 'changes', findings: [{ severity: 'major', where: '-', text: 'The reviewer gave no VERDICT line.' }, ...findings] }
+  if (verdict.mixed) return { state: 'changes', findings: [{ severity: 'major', where: '-', text: 'The reviewer gave both VERDICT: PASS and VERDICT: CHANGES.' }, ...findings] }
   // A PASS that still lists a blocker isn't a pass.
-  const state = verdict === 'PASS' && !findings.some(f => f.severity === 'blocker') ? 'pass' : 'changes'
+  const state = verdict.value === 'PASS' && !findings.some(f => f.severity === 'blocker') ? 'pass' : 'changes'
   return { state, findings }
 }
 
-// The approver ends with:  DECISION: APPROVE | ESCALATE  and  REASON: one line.
-export function parseDecision(answer: string): { decision: 'APPROVE' | 'ESCALATE'; reason: string } {
-  const decision = lastSingle(answer, 'DECISION', 'APPROVE|ESCALATE') === 'APPROVE' ? 'APPROVE' : 'ESCALATE'
-  const reason = [...answer.matchAll(/REASON:\s*(.+)/gi)].at(-1)?.[1]?.trim() ?? (decision === 'ESCALATE' ? 'The approver gave no clear decision.' : '')
+// The approver ends with:  DECISION: APPROVE | ESCALATE  and  REASON: one line. No decision at all is
+// null (it decided nothing: the run waits for a Retry); both is an escalation.
+export function parseDecision(answer: string): { decision: 'APPROVE' | 'ESCALATE' | null; reason: string } {
+  const found = marker(answer, 'DECISION', 'APPROVE|ESCALATE', 'ESCALATE')
+  if (!found.value) return { decision: null, reason: 'The approver gave no DECISION line.' }
+  if (found.mixed) return { decision: 'ESCALATE', reason: 'The approver gave both DECISION: APPROVE and DECISION: ESCALATE.' }
+  const decision = found.value === 'APPROVE' ? 'APPROVE' : 'ESCALATE'
+  const reason = [...answer.matchAll(/REASON:\s*(.+)/gi)].at(-1)?.[1]?.trim() ?? (decision === 'ESCALATE' ? 'The approver gave no reason.' : '')
   return { decision, reason }
 }
 

@@ -581,6 +581,7 @@ async function onApprover($: EngineInterface, answer: string, why: string) {
   // An approver that ended without a decision decided nothing: Retry, not an escalation to approve past.
   if (why) return block($, { on: 'start', role: 'approver' }, `The approver stopped before deciding: ${why}. Retry runs it again.`, r => ({ ...r, steps: { ...r.steps, approver: { ...r.steps.approver, state: 'fail' } } }))
   const parsed = parseDecision(answer)
+  if (parsed.decision === null) return block($, { on: 'start', role: 'approver' }, `${parsed.reason} Retry runs it again.`, r => ({ ...r, steps: { ...r.steps, approver: { ...r.steps.approver, state: 'fail' } } }))
   // With no check run, nothing was verified by running it: an APPROVE becomes the person's call
   // (Approve PR anyway is their override).
   const r0 = await read($, run)
