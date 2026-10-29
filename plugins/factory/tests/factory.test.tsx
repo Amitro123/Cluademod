@@ -29,7 +29,7 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, planResult = PLAN_APPROVED_FOR_FACTORY, checksOk = 'Run them' as string | null, missing = [] as string[], noRepo = false } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, planResult = PLAN_APPROVED_FOR_FACTORY, checksOk = 'Run them' as string | null, missing = [] as string[], noRepo = false, stagedNew = [] as string[], committedNew = [] as string[] } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
   // The last commit of the files that define the checks: a test moves it to change them.
@@ -82,6 +82,9 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
       return err ? ({ value: { exitCode: 128, stdout: '', stderr: err } } as never) : ok()
     }
     if (cmd.startsWith('git diff --stat')) return ok(' src/mw.ts | 40 +++\n 1 file changed')
+    // New files in the index (`stagedNew`, the builder's own git add), and new files committed since the base.
+    if (cmd === 'git diff --cached --name-only --diff-filter=A -z') return ok(stagedNew.join('\0'))
+    if (cmd === 'git diff --name-only --diff-filter=A -z abc123 HEAD') return ok(committedNew.join('\0'))
     if (cmd === 'git status --porcelain') return ok(dirty ? ' M src/mw.ts\n?? src/limit/new.ts\n?? node_modules/\n?? .env\n?? certs/server.key\n' : '')
     // -z -uall: each untracked file on its own, NUL-separated, unquoted (a new folder's .env too).
     if (cmd === 'git status --porcelain -z -uall') return ok(dirty ? [' M src/mw.ts', '?? src/limit/new.ts', '?? src/limit/שלום.ts', '?? app/.env', '?? app/index.js', '?? node_modules/x/a.js', '?? .env', '?? certs/server.key', 'R  src/b.ts', 'src/a.ts', ''].join('\0') : '')
@@ -327,6 +330,24 @@ describe('a run from the feature to the PR', () => {
     await command($, 'stop')
     await command($, 'Second feature')
     expect(w.written['/repo/.git/info/exclude']).toBe('.factory/\n')
+  })
+
+  test('a credential the builder staged itself is unstaged before the commit, and listed as left out', async ($, on) => {
+    const w = engine(on, { dirty: true, stagedNew: ['config/.env', 'src/limit/new.ts'] })
+    await toReviews($)
+    const at = (c: string) => w.ran.indexOf(c)
+    expect(at('git reset -q -- config/.env')).toBeGreaterThan(-1)
+    expect(at('git commit -m factory: Rate limiter')).toBeGreaterThan(at('git reset -q -- config/.env'))
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/Left out of the commits: .*config\/\.env/)
+    await pane.unmount()
+  })
+
+  test('a credential the builder committed itself stops the run before the checks', async ($, on) => {
+    const w = engine(on, { committedNew: ['src/mw.ts', 'certs/server.key'] })
+    await toReviews($)
+    expect(w.ran).not.toContain('npm test')
+    expect(await bandText($)).toMatch(/committed files the factory never commits: certs\/server\.key/)
   })
 
   test("a commit that fails stops the run, for the person to look at", async ($, on) => {

@@ -361,6 +361,13 @@ async function onBuilt($: EngineInterface) {
     const fresh = untracked.filter(p => !neverCommit(p))
     let out = await git($, ['add', '-u'], r.worktree)
     if (out.exitCode === 0 && fresh.length) out = await git($, ['add', '--', ...fresh], r.worktree)
+    // A new file the builder staged itself (git add .env) is in the index, not untracked: unstaged too.
+    const added = out.exitCode === 0 ? await git($, ['diff', '--cached', '--name-only', '--diff-filter=A', '-z'], r.worktree) : null
+    const sneaked = added?.exitCode === 0 ? added.stdout.split('\0').filter(p => p && neverCommit(p)) : []
+    if (sneaked.length) {
+      out = await git($, ['reset', '-q', '--', ...sneaked], r.worktree)
+      skipped.push(...leftOut(sneaked).filter(p => !skipped.includes(p)))
+    }
     const staged = out.exitCode === 0 ? await git($, ['diff', '--cached', '--quiet'], r.worktree) : out
     if (out.exitCode === 0 && staged.exitCode !== 0) out = await git($, ['commit', '-m', `factory: ${titleOf(r.feature, 64)}`, ...(titleOf(r.feature, 64) !== r.feature.trim() ? ['-m', r.feature.trim()] : [])], r.worktree)
     if (out.exitCode !== 0) {
@@ -368,6 +375,13 @@ async function onBuilt($: EngineInterface) {
       return
     }
     if (skipped.length) await patch($, cur => ({ ...cur, skipped }))
+  }
+  // What the builder committed itself never went through the filter above.
+  const committed = await git($, ['diff', '--name-only', '--diff-filter=A', '-z', r.base, 'HEAD'], r.worktree)
+  const leaked = committed.exitCode === 0 ? committed.stdout.split('\0').filter(p => p && neverCommit(p)) : []
+  if (leaked.length) {
+    await block($, { on: 'builder' }, `The builder committed files the factory never commits: ${leftOut(leaked).join(', ')}. Take them out of the branch's history, then retry.`)
+    return
   }
   const stat = await git($, ['diff', '--stat', r.base, 'HEAD'], r.worktree)
   if (stat.exitCode === 0 && stat.stdout.trim()) {

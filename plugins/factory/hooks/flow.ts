@@ -309,9 +309,9 @@ export function prPrompt(run: Run, reason: string): string {
 // The worktrees sit inside the repository, in .factory/ (kept out of git): within the session's
 // working directory, so the agents' edits get the same permissions and sandbox as the person's.
 export const worktreeOf = (root: string, slug: string) => `${root.replace(/[\\/]+$/, '')}/.factory/${slug}`
-// Beside the worktree, never in it: a slug has no dot, so no run's worktree is named so.
 // The main repository a run's worktree belongs to: worktreeOf turned back.
 export const rootOf = (run: { worktree: string; slug: string }) => run.worktree.slice(0, -`/.factory/${run.slug}`.length)
+// Beside the worktree, never in it: a slug has no dot, so no run's worktree is named so.
 export const recordOf = (root: string, slug: string) => `${root.replace(/[\\/]+$/, '')}/.factory/${slug}.record`
 
 // An agent's closing lines: the builder ends with a two-line summary of what it changed.
