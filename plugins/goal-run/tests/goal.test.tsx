@@ -777,6 +777,10 @@ describe('one goal per repository, whichever worktree the session is in', () => 
     expect(projectFrom('/repo/.claude/worktrees/a', '/repo/.git')).toBe('/repo')
     expect(projectFrom('C:\\work\\api-wt', 'C:\\work\\api\\.git')).toBe('C:\\work\\api')
     expect(projectFrom('/scratch', '')).toBe('/scratch')
+    // A session rooted in a subfolder: git answers relative to it.
+    expect(projectFrom('/repo/sub', '../.git')).toBe('/repo')
+    expect(projectFrom('/repo/a/b', '../../.git\n')).toBe('/repo')
+    expect(projectFrom('C:\\repo\\sub', '..\\.git')).toBe('C:\\repo')
   })
 
   test("a goal saved from the main checkout is there in a worktree session", async ($, on) => {

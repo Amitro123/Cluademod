@@ -135,10 +135,21 @@ export function takeOverArgs(text: string, origin?: { kind: string; name?: strin
 // What a project's saved goal and to-do list are keyed by: the main repository, the same for each of
 // its git worktrees (a session in a worktree has a root of its own), else the session's root.
 // `git` answers `--git-common-dir` relative to the root in the main checkout, absolute in a worktree.
+// From a subfolder git answers `../.git`, so `.` and `..` are resolved (older gits lack
+// --path-format=absolute). The result keeps the root's separator.
 export function projectFrom(root: string, commonDir: string): string {
   const r = root.replace(/[\\/]+$/, '')
   const dir = commonDir.trim()
   if (!dir) return r
-  const abs = /^([a-zA-Z]:)?[\\/]/.test(dir) ? dir : `${r}/${dir}`
-  return abs.replace(/[\\/]+$/, '').replace(/[\\/]\.git$/, '').replace(/[\\/]\.$/, '')
+  const sep = r.includes('\\') ? '\\' : '/'
+  const abs = /^([a-zA-Z]:)?[\\/]/.test(dir) ? dir : `${r}${sep}${dir}`
+  const lead = /^([a-zA-Z]:)?[\\/]/.exec(abs)?.[0] ?? ''
+  const parts: string[] = []
+  for (const part of abs.slice(lead.length).split(/[\\/]+/)) {
+    if (!part || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  if (parts.at(-1) === '.git') parts.pop()
+  return lead.replace(/[\\/]$/, sep) + parts.join(sep)
 }
