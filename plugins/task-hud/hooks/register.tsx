@@ -157,11 +157,21 @@ export const register: Register = on => {
     return { text: 'Sub-agents pane opened.' }
   })
 
+  // Whether the next turn's prompt is the person's: another mod's ("Start this item from my to-do
+  // list:") doesn't title the band.
+  let isPersons = true
+  on('prompt.submit', async ($, e, next) => {
+    isPersons = e.origin.kind !== 'plugin'
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   // A new request from the person: remember it as the band's title, and drop a finished list.
   on('turn.start', async ($, e, next) => {
     if (e.agentId !== undefined || !e.text) return next(e)
-    await update($, lastPrompt, () => e.text)
-    await update($, retitle, () => true)
+    if (isPersons) {
+      await update($, lastPrompt, () => e.text)
+      await update($, retitle, () => true)
+    }
     const list = await read($, todos)
     if (list.length && list.every(t => t.status === 'completed')) await update($, todos, () => [])
     return next(e)

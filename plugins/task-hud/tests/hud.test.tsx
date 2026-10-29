@@ -115,6 +115,32 @@ describe('band', () => {
     expect(await band()).toMatch(/Now the release notes/)
   })
 
+  test("another mod's prompt doesn't title the band; the person's own does", async ($, on) => {
+    engine(on)
+    on('ui.render', ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return <Box />
+    })
+    on('prompt.submit', (_, e) => ({ text: e.text, context: e.context }))
+    const write = (names: string[]) => $.tool.call({ tool: 'TodoWrite', todos: names.map(n => ({ content: n, activeForm: n, status: 'pending' })) } as never)
+    const band = async () => {
+      const ui = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+      const t = await texts(ui)
+      await ui.unmount()
+      return t
+    }
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+    await $.prompt.submit({ text: 'Video prep', origin: { kind: 'composer' } } as never)
+    await $.turn.start({ text: 'Video prep', turnId: 't1' })
+    await write(['A', 'B'])
+    const start = 'Start this item from my to-do list:\n- id k1: "Fix the upload"'
+    await $.prompt.submit({ text: start, origin: { kind: 'plugin', name: 'followups' } } as never)
+    await $.turn.start({ text: start, turnId: 't2' })
+    await write(['C', 'D'])
+    expect(await band()).toMatch(/Video prep/)
+    expect(await band()).not.toMatch(/Start this item/)
+  })
+
   test('a TaskCreate appended in a new turn keeps the title', async ($, on) => {
     engine(on)
     on('ui.render', ($, e) => {
