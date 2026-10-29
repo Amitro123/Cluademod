@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
-import { FACTORY_SOURCE, factoryChosenForGoal, factoryPlanApprovedArgs, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
+import { FACTORY_SOURCE, FACTORY_START_TOOL, factoryChosenForGoal, factoryPlanApprovedArgs, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
 // The goal-run tests import the start-prompt parser from here, as before it was shared.
 export { parseStartPrompt }
 
@@ -497,6 +497,21 @@ async function keepSideApart($: EngineInterface) {
   await update($, side, cur => (!cur ? cur : cur.isLive ? { ...cur, isAsking: false } : null))
 }
 
+// Beside a one-item Start from followups while a goal is open and the factory is installed: Claude asks
+// the person, in the question dialog, whether the factory runs the item. The trigger is this mod's; the
+// question is Claude's, inside the turn. Unasked, the item is simply worked here, as before.
+const ASK_FACTORY = '🏭 Run as factory'
+const ASK_HERE = 'Do it here'
+export function factoryOffer(item: { id: string; title: string; detail?: string; where?: string }, goal: string): string {
+  const feature = `${item.title}${item.detail ? ` — ${item.detail}` : ''}${item.where ? ` (${item.where})` : ''}`
+  return [
+    `The person has a session goal open ("${goal}") and the factory mod is installed.`,
+    `Before any work on this to-do item, ask them with AskUserQuestion: whether to run it through the factory (spec, build on its own branch, reviews, PR) or do it here. Options exactly "${ASK_FACTORY}" and "${ASK_HERE}".`,
+    `If they pick the factory: call ${FACTORY_START_TOOL} with feature ${JSON.stringify(feature)} and followupId ${JSON.stringify(item.id)}, then stop; don't do the work yourself.`,
+    'If they pick doing it here, or answer anything else: do the item as the message asks.',
+  ].join('\n')
+}
+
 const isTaskStatus = (s: unknown): s is TaskStatus => s === 'pending' || s === 'in_progress' || s === 'done'
 
 export const register: Register = (on, options) => {
@@ -603,6 +618,11 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    // The factory question's turn is over and the item stayed here: the band asks about the goal now.
+    if (e.agentId === undefined && (await read($, side))?.isOffered) {
+      const g = await read($, goal)
+      await update($, side, cur => (cur ? { ...cur, isOffered: false, isAsking: g?.status === 'active' } : cur))
+    }
     if (e.agentId === undefined && unsaved) await save($)
     return r
   }).catch(($, e, next) => next(e))
@@ -777,7 +797,9 @@ export const register: Register = (on, options) => {
     if (e.origin.kind === 'plugin' && e.origin.name === TODO_PLUGIN) {
       const items = parseStartPrompt(e.text)
       if (g && items.length) {
-        await update($, side, () => ({ items, tokens: 0, isAsking: g.status === 'active', taskIds: [], doneIds: [], isLive: true }))
+        const isOffered = items.length === 1 && g.status !== 'done' && g.source !== FACTORY_SOURCE && (await checkFactory($))
+        await update($, side, () => ({ items, tokens: 0, isAsking: g.status === 'active' && !isOffered, taskIds: [], doneIds: [], isLive: true, ...(isOffered ? { isOffered } : {}) }))
+        if (isOffered) return next({ ...e, context: [...(e.context ?? []), factoryOffer(items[0]!, g.text)] })
       }
       return next(e)
     }
@@ -803,6 +825,11 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     if (e.tool_name === TODO_DONE_TOOL && parseDoneResult(toolText(e.tool_response))) {
       await closeFromTodo($, String((e.tool_input as { id?: unknown } | null)?.id ?? '').trim())
+    }
+    // The person sent the item to the factory: it's the factory's run now, not a side job of the goal.
+    if (e.tool_name === FACTORY_START_TOOL && /^Factory run started/.test(toolText(e.tool_response))) {
+      const id = String((e.tool_input as { followupId?: unknown } | null)?.followupId ?? '')
+      await update($, side, cur => (cur?.isOffered && cur.items.some(it => it.id === id) ? null : cur))
     }
     return r
   }).catch(($, e, next) => next(e))

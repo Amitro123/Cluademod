@@ -309,13 +309,69 @@ describe('work started from the followups to-do list', () => {
     return w
   }
 
-  test("with the factory installed, a one-item Start is still a side job: only followups' 🏭 sends an item to the factory", async ($, on) => {
-    on('command.list', () => ({ value: [{ name: 'factory', description: 'f', source: 'plugin' }] }) as never)
-    await halfway($, on)
-    await $.prompt.submit(fromTodo)
-    const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
-    expect(await texts(band)).toMatch(/Add to your goal/)
-    await band.unmount()
+  describe('with the factory installed, Claude asks whether the factory runs it', () => {
+    const factoryHere = (on: On) => {
+      on('command.list', () => ({ value: [{ name: 'factory', description: 'f', source: 'plugin' }] }) as never)
+      on('classic.PostToolUse', () => ({}) as never)
+    }
+    const endTurn = ($: Engine) => $.turn.complete({ answer: 'x', reason: 'answer', durationMs: 1, isAborted: false, turnId: 't9' } as never)
+    const bandSays = async ($: Engine) => {
+      const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+      const t = await texts(band)
+      await band.unmount()
+      return t
+    }
+
+    test('one item while a goal is open: the question goes beside the prompt, and the band waits for the turn', async ($, on) => {
+      factoryHere(on)
+      await halfway($, on)
+      const r = await $.prompt.submit(fromTodo)
+      const ctx = (r.context ?? []).join('\n')
+      expect(ctx).toMatch(/ask them with AskUserQuestion/)
+      expect(ctx).toMatch(/mcp__factory__start with feature "Rotate the dev key — A real-looking key is committed \(\.env\.example:3\)" and followupId "fu-1"/)
+      expect(ctx).not.toMatch(/Session goal/)
+      expect(await bandSays($)).not.toMatch(/Add to your goal/)
+      // Claude asked, the person chose here: once the turn ends, the band asks about the goal.
+      await endTurn($)
+      expect(await bandSays($)).toMatch(/Add to your goal/)
+    })
+
+    test('the person picked the factory: once its run starts, the item is no side job of the goal', async ($, on) => {
+      factoryHere(on)
+      await halfway($, on)
+      await $.prompt.submit(fromTodo)
+      await $.classic.PostToolUse({ tool_name: 'mcp__factory__start', tool_input: { feature: 'Rotate the dev key', followupId: 'fu-1' }, tool_response: [{ type: 'text', text: 'Factory run started: Rotate the dev key.' }], tool_use_id: 'u7' } as never)
+      await endTurn($)
+      expect(await bandSays($)).not.toMatch(/Add to your goal/)
+    })
+
+    test('a factory run that failed to start leaves the side job as it was', async ($, on) => {
+      factoryHere(on)
+      await halfway($, on)
+      await $.prompt.submit(fromTodo)
+      await $.classic.PostToolUse({ tool_name: 'mcp__factory__start', tool_input: { feature: 'x', followupId: 'fu-1' }, tool_response: [{ type: 'text', text: 'The factory needs a git repository.' }], tool_use_id: 'u8' } as never)
+      await endTurn($)
+      expect(await bandSays($)).toMatch(/Add to your goal/)
+    })
+
+    test('no question for two items, or with no goal open', async ($, on) => {
+      on('command.list', () => ({ value: [{ name: 'factory', description: 'f', source: 'plugin' }] }) as never)
+      await halfway($, on)
+      const two = ['Start these 2 items from my to-do list, one after the other:', '- id fu-1: Rotate the dev key', '- id fu-2: Update the docs', 'Do the work.'].join('\n')
+      const r2 = await $.prompt.submit({ text: two, wait: false, origin: { kind: 'plugin', name: 'followups' } } as never)
+      expect((r2.context ?? []).join('\n')).not.toMatch(/AskUserQuestion/)
+      expect(await bandSays($)).toMatch(/Add to your goal/)
+      await $.command.run({ command: 'session-goal', args: 'clear' } as never)
+      const r0 = await $.prompt.submit(fromTodo)
+      expect((r0.context ?? []).join('\n')).not.toMatch(/AskUserQuestion/)
+    })
+
+    test('without the factory installed, no question', async ($, on) => {
+      await halfway($, on)
+      const r = await $.prompt.submit(fromTodo)
+      expect((r.context ?? []).join('\n')).not.toMatch(/AskUserQuestion/)
+      expect(await bandSays($)).toMatch(/Add to your goal/)
+    })
   })
 
   test('kept separate: no goal reminder beside it, and its tokens counted outside the goal', async ($, on) => {

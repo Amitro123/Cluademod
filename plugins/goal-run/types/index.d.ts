@@ -52,6 +52,9 @@ export type Side = {
   doneIds: string[]
   // Its turn's work is still the side job's: false once the person sends a prompt of their own.
   isLive: boolean
+  // One item started while the goal is open, with the factory installed: Claude first asks the person
+  // whether the factory runs it. The band waits until that turn ends.
+  isOffered?: boolean
 }
 // What the band above the prompt asks: for a new goal, or whether to go on with an unfinished one.
 export type Asking = 'new' | 'resume' | null
