@@ -37,7 +37,9 @@ all runs so far, against 3 runs without it:
   the `checks` and `setup` options for runs nobody watches: those commands aren't asked about.
 - **A program that isn't installed.** A detected check whose program can't start here (maven,
   gradle, dotnet...) is recorded as not installed and skipped, not failed: the builder isn't sent
-  back to fix it, and the approver is told it didn't run.
+  back to fix it, and the approver is told it didn't run. Only a program that can't be started
+  counts: an exit code 127 from one that started (a script whose inner command is missing) is a
+  failure.
 
 ## Still open
 

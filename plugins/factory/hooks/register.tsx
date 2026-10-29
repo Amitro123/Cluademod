@@ -111,10 +111,11 @@ async function git($: EngineInterface, args: string[], cwd?: string) {
 }
 
 // A command that couldn't start (its program isn't installed) says so: `notStarted`. process.run
-// rejects for that and for a timeout; exit 127 is a shell's or a wrapper's "command not found".
+// rejects for that and for a timeout. An exit code the process returned is its own, 127 included:
+// a script (npm, make) passes on the 127 of a command missing inside it, which is a failure.
 async function run$($: EngineInterface, argv: string[], cwd: string) {
   return $.process.run(argv, { cwd, timeoutMs: CHECK_TIMEOUT_MS }).then(
-    out => ({ ...out, notStarted: out.exitCode === 127 }),
+    out => ({ ...out, notStarted: false }),
     err => ({ exitCode: 1, stdout: '', stderr: String(err), notStarted: couldNotStart(err) }),
   )
 }
@@ -361,6 +362,13 @@ async function onBuilt($: EngineInterface) {
     const fresh = untracked.filter(p => !neverCommit(p))
     let out = await git($, ['add', '-u'], r.worktree)
     if (out.exitCode === 0 && fresh.length) out = await git($, ['add', '--', ...fresh], r.worktree)
+    // A new file the builder staged itself (git add .env) is in the index, not untracked: unstaged too.
+    const added = out.exitCode === 0 ? await git($, ['diff', '--cached', '--name-only', '--diff-filter=A', '-z'], r.worktree) : null
+    const sneaked = added?.exitCode === 0 ? added.stdout.split('\0').filter(p => p && neverCommit(p)) : []
+    if (sneaked.length) {
+      out = await git($, ['reset', '-q', '--', ...sneaked], r.worktree)
+      skipped.push(...leftOut(sneaked).filter(p => !skipped.includes(p)))
+    }
     const staged = out.exitCode === 0 ? await git($, ['diff', '--cached', '--quiet'], r.worktree) : out
     if (out.exitCode === 0 && staged.exitCode !== 0) out = await git($, ['commit', '-m', `factory: ${titleOf(r.feature, 64)}`, ...(titleOf(r.feature, 64) !== r.feature.trim() ? ['-m', r.feature.trim()] : [])], r.worktree)
     if (out.exitCode !== 0) {
@@ -368,6 +376,13 @@ async function onBuilt($: EngineInterface) {
       return
     }
     if (skipped.length) await patch($, cur => ({ ...cur, skipped }))
+  }
+  // What the builder committed itself never went through the filter above.
+  const committed = await git($, ['diff', '--name-only', '--diff-filter=A', '-z', r.base, 'HEAD'], r.worktree)
+  const leaked = committed.exitCode === 0 ? committed.stdout.split('\0').filter(p => p && neverCommit(p)) : []
+  if (leaked.length) {
+    await block($, { on: 'builder' }, `The builder committed files the factory never commits: ${leftOut(leaked).join(', ')}. Take them out of the branch's history, then retry.`)
+    return
   }
   const stat = await git($, ['diff', '--stat', r.base, 'HEAD'], r.worktree)
   if (stat.exitCode === 0 && stat.stdout.trim()) {
@@ -566,6 +581,7 @@ async function onApprover($: EngineInterface, answer: string, why: string) {
   // An approver that ended without a decision decided nothing: Retry, not an escalation to approve past.
   if (why) return block($, { on: 'start', role: 'approver' }, `The approver stopped before deciding: ${why}. Retry runs it again.`, r => ({ ...r, steps: { ...r.steps, approver: { ...r.steps.approver, state: 'fail' } } }))
   const parsed = parseDecision(answer)
+  if (parsed.decision === null) return block($, { on: 'start', role: 'approver' }, `${parsed.reason} Retry runs it again.`, r => ({ ...r, steps: { ...r.steps, approver: { ...r.steps.approver, state: 'fail' } } }))
   // With no check run, nothing was verified by running it: an APPROVE becomes the person's call
   // (Approve PR anyway is their override).
   const r0 = await read($, run)

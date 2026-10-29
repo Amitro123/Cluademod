@@ -29,7 +29,7 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, planResult = PLAN_APPROVED_FOR_FACTORY, checksOk = 'Run them' as string | null, missing = [] as string[], noRepo = false } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, planResult = PLAN_APPROVED_FOR_FACTORY, checksOk = 'Run them' as string | null, missing = [] as string[], noRepo = false, stagedNew = [] as string[], committedNew = [] as string[] } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
   // The last commit of the files that define the checks: a test moves it to change them.
@@ -82,6 +82,9 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
       return err ? ({ value: { exitCode: 128, stdout: '', stderr: err } } as never) : ok()
     }
     if (cmd.startsWith('git diff --stat')) return ok(' src/mw.ts | 40 +++\n 1 file changed')
+    // New files in the index (`stagedNew`, the builder's own git add), and new files committed since the base.
+    if (cmd === 'git diff --cached --name-only --diff-filter=A -z') return ok(stagedNew.join('\0'))
+    if (cmd === 'git diff --name-only --diff-filter=A -z abc123 HEAD') return ok(committedNew.join('\0'))
     if (cmd === 'git status --porcelain') return ok(dirty ? ' M src/mw.ts\n?? src/limit/new.ts\n?? node_modules/\n?? .env\n?? certs/server.key\n' : '')
     // -z -uall: each untracked file on its own, NUL-separated, unquoted (a new folder's .env too).
     if (cmd === 'git status --porcelain -z -uall') return ok(dirty ? [' M src/mw.ts', '?? src/limit/new.ts', '?? src/limit/שלום.ts', '?? app/.env', '?? app/index.js', '?? node_modules/x/a.js', '?? .env', '?? certs/server.key', 'R  src/b.ts', 'src/a.ts', ''].join('\0') : '')
@@ -327,6 +330,24 @@ describe('a run from the feature to the PR', () => {
     await command($, 'stop')
     await command($, 'Second feature')
     expect(w.written['/repo/.git/info/exclude']).toBe('.factory/\n')
+  })
+
+  test('a credential the builder staged itself is unstaged before the commit, and listed as left out', async ($, on) => {
+    const w = engine(on, { dirty: true, stagedNew: ['config/.env', 'src/limit/new.ts'] })
+    await toReviews($)
+    const at = (c: string) => w.ran.indexOf(c)
+    expect(at('git reset -q -- config/.env')).toBeGreaterThan(-1)
+    expect(at('git commit -m factory: Rate limiter')).toBeGreaterThan(at('git reset -q -- config/.env'))
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/Left out of the commits: .*config\/\.env/)
+    await pane.unmount()
+  })
+
+  test('a credential the builder committed itself stops the run before the checks', async ($, on) => {
+    const w = engine(on, { committedNew: ['src/mw.ts', 'certs/server.key'] })
+    await toReviews($)
+    expect(w.ran).not.toContain('npm test')
+    expect(await bandText($)).toMatch(/committed files the factory never commits: certs\/server\.key/)
   })
 
   test("a commit that fails stops the run, for the person to look at", async ($, on) => {
@@ -729,18 +750,21 @@ describe('the parsers', () => {
     expect(parseVerdict('VERDICT: PASS\n- [blocker] a.ts:1 secret in code').state).toBe('changes')
   })
 
-  test('decisions: anything unclear escalates', () => {
+  test('decisions: no decision is none (null); both is an escalation', () => {
     expect(parseDecision('DECISION: APPROVE\nREASON: good')).toEqual({ decision: 'APPROVE', reason: 'good' })
-    expect(parseDecision('hmm').decision).toBe('ESCALATE')
+    expect(parseDecision('hmm').decision).toBeNull()
+    expect(parseDecision('DECISION: APPROVE\nOn reflection:\nDECISION: ESCALATE').decision).toBe('ESCALATE')
+    expect(parseDecision('DECISION: ESCALATE\nDECISION: APPROVE\nREASON: fine').decision).toBe('ESCALATE')
   })
 
-  test("an answer that echoes the prompt's template is read by its own last line, not the template's first option", () => {
+  test("an answer that echoes the prompt's template is read by its own line, not the template's first option", () => {
     expect(parseDecision('End with DECISION: APPROVE or DECISION: ESCALATE and a REASON: line.\nDECISION: ESCALATE\nREASON: x')).toEqual({ decision: 'ESCALATE', reason: 'x' })
-    expect(parseDecision('DECISION: APPROVE or DECISION: ESCALATE').decision).toBe('ESCALATE')
+    expect(parseDecision('DECISION: APPROVE or DECISION: ESCALATE').decision).toBeNull()
     expect(parseVerdict('The format is VERDICT: PASS or VERDICT: CHANGES.\nVERDICT: CHANGES\nFINDINGS:\n- [major] a.ts:1 wrong').state).toBe('changes')
     expect(parseVerdict('VERDICT: PASS or VERDICT: CHANGES').state).toBe('changes')
-    // A reviewer that changed its mind: the last verdict counts.
-    expect(parseVerdict('VERDICT: CHANGES\nOn a second look it is fine.\nVERDICT: PASS').state).toBe('pass')
+    // Two verdicts that disagree: changes, whichever came last.
+    expect(parseVerdict('VERDICT: CHANGES\nOn a second look it is fine.\nVERDICT: PASS')).toMatchObject({ state: 'changes', findings: [{ text: 'The reviewer gave both VERDICT: PASS and VERDICT: CHANGES.' }] })
+    expect(parseVerdict('Last round: VERDICT: PASS\nVERDICT: CHANGES\n- [major] a.ts:1 wrong').state).toBe('changes')
   })
 
   test('the plan prompt quotes the feature as JSON, so a quote in it stays inside the string', () => {
@@ -871,6 +895,20 @@ describe('a reviewer or the approver that fails is retried, never approved past'
     expect(await command($, 'approve')).toMatch(/^Nothing to approve/)
     await command($, 'retry')
     expect(last(w)).toMatchObject({ id: 'a7', subagentType: 'factory:approver' })
+  })
+
+  test('an approver that answered with no DECISION decided nothing: Retry, not Approve PR', async ($, on) => {
+    const w = engine(on)
+    await toReviews($)
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    await answer($, 'a5', 'The change looks reasonable overall.')
+    const t = await bandText($)
+    expect(t).toMatch(/gave no DECISION line\. Retry runs it again/)
+    expect(t).not.toMatch(/Approve PR/)
+    expect(await command($, 'approve')).toMatch(/^Nothing to approve/)
+    await command($, 'retry')
+    expect(last(w)).toMatchObject({ subagentType: 'factory:approver' })
   })
 
   test("a reviewer that failed doesn't send the builder back: Retry runs that reviewer alone", async ($, on) => {
@@ -1234,7 +1272,7 @@ describe('the frame timer', () => {
 })
 
 describe("a check whose program isn't installed is skipped, not failed", () => {
-  test('not installed (spawn ENOENT, exit 127): no builder round for it; the approver is told', { options: { checks: 'mvn -q test; sh-missing; npm test' } } as never, async ($: Engine, on: On) => {
+  test('not installed (spawn ENOENT): no builder round for it; the approver is told', { options: { checks: 'mvn -q test; npm test' } } as never, async ($: Engine, on: On) => {
     const w = engine(on, { missing: ['mvn -q test'] })
     await toReviews($)
     // Straight on to the reviewers: the builder isn't sent to install maven.
@@ -1243,8 +1281,16 @@ describe("a check whose program isn't installed is skipped, not failed", () => {
     await answer($, 'a3', PASS)
     await answer($, 'a4', PASS)
     const prompt = last(w).prompt
-    expect(prompt).toContain('mvn -q test not installed, not run, sh-missing not installed, not run, npm test passed')
-    expect(prompt).toContain('Not installed here, so not run: mvn -q test, sh-missing.')
+    expect(prompt).toContain('mvn -q test not installed, not run, npm test passed')
+    expect(prompt).toContain('Not installed here, so not run: mvn -q test.')
+  })
+
+  test('exit 127 from a check that started (a script whose inner command is missing) is a failure', { options: { checks: 'sh-missing; npm test' } } as never, async ($: Engine, on: On) => {
+    const w = engine(on)
+    await toReviews($)
+    // The builder gets a round for it, as for any red check, and no reviewer starts yet.
+    expect(last(w)).toMatchObject({ subagentType: 'factory:builder' })
+    expect(last(w).prompt).toContain('$ sh-missing')
   })
 
   test('a timeout is a failure, not a missing program', () => {
