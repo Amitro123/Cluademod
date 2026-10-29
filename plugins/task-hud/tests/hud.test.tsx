@@ -305,6 +305,18 @@ describe('task tools', () => {
     await $.tool.call({ tool: 'TaskUpdate', taskId: 't-B', status: 'deleted' } as never)
     expect(await band()).toMatch(/Tasks 1\/1/)
   })
+
+  test("a sub-agent's TaskCreate and TaskUpdate leave the main to-do list as it is", async ($, on) => {
+    engine(on)
+    on('ui.render', ($, e) => { const { Text } = $.ui.resolve(e); return <Text>engine</Text> })
+    await $.turn.start({ text: 'Plan', turnId: 't1' })
+    await $.tool.call({ tool: 'TaskCreate', subject: 'A', description: 'A' } as never)
+    await $.tool.call({ tool: 'TaskCreate', subject: 'Inner', description: 'Inner', agentId: 'a1' } as never)
+    await $.tool.call({ tool: 'TaskUpdate', taskId: 't-A', status: 'completed', agentId: 'a1' } as never)
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' } as never)
+    expect(await texts(ui)).toMatch(/Tasks 0\/1/)
+    await ui.unmount()
+  })
 })
 
 // A spawn's input without a description, for tests that name each agent.

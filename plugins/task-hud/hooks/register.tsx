@@ -180,7 +180,8 @@ export const register: Register = on => {
   on('tool.call', { tool: 'TaskCreate' }, async ($, e, next) => {
     const ran = await next(e)
     const id = (ran.result as { task?: { id?: string } } | undefined)?.task?.id
-    if (id) {
+    // A sub-agent's tasks are its own, not the main conversation's to-do list.
+    if (id && e.agentId === undefined) {
       await setTodos($, list => [...list, { id, subject: e.subject, activeForm: e.activeForm ?? e.subject, status: 'pending' }])
     }
     return ran
@@ -189,7 +190,7 @@ export const register: Register = on => {
   on('tool.call', { tool: 'TaskUpdate' }, async ($, e, next) => {
     const ran = await next(e)
     const ok = (ran.result as { success?: boolean } | undefined)?.success
-    if (ok) {
+    if (ok && e.agentId === undefined) {
       await update($, todos, list =>
         e.status === 'deleted'
           ? list.filter(t => t.id !== e.taskId)
