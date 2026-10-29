@@ -1255,7 +1255,7 @@ describe('the frame timer', () => {
 })
 
 describe("a check whose program isn't installed is skipped, not failed", () => {
-  test('not installed (spawn ENOENT, exit 127): no builder round for it; the approver is told', { options: { checks: 'mvn -q test; sh-missing; npm test' } } as never, async ($: Engine, on: On) => {
+  test('not installed (spawn ENOENT): no builder round for it; the approver is told', { options: { checks: 'mvn -q test; npm test' } } as never, async ($: Engine, on: On) => {
     const w = engine(on, { missing: ['mvn -q test'] })
     await toReviews($)
     // Straight on to the reviewers: the builder isn't sent to install maven.
@@ -1264,8 +1264,16 @@ describe("a check whose program isn't installed is skipped, not failed", () => {
     await answer($, 'a3', PASS)
     await answer($, 'a4', PASS)
     const prompt = last(w).prompt
-    expect(prompt).toContain('mvn -q test not installed, not run, sh-missing not installed, not run, npm test passed')
-    expect(prompt).toContain('Not installed here, so not run: mvn -q test, sh-missing.')
+    expect(prompt).toContain('mvn -q test not installed, not run, npm test passed')
+    expect(prompt).toContain('Not installed here, so not run: mvn -q test.')
+  })
+
+  test('exit 127 from a check that started (a script whose inner command is missing) is a failure', { options: { checks: 'sh-missing; npm test' } } as never, async ($: Engine, on: On) => {
+    const w = engine(on)
+    await toReviews($)
+    // The builder gets a round for it, as for any red check, and no reviewer starts yet.
+    expect(last(w)).toMatchObject({ subagentType: 'factory:builder' })
+    expect(last(w).prompt).toContain('$ sh-missing')
   })
 
   test('a timeout is a failure, not a missing program', () => {

@@ -111,10 +111,11 @@ async function git($: EngineInterface, args: string[], cwd?: string) {
 }
 
 // A command that couldn't start (its program isn't installed) says so: `notStarted`. process.run
-// rejects for that and for a timeout; exit 127 is a shell's or a wrapper's "command not found".
+// rejects for that and for a timeout. An exit code the process returned is its own, 127 included:
+// a script (npm, make) passes on the 127 of a command missing inside it, which is a failure.
 async function run$($: EngineInterface, argv: string[], cwd: string) {
   return $.process.run(argv, { cwd, timeoutMs: CHECK_TIMEOUT_MS }).then(
-    out => ({ ...out, notStarted: out.exitCode === 127 }),
+    out => ({ ...out, notStarted: false }),
     err => ({ exitCode: 1, stdout: '', stderr: String(err), notStarted: couldNotStart(err) }),
   )
 }
