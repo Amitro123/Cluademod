@@ -734,6 +734,15 @@ describe('the parsers', () => {
     expect(parseDecision('hmm').decision).toBe('ESCALATE')
   })
 
+  test("an answer that echoes the prompt's template is read by its own last line, not the template's first option", () => {
+    expect(parseDecision('End with DECISION: APPROVE or DECISION: ESCALATE and a REASON: line.\nDECISION: ESCALATE\nREASON: x')).toEqual({ decision: 'ESCALATE', reason: 'x' })
+    expect(parseDecision('DECISION: APPROVE or DECISION: ESCALATE').decision).toBe('ESCALATE')
+    expect(parseVerdict('The format is VERDICT: PASS or VERDICT: CHANGES.\nVERDICT: CHANGES\nFINDINGS:\n- [major] a.ts:1 wrong').state).toBe('changes')
+    expect(parseVerdict('VERDICT: PASS or VERDICT: CHANGES').state).toBe('changes')
+    // A reviewer that changed its mind: the last verdict counts.
+    expect(parseVerdict('VERDICT: CHANGES\nOn a second look it is fine.\nVERDICT: PASS').state).toBe('pass')
+  })
+
   test('a feature loses a paste wrapper', () => {
     expect(cleanFeature('<pasted_content id="x">\n  Fix it  \n</pasted_content id="x">')).toBe('Fix it')
   })

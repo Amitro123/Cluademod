@@ -82,10 +82,21 @@ export const skillsLine = (names: readonly string[]) =>
 
 export const modelOf = (run: Pick<Run, 'models'> | null | undefined, role: Role) => run?.models?.[role] ?? ROLES[role].model
 
+// The answer's last line that holds exactly one `KEY: <option>`: an answer that echoes the prompt's
+// template ("VERDICT: PASS or VERDICT: CHANGES", a line with both) before its own isn't read as it.
+function lastSingle(answer: string, key: string, options: string): string | undefined {
+  let found: string | undefined
+  for (const line of answer.split('\n')) {
+    const all = [...line.matchAll(new RegExp(`${key}:\\s*(${options})`, 'gi'))]
+    if (all.length === 1) found = all[0]![1]!.toUpperCase()
+  }
+  return found
+}
+
 // A reviewer ends with:  VERDICT: PASS | CHANGES  and  FINDINGS:  "- [major] path:line what and why".
 // No verdict reads as CHANGES, so a confused reviewer can't wave a change through.
 export function parseVerdict(answer: string): { state: 'pass' | 'changes'; findings: Finding[] } {
-  const verdict = /VERDICT:\s*(PASS|CHANGES)/i.exec(answer)?.[1]?.toUpperCase()
+  const verdict = lastSingle(answer, 'VERDICT', 'PASS|CHANGES')
   const findings: Finding[] = []
   for (const raw of answer.split('\n')) {
     const m = /^\s*[-*]\s*\[(blocker|major|minor)\]\s+(\S+)\s+[—–-]?\s*(.+)$/i.exec(raw)
@@ -99,8 +110,8 @@ export function parseVerdict(answer: string): { state: 'pass' | 'changes'; findi
 
 // The approver ends with:  DECISION: APPROVE | ESCALATE  and  REASON: one line.
 export function parseDecision(answer: string): { decision: 'APPROVE' | 'ESCALATE'; reason: string } {
-  const decision = /DECISION:\s*(APPROVE|ESCALATE)/i.exec(answer)?.[1]?.toUpperCase() === 'APPROVE' ? 'APPROVE' : 'ESCALATE'
-  const reason = /REASON:\s*(.+)/i.exec(answer)?.[1]?.trim() ?? (decision === 'ESCALATE' ? 'The approver gave no clear decision.' : '')
+  const decision = lastSingle(answer, 'DECISION', 'APPROVE|ESCALATE') === 'APPROVE' ? 'APPROVE' : 'ESCALATE'
+  const reason = [...answer.matchAll(/REASON:\s*(.+)/gi)].at(-1)?.[1]?.trim() ?? (decision === 'ESCALATE' ? 'The approver gave no clear decision.' : '')
   return { decision, reason }
 }
 
