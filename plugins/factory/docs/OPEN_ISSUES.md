@@ -48,3 +48,8 @@ all runs so far, against 3 runs without it:
 - **Two tests fail on Windows only** ("the worktree folder is kept out of git through the exclude
   file", "every step's words go to the run's record"). They pass on Linux and macOS; likely path
   separators in the worktree, exclude and record paths.
+
+## Findings 2026-10-29
+
+A review of one live run (sample size 1, run on the installed 0.5.0, not this source) is in
+[docs/findings/2026-10-29-factory-run-review.md](findings/2026-10-29-factory-run-review.md): tests the builder ran never reached the approver, "open PR" shown done while only requested, repo rules (generated files) not reaching the roles, and more.
