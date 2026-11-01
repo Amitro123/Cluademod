@@ -238,7 +238,8 @@ export function buildPrompt(run: Run, findings: Finding[], failed: Check[], { ag
 }
 
 // Why a command run rejected: it couldn't start (its program isn't installed), unless it timed out.
-export const couldNotStart = (err: unknown) => !/time(d)?\s*out/i.test(String(err))
+// "timeoutMs" in a refusal of the call itself isn't a timeout.
+export const couldNotStart = (err: unknown) => !/time(d)?\s*out(?!ms)/i.test(String(err))
 
 // The checks that actually ran: one whose program isn't installed here was skipped, not run.
 export const ranChecks = (run: Pick<Run, 'checks'>) => run.checks.filter(c => !c.isMissing)
@@ -293,11 +294,14 @@ export function planPrompt(run: Run): string {
 }
 
 // To the main Claude, once approved: the PR, through whatever GitHub access the session has.
+// The branch the PR goes into: the one the run is built on, without its remote's name.
+export const prBase = (run: Pick<Run, 'baseRef'>) => run.baseRef?.replace(/^(origin|upstream)\//, '') ?? ''
+
 export function prPrompt(run: Run, reason: string): string {
   const minor = run.reviews.flatMap(r => r.findings.filter(f => f.severity === 'minor').map(f => `- ${r.role}: ${f.where} ${f.text}`))
   return [
     `The factory run "${run.feature}" is approved${reason ? ` (${reason})` : ''}.`,
-    `Push branch ${run.branch} (its worktree is ${run.worktree}) and open a pull request from it.`,
+    `Push branch ${run.branch} (its worktree is ${run.worktree}) and open a pull request from it${prBase(run) ? ` into ${prBase(run)} (the branch it is built on; not the repository's default branch)` : ''}.`,
     `Title it after the feature. In the body: what it does (from ${run.specFile}), the checks (${run.checks.map(c => `${c.cmd} ${c.isMissing ? '– not installed' : c.ok ? '✓' : '✗'}`).join(', ') || 'none ran'}), and ${run.round} review round${run.round === 1 ? '' : 's'}: ${run.reviews.map(r => `${r.role} ${r.state === 'pass' ? 'PASS' : 'CHANGES'}`).join(', ')}.`,
     ...(minor.length ? ['List these minor findings under "Not fixed":', ...minor] : []),
     ...(run.followupId ? [`Once the PR is open, call mcp__followups__done with id "${run.followupId}" and the PR's link as the note: the run came from that to-do item.`] : []),
@@ -395,6 +399,97 @@ export function newRun(feature: string, at: number, base: string, root: string, 
 export const isLive = (p: Phase) => p !== 'done' && p !== 'stopped'
 // Waiting for the person, not for an agent or a command.
 export const waitsOnPerson = (p: Phase) => p === 'plan' || p === 'ready' || p === 'needs-human'
+// Waiting for the person: a phase that waits on them, or the question before the checks run.
+export const waitsOnYou = (r: Pick<Run, 'phase' | 'isAskingChecks'>) => waitsOnPerson(r.phase) || !!r.isAskingChecks
+
+const mmss = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+// No action from the run's agent for this long reads as quiet: the band says so, in orange.
+export const QUIET_MS = 5 * 60_000
+const AGENT_PHASES: Phase[] = ['spec', 'build', 'review', 'approve']
+export const isQuiet = (run: Run, now: number) =>
+  AGENT_PHASES.includes(run.phase) && now - (run.activity?.at ?? run.phaseSince ?? now) > QUIET_MS
+
+// Where the run is, in a line: during the checks, which command runs and for how long; while an agent
+// works, its latest action and how long ago; a quiet one, for how long it has been quiet.
+export function statusOf(run: Run, now: number): string {
+  const c = run.phase === 'checks' && !run.isAskingChecks ? run.checking : null
+  if (c) return `${c.isSetup ? 'installing' : 'checks'} ${c.index}/${c.total} · ${c.cmd} · ${mmss(now - c.since)}`
+  if (!AGENT_PHASES.includes(run.phase)) return run.note
+  const last = run.activity?.at ?? run.phaseSince
+  if (last === undefined) return run.note
+  if (isQuiet(run, now)) return `${run.note} · no activity for ${mmss(now - last)}`
+  return run.activity?.calls ? `${run.note} · ${run.activity.text} · ${mmss(now - run.activity.at)} ago` : run.note
+}
+
+// What a tool call of the run's agent reads as, in a few words.
+export function activityText(tool: string, input: Record<string, unknown>): string {
+  const base = (p: unknown) => String(p ?? '').split(/[\\/]/).filter(Boolean).pop() ?? ''
+  const clip = (t: string) => (t.length > 60 ? `${t.slice(0, 59)}…` : t)
+  switch (tool) {
+    case 'Read': return clip(`reading ${base(input.file_path)}`)
+    case 'Write': return clip(`writing ${base(input.file_path)}`)
+    case 'Edit':
+    case 'MultiEdit':
+    case 'NotebookEdit': return clip(`editing ${base(input.file_path ?? input.notebook_path)}`)
+    case 'Bash': return clip(`running ${String(input.description ?? String(input.command ?? '').split('\n')[0])}`)
+    case 'Grep':
+    case 'Glob': return clip(`searching ${String(input.pattern ?? '')}`)
+    case 'Skill': return clip(`loading the ${String(input.skill ?? '')} skill`)
+    default: return clip(`using ${tool.replace(/^mcp__[^_]+__/, '')}`)
+  }
+}
+
+// How far along the run is, 0 to 100: by its step, and within a step by what can be counted (a check's
+// place, the reviewers done) or, for an agent, by its tool calls, creeping toward the step's end.
+export function progressOf(run: Run): number {
+  const creep = (span: number) => {
+    const n = run.activity?.calls ?? 0
+    return span * (n / (n + 15))
+  }
+  switch (run.phase) {
+    case 'spec': return Math.round(2 + creep(13))
+    case 'plan': return 15
+    case 'build': return Math.round((run.round > 0 ? 50 : 20) + creep(run.round > 0 ? 8 : 25))
+    case 'checks': return Math.round(45 + (run.checking && !run.isAskingChecks ? (15 * (run.checking.index - 1)) / run.checking.total : 0))
+    case 'review': {
+      const mine = run.reviews.filter(x => x.round === run.round)
+      return Math.round(60 + (25 * mine.filter(x => x.state !== 'run').length) / Math.max(1, mine.length))
+    }
+    case 'approve': return Math.round(85 + creep(10))
+    case 'ready': return 95
+    case 'done': return 100
+    default: return run.lastProgress ?? 0
+  }
+}
+
+export const progressBar = (pct: number, cells = 12) => {
+  const full = Math.round((Math.max(0, Math.min(100, pct)) / 100) * cells)
+  return `${'▰'.repeat(full)}${'▱'.repeat(cells - full)}`
+}
+
+// Everything about the run, as text: what the main Claude reads from the status tool to say where a run
+// is, what it waits on and where it failed, and where to read more.
+export function statusReport(run: Run, now: number, recordFiles: string[] = []): string {
+  const findings = run.reviews.filter(x => x.round === run.round && x.findings.length)
+  return [
+    `Factory run: ${run.feature}`,
+    `Phase: ${run.phase}${run.blocked ? ` (blocked on ${run.blocked.on})` : ''} · ${progressOf(run)}% · ${statusOf(run, now)}${run.phaseSince ? ` · in this phase for ${mmss(now - run.phaseSince)}` : ''}`,
+    `Branch ${run.branch}, worktree ${run.worktree}, based on ${run.baseRef ? `${run.baseRef} (${run.base.slice(0, 12)})` : run.base.slice(0, 12)}; spec ${run.specFile}.`,
+    ...(run.activity ? [`Last agent action: ${run.activity.role} ${run.activity.text}, ${mmss(now - run.activity.at)} ago (${run.activity.calls} tool calls this step).`] : []),
+    `Steps: ${(Object.keys(run.steps) as (keyof Run['steps'])[]).map(k => `${k} ${run.steps[k].state}`).join(', ')}; reviews round ${run.round}: ${run.reviews.map(x => `${x.role} ${x.state}`).join(', ')}.`,
+    ...(run.stat ? [`Changed: ${run.stat}`] : []),
+    ...(run.checks.length ? ['Checks:', ...run.checks.map(c => `- ${c.isMissing ? 'not installed' : c.isTimedOut ? 'TIMED OUT' : c.ok ? 'passed' : 'FAILED'}: ${c.cmd}${c.tail ? `\n${c.tail.split('\n').slice(-10).map(l => `    ${l}`).join('\n')}` : ''}`)] : []),
+    ...(run.checksNote ? [`Checks note: ${run.checksNote}`] : []),
+    ...(findings.length ? ['Findings this round:', ...findings.flatMap(x => x.findings.map(f => `- ${x.role} [${f.severity}] ${f.where} ${f.text}`))] : []),
+    ...(waitsOnYou(run) ? [`Waits on the person: ${run.note}`] : []),
+    ...(run.record ? [`What each step said: ${run.record}/${recordFiles.length ? ` (${recordFiles.join(', ')})` : ''}`] : []),
+  ].join('\n')
+}
+
 export const tokensOf = (run: Run) => Object.values(run.steps).reduce((n, s) => n + s.tokens, 0) + run.reviews.reduce((n, r) => n + r.tokens, 0)
 export const tok = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n}`)
 

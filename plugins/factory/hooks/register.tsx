@@ -13,6 +13,13 @@ import {
   NOTHING_RAN,
   detectSetup,
   isLive,
+  statusOf,
+  waitsOnYou,
+  activityText,
+  isQuiet,
+  progressBar,
+  progressOf,
+  statusReport,
   neverCommit,
   newRun,
   openFindings,
@@ -53,6 +60,8 @@ import { FACTORY_START_TOOL, factoryArgs, type GoalTask, parseFactoryArgs, parse
 const run = atom({ plugin: 'factory', key: 'run' } as const, null as Run | null)
 const frame = atom({ plugin: 'factory', key: 'frame' } as const, 0)
 const theme = atom({ plugin: 'factory', key: 'theme' } as const, 'dark' as Theme)
+// The time, kept while a check runs, so the band and the pane count its seconds.
+const now = atom({ plugin: 'factory', key: 'now' } as const, 0)
 // The agents of runs that were stopped, newest last: their tool calls stay refused after a new run starts.
 const stoppedAgents = atom({ plugin: 'factory', key: 'stoppedAgents' } as const, [] as string[])
 const MAX_STOPPED = 50
@@ -62,10 +71,12 @@ const PANE_TITLE = 'Factory'
 const PLAN_TOOL = 'mcp__goal-run__plan'
 const MAX_CHECK_ROUNDS = 2
 const MAX_SLUG_TRIES = 5
-const CHECK_TIMEOUT_MS = 600_000
+// How long one check may run before it counts as timed out (the checkTimeout option, in minutes).
+let checkTimeoutMs = 600_000
 const FRAME_MS = 700
 const ACCENT = '#2563eb'
 const START_TOOL = FACTORY_START_TOOL
+const STATUS_TOOL = 'mcp__factory__status'
 const FROM_CONVERSATION = `Start a factory run on the work this conversation is about: call ${START_TOOL} with the feature (what to build, in a short paragraph, naming the file, issue or to-do item it comes from; a to-do item's id as followupId). If there is no such work yet, ask me what the factory should build. Don't do the work yourself.`
 const STARTED_NOTE = "The factory does the work from here: don't start it yourself or propose a plan. Tell the person in one line, and that its plan comes up for their approval."
 const STOPPED_DENY = 'The factory run was stopped. Stop now and answer with one line.'
@@ -90,16 +101,24 @@ function serial(job: () => Promise<void>): Promise<void> {
   return queue
 }
 
+// A move to another phase stamps when it began; a stop to wait keeps where the progress stood.
 async function patch($: EngineInterface, fn: (r: Run) => Run): Promise<Run | null> {
-  return update($, run, cur => (cur ? fn(cur) : cur))
+  const t = await $.clock.now()
+  return update($, run, cur => {
+    if (!cur) return cur
+    const next = fn(cur)
+    if (next.phase === cur.phase) return next
+    const held = next.phase === 'needs-human' || next.phase === 'stopped' ? { lastProgress: progressOf(cur) } : {}
+    return { ...next, ...held, phaseSince: t }
+  })
 }
 
 // A move to a phase the run works in clears what it was blocked on.
-const moveTo = (r: Run, phase: Phase, note: string): Run => ({ ...r, phase, note, blocked: null })
+const moveTo = (r: Run, phase: Phase, note: string): Run => ({ ...r, phase, note, blocked: null, checking: null, isAskingChecks: false })
 
 async function block($: EngineInterface, blocked: Blocked, note: string, fn: (r: Run) => Run = r => r) {
   // A run stopped meanwhile stays stopped.
-  await patch($, r => (isLive(r.phase) ? { ...fn(r), phase: 'needs-human', blocked, note } : r))
+  await patch($, r => (isLive(r.phase) ? { ...fn(r), phase: 'needs-human', blocked, note, checking: null, isAskingChecks: false } : r))
 }
 
 async function git($: EngineInterface, args: string[], cwd?: string) {
@@ -109,10 +128,17 @@ async function git($: EngineInterface, args: string[], cwd?: string) {
 // A command that couldn't start (its program isn't installed) says so: `notStarted`. process.run
 // rejects for that and for a timeout. An exit code the process returned is its own, 127 included:
 // a script (npm, make) passes on the 127 of a command missing inside it, which is a failure.
+// A run that failed at the time limit timed out, however the engine reports it (a rejection naming the
+// timeout, or the killed process's exit).
 async function run$($: EngineInterface, argv: string[], cwd: string) {
-  return $.process.run(argv, { cwd, timeoutMs: CHECK_TIMEOUT_MS }).then(
-    out => ({ ...out, notStarted: false }),
-    err => ({ exitCode: 1, stdout: '', stderr: String(err), notStarted: couldNotStart(err) }),
+  const t0 = await $.clock.now()
+  const atLimit = async () => (await $.clock.now()) - t0 >= checkTimeoutMs - 1_000
+  return $.process.run(argv, { cwd, timeoutMs: checkTimeoutMs }).then(
+    async out => ({ ...out, notStarted: false, timedOut: out.exitCode !== 0 && (await atLimit()) }),
+    async err => {
+      const timedOut = !couldNotStart(err) || (await atLimit())
+      return { exitCode: 1, stdout: '', stderr: String(err), notStarted: !timedOut, timedOut }
+    },
   )
 }
 
@@ -158,9 +184,11 @@ async function spawnRole($: EngineInterface, role: Role, prompt: string, { onSes
     await block($, { on: 'start', role }, `Started the ${describe(role, r)}, but can't follow it: no agent id.`)
     return false
   }
+  const t0 = await $.clock.now()
   await patch($, cur => ({
     ...cur,
     agents: { ...cur.agents, [id]: role },
+    activity: { role, text: 'starting', at: t0, calls: 0 },
     ...(role === 'builder' ? { builderId: id } : {}),
     reviews: cur.reviews.map(x => (x.role === role ? { ...x, agentId: id } : x)),
   }))
@@ -208,7 +236,10 @@ async function start($: EngineInterface, args: string): Promise<string> {
     else if (!/already exists/i.test(added.stderr)) return `Could not create a worktree for the run: ${tailOf(added.stderr, 3)}`
   }
   if (!r) return `Could not create a worktree for the run: the branches factory/${slug} to factory/${slug}-${MAX_SLUG_TRIES} are all taken.`
-  const created: Run = { ...r, gate: (await goalRunThere($)) ? 'goal-run' : 'factory', ...(followupId ? { followupId } : {}) }
+  // The branch the checkout is on: the PR goes into it. A detached HEAD names none.
+  const onBranch = await git($, ['rev-parse', '--abbrev-ref', 'HEAD'], root)
+  const baseRef = onBranch.exitCode === 0 && onBranch.stdout.trim() !== 'HEAD' ? onBranch.stdout.trim() : ''
+  const created: Run = { ...r, gate: (await goalRunThere($)) ? 'goal-run' : 'factory', ...(followupId ? { followupId } : {}), ...(baseRef ? { baseRef } : {}) }
   await keepOutOfGit($, root)
   await readTheme($)
   await update($, run, () => created)
@@ -375,19 +406,63 @@ async function onBuilt($: EngineInterface) {
     }
     if (skipped.length) await patch($, cur => ({ ...cur, skipped }))
   }
+  if (!(await baseHolds($))) return
+  // The base may have just moved (the person named the branch the work is on).
+  const base = (await read($, run))?.base ?? r.base
   // What the builder committed itself never went through the filter above.
-  const committed = await git($, ['diff', '--name-only', '--diff-filter=A', '-z', r.base, 'HEAD'], r.worktree)
+  const committed = await git($, ['diff', '--name-only', '--diff-filter=A', '-z', base, 'HEAD'], r.worktree)
   const leaked = committed.exitCode === 0 ? committed.stdout.split('\0').filter(p => p && neverCommit(p)) : []
   if (leaked.length) {
     await block($, { on: 'builder' }, `The builder committed files the factory never commits: ${leftOut(leaked).join(', ')}. Take them out of the branch's history, then retry.`)
     return
   }
-  const stat = await git($, ['diff', '--stat', r.base, 'HEAD'], r.worktree)
+  const stat = await git($, ['diff', '--stat', base, 'HEAD'], r.worktree)
   if (stat.exitCode === 0 && stat.stdout.trim()) {
     await patch($, cur => ({ ...cur, stat: lastLines(stat.stdout, 1) }))
     await record($, `changes after builder round ${r.round + 1}`, stat.stdout)
   }
   await runChecks($)
+}
+
+// The run compares the branch with its base: the reviewers' diff, the approver's file list, the PR. A
+// builder that checked out another branch's history (a PR to build on, say) leaves the branch no longer
+// starting from that base, and every comparison counts the whole other tree. The person says which
+// branch the work is on top of: one the branch contains is offered, or any other under Other.
+const NOT_NOW_BASE = 'Not now'
+const mmss = (ms: number) => `${Math.floor(ms / 60_000)}:${String(Math.floor((ms % 60_000) / 1000)).padStart(2, '0')}`
+async function baseHolds($: EngineInterface): Promise<boolean> {
+  const r = await read($, run)
+  if (!r) return false
+  const holds = await git($, ['merge-base', '--is-ancestor', r.base, 'HEAD'], r.worktree)
+  // 1: not an ancestor. Anything else (git couldn't tell) isn't held against the run.
+  if (holds.exitCode !== 1) return true
+  const refs = await git($, ['for-each-ref', '--merged', 'HEAD', '--sort=-committerdate', '--format=%(refname:short)', 'refs/heads', 'refs/remotes'], r.worktree)
+  const offered = (refs.exitCode === 0 ? refs.stdout.split('\n') : []).map(x => x.trim()).filter(x => x && x !== r.branch && !x.endsWith('/HEAD') && x !== 'HEAD').slice(0, 3)
+  let answer = ''
+  try {
+    answer = await $.ui.ask(
+      `The builder's branch ${r.branch} no longer starts from ${r.baseRef || r.base.slice(0, 12)}: its history was replaced, likely by a checkout of another branch to build on. Compared with ${r.baseRef || 'that commit'}, the change would count that branch's whole tree. Which branch is the work on top of? The reviewers, the approver and the PR compare with it.`,
+      { header: 'Factory base', options: [...offered, NOT_NOW_BASE] },
+    )
+  } catch {
+    answer = ''
+  }
+  if (answer.trim() && answer !== NOT_NOW_BASE && (await setBase($, answer.trim())) === '') return true
+  await block($, { on: 'base' }, `The branch no longer starts from ${r.baseRef || r.base.slice(0, 12)}: say which branch the work is on top of with /factory base <branch>, or Retry to be asked again.`)
+  return false
+}
+
+// Moves the run's base to a branch or commit the work is on top of: '' when it did, else why not.
+async function setBase($: EngineInterface, ref: string): Promise<string> {
+  const r = await read($, run)
+  if (!r) return 'No factory run.'
+  const sha = await git($, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], r.worktree)
+  if (sha.exitCode !== 0 || !sha.stdout.trim()) return `No branch or commit "${ref}" in the run's repository.`
+  const under = await git($, ['merge-base', '--is-ancestor', sha.stdout.trim(), 'HEAD'], r.worktree)
+  if (under.exitCode !== 0) return `${ref} isn't under the run's branch ${r.branch}: the work isn't on top of it.`
+  await patch($, cur => ({ ...cur, base: sha.stdout.trim(), baseRef: ref }))
+  await record($, 'base', `The run's base moved to ${ref} (${sha.stdout.trim()}).`)
+  return ''
 }
 
 async function namesIn($: EngineInterface, dir: string) {
@@ -420,9 +495,9 @@ async function checkCommands($: EngineInterface, r: Run): Promise<DetectedChecks
 async function setUp($: EngineInterface, r: Run, files: string[]): Promise<boolean> {
   if (r.setupDone) return true
   const cmds = setupOption.trim() ? splitChecks(setupOption) : [detectSetup(files)].filter((c): c is string[] => c !== null)
-  for (const argv of cmds) {
+  for (const [k, argv] of cmds.entries()) {
     if (!(await stillIn($, 'checks'))) return false
-    await patch($, cur => ({ ...cur, note: `installing: ${argv.join(' ')}` }))
+    await nowRunning($, argv, k, cmds.length, true)
     const out = await run$($, argv, r.worktree)
     if (out.exitCode !== 0) {
       const check: Check = { cmd: argv.join(' '), ok: false, tail: tailOf(`${out.stdout}\n${out.stderr}`) }
@@ -430,7 +505,7 @@ async function setUp($: EngineInterface, r: Run, files: string[]): Promise<boole
       return false
     }
   }
-  await patch($, cur => ({ ...cur, setupDone: true }))
+  await patch($, cur => ({ ...cur, setupDone: true, checking: null }))
   return true
 }
 
@@ -470,17 +545,27 @@ async function approveAuto($: EngineInterface, r: Run, cmds: string[][]): Promis
   let answer = ''
   // Asked inside the run's serial queue, so nothing else of the run moves until it's answered: during
   // the checks no agent of the run is working, so nothing waits on it.
+  // The run waits on the person meanwhile: the band says so, in the color of a run waiting for them.
+  await patch($, cur => ({ ...cur, note: 'waiting for your OK to run the checks (a question in the conversation)', isAskingChecks: true }))
   try {
     answer = await $.ui.ask(question, { header: 'Factory checks', options: [RUN_THEM, NOT_NOW] })
   } catch {
     answer = ''
   }
+  await patch($, cur => ({ ...cur, isAskingChecks: false, note: 'running the checks' }))
   if (answer === RUN_THEM) {
     await patch($, cur => ({ ...cur, autoApproved: key }))
     return true
   }
   await block($, { on: 'checks' }, 'The checks wait for your OK to run the commands the factory found: Retry asks again, or set the checks and setup options.', cur => ({ ...cur, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: 'wait' } } }))
   return false
+}
+
+// The command starting now, for the band and the pane: a long one reads as running, with its seconds.
+async function nowRunning($: EngineInterface, argv: string[], k: number, total: number, isSetup = false) {
+  const t = await $.clock.now()
+  await update($, now, () => t)
+  await patch($, cur => ({ ...cur, note: `${isSetup ? 'installing' : 'running the checks'}: ${argv.join(' ')}`, checking: { cmd: argv.join(' '), index: k + 1, total, since: t, ...(isSetup ? { isSetup } : {}) } }))
 }
 
 async function stillIn($: EngineInterface, phase: Run['phase']) {
@@ -505,16 +590,18 @@ async function runChecks($: EngineInterface) {
   const cmds = found.checks
   await patch($, cur => ({ ...cur, note: 'running the checks' }))
   const results: Check[] = []
-  for (const argv of cmds) {
+  for (const [k, argv] of cmds.entries()) {
     // A Stop meanwhile ends the checks here: the rest don't run for nothing.
     if (!(await stillIn($, 'checks'))) return
+    await nowRunning($, argv, k, cmds.length)
     const out = await run$($, argv, r.worktree)
-    results.push({ cmd: argv.join(' '), ok: out.exitCode === 0, tail: out.exitCode === 0 ? '' : tailOf(`${out.stdout}\n${out.stderr}`), ...(out.notStarted ? { isMissing: true } : {}) })
+    results.push({ cmd: argv.join(' '), ok: out.exitCode === 0, tail: out.exitCode === 0 ? '' : tailOf(`${out.stdout}\n${out.stderr}`), ...(out.notStarted ? { isMissing: true } : {}), ...(out.timedOut ? { isTimedOut: true } : {}) })
   }
+  const timedOut = results.filter(c => c.isTimedOut)
   const failed = results.filter(c => !c.ok && !c.isMissing)
   const missing = results.filter(c => c.isMissing)
   const ran = results.filter(c => !c.isMissing)
-  if (results.length) await record($, 'checks', results.map(c => `${c.isMissing ? '– (not installed)' : c.ok ? '✓' : '✗'} ${c.cmd}${c.tail ? `\n${c.tail}` : ''}`).join('\n'))
+  if (results.length) await record($, 'checks', results.map(c => `${c.isMissing ? '– (not installed)' : c.isTimedOut ? `⏱ (timed out after ${mmss(checkTimeoutMs)})` : c.ok ? '✓' : '✗'} ${c.cmd}${c.tail ? `\n${c.tail}` : ''}`).join('\n'))
   // Why nothing ran, or what detection warned about, or which programs aren't installed: the
   // reviewers and the approver read it.
   const notes = [
@@ -524,8 +611,13 @@ async function runChecks($: EngineInterface) {
   ]
   const checksNote = notes.join(' ')
   if (!cmds.length) await record($, 'checks', checksNote || NOTHING_RAN)
-  const after = await patch($, cur => ({ ...cur, checks: results, checksNote, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: !ran.length ? 'skip' : failed.length ? 'fail' : 'pass' } } }))
+  const after = await patch($, cur => ({ ...cur, checks: results, checksNote, checking: null, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: !ran.length ? 'skip' : failed.length ? 'fail' : 'pass' } } }))
   if (!after || after.phase !== 'checks') return
+  // A check that ran out of time says nothing about the code: slow, hung or waiting on something. The
+  // builder isn't sent to fix it; the person looks.
+  if (timedOut.length) {
+    return block($, { on: 'checks' }, `${timedOut.map(c => c.cmd).join(', ')} didn't finish in ${mmss(checkTimeoutMs)}. It may be slow or hung: run it yourself in ${r.worktree}, then Retry. A suite that needs longer than that is run as narrower commands with the checks option.`)
+  }
   if (!failed.length) return startReviews($)
   if (after.checkRound < MAX_CHECK_ROUNDS) return startBuild($, [], failed)
   await block($, { on: 'checks' }, `The checks still fail after ${after.checkRound} builder passes: ${failed.map(c => c.cmd).join(', ')}.`)
@@ -683,6 +775,10 @@ async function retryNow($: EngineInterface): Promise<string> {
   const b = r.blocked
   void serial(async () => {
     if (b.on === 'spec') return respec($)
+    if (b.on === 'base') {
+      await patch($, cur => moveTo(cur, 'build', 'checking what the branch is built on'))
+      return onBuilt($)
+    }
     if (b.on === 'builder') return startBuild($, openFindings(r.reviews.filter(x => x.round === r.round)), r.checks.filter(c => !c.ok && !c.isMissing), '', b.why ?? '')
     if (b.on === 'checks' || b.on === 'setup') {
       await patch($, cur => ({ ...cur, checkRound: 0 }))
@@ -697,7 +793,7 @@ async function retryNow($: EngineInterface): Promise<string> {
     }))
     if (now) await spawnReviewers($, now)
   })
-  return `Retrying: ${b.on === 'start' ? `starting the ${describe(b.role, r)}` : b.on === 'setup' ? 'the setup and the checks' : b.on === 'checks' ? 'the checks' : `the ${b.on === 'spec' ? 'spec-writer' : 'builder'}`}.`
+  return `Retrying: ${b.on === 'start' ? `starting the ${describe(b.role, r)}` : b.on === 'setup' ? 'the setup and the checks' : b.on === 'checks' ? 'the checks' : b.on === 'base' ? 'asking which branch the work is on top of' : `the ${b.on === 'spec' ? 'spec-writer' : 'builder'}`}.`
 }
 
 // The person sends the change back to the builder with their own words: once the run waits for
@@ -710,6 +806,29 @@ async function reworkNow($: EngineInterface, said: string): Promise<string> {
   if (r.steps.builder.state === 'wait') return 'Nothing is built yet: /factory retry runs the step that stopped.'
   void serial(() => startBuild($, [], [], said))
   return `Sent back to the builder: ${said}`
+}
+
+// /factory base <branch>: the branch the work is on top of, when the run asked (or to correct it).
+async function baseNow($: EngineInterface, ref: string): Promise<string> {
+  const r = await read($, run)
+  if (!r || !isLive(r.phase)) return 'No factory run.'
+  if (!ref) return `The run is based on ${r.baseRef || r.base.slice(0, 12)}. /factory base <branch> moves it.`
+  const why = await setBase($, ref)
+  if (why) return why
+  if (r.phase === 'needs-human' && r.blocked?.on === 'base') {
+    void serial(async () => {
+      await patch($, cur => moveTo(cur, 'build', 'checking what the branch is built on'))
+      await onBuilt($)
+    })
+  }
+  return `The run is now based on ${ref}: the reviewers, the approver and the PR compare with it.`
+}
+
+async function statusText($: EngineInterface): Promise<string> {
+  const r = await read($, run)
+  if (!r) return 'No factory run in this session.'
+  const files = r.record ? (await $.fs.list(r.record).catch(() => [])).map(f => f.name).sort() : []
+  return statusReport(r, await $.clock.now(), files)
 }
 
 async function stopNow($: EngineInterface): Promise<string> {
@@ -732,6 +851,11 @@ async function tick($: EngineInterface) {
   const r = await read($, run)
   if (!r || !isLive(r.phase)) return void timers.splice(0).forEach(t => t.cancel())
   if (!waitsOnPerson(r.phase)) await update($, frame, f => f + 1)
+  // The seconds the band counts: a running check's, or since the agent's last action.
+  if ((r.phase === 'checks' && r.checking) || ['spec', 'build', 'review', 'approve'].includes(r.phase)) {
+    const t = await $.clock.now()
+    await update($, now, () => t)
+  }
 }
 
 async function ensureTicking($: EngineInterface) {
@@ -741,6 +865,8 @@ async function ensureTicking($: EngineInterface) {
 
 export const register: Register = (on, options) => {
   maxRounds = Math.max(1, Math.min(3, Number(options.maxRounds ?? 2) || 2))
+  // Claude Code lets a command run 10 minutes at most: the option can only shorten it.
+  checkTimeoutMs = Math.max(1, Math.min(10, Number(options.checkTimeout ?? 10) || 10)) * 60_000
   checksOption = String(options.checks ?? '')
   setupOption = String(options.setup ?? '')
   autoPr = String(options.autoPr ?? 'off') === 'on'
@@ -772,6 +898,14 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
       .catch(() => {})
+    await $.tool
+      .register({
+        name: 'status',
+        description: "Where the factory run stands: its step and for how long, the agent's last action, the checks with their output, the reviewers' findings, what it waits on, and the folder with each step's own words. Call it when the person asks how the factory run is going or why it seems stuck, before guessing.",
+        inputSchema: { type: 'object', properties: {} },
+        isDeferred: false,
+      })
+      .catch(() => {})
     await ensureTicking($)
     return next(e)
   })
@@ -790,9 +924,20 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) {
       const r = await read($, run)
       if ((r?.agents[e.agentId] && !isLive(r.phase)) || (await read($, stoppedAgents)).includes(e.agentId)) return { deny: STOPPED_DENY }
+      // What the run's agent does now: the band shows it, so a working step never reads as stuck.
+      const role = r?.agents[e.agentId]
+      if (role) {
+        const t = await $.clock.now()
+        const text = activityText(e.tool, e as unknown as Record<string, unknown>)
+        await patch($, cur => ({ ...cur, activity: { role, text, at: t, calls: (cur.activity?.role === role ? cur.activity.calls : 0) + 1 } }))
+        await update($, now, () => t)
+      }
     }
     return next(e)
   }).catch(($, e, next) => next(e))
+
+  // The main Claude asks where a run stands: what it waits on, what failed and where to read more.
+  on('tool.call', { tool: STATUS_TOOL }, async $ => ({ result: await statusText($) }))
 
   // Claude starts a run itself when the person asks for the factory in words, or after /factory.
   on('tool.call', { tool: START_TOOL }, async ($, e) => {
@@ -817,6 +962,8 @@ export const register: Register = (on, options) => {
     if (arg === 'approve' || approved) return { text: await approveNow($, approved?.goalTasks, !!approved) }
     if (arg === 'retry') return { text: await retryNow($) }
     if (arg === 'stop') return { text: await stopNow($) }
+    if (arg === 'status') return { text: await statusText($) }
+    if (arg === 'base' || arg.startsWith('base ')) return { text: await baseNow($, arg.slice(4).trim()) }
     if (arg === 'rework' || arg.startsWith('rework ')) return { text: await reworkNow($, arg.slice(6).trim()) }
     if (!arg) {
       await $.ui.open({ id: PANE, title: PANE_TITLE })
@@ -881,12 +1028,14 @@ export const register: Register = (on, options) => {
     const r = await read($, run)
     if (e.props.hasSurvey || !r || !isLive(r.phase)) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
+    const t = await read($, now)
     const below = await next(e)
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" gap={1} paddingX={1} alignItems="center">
-          <Text bold color={waitsOnPerson(r.phase) ? '#d97706' : ACCENT} wrap="truncate-end">{`🏭 ${titleOf(r.feature)}`}</Text>
-          <Text dimColor wrap="truncate-end">{`· ${r.note} · ${tok(tokensOf(r))} tokens`}</Text>
+          <Text bold color={waitsOnYou(r) ? '#d97706' : ACCENT} wrap="truncate-end">{`🏭 ${titleOf(r.feature)}`}</Text>
+          <Text color={waitsOnYou(r) ? '#d97706' : ACCENT}>{`${progressBar(progressOf(r), 10)} ${progressOf(r)}%`}</Text>
+          <Text color={isQuiet(r, t) ? '#d97706' : undefined} dimColor={!isQuiet(r, t)} wrap="truncate-end">{`· ${statusOf(r, t)} · ${tok(tokensOf(r))} tokens`}</Text>
           {r.phase === 'plan' && r.gate === 'factory' ? <Button key="f-approve-plan" label="Approve plan" variant="primary" onPress={() => approveNow($)} /> : null}
           {actions($, r).map(a => <Button key={`f-${a.key}`} label={a.label} variant="primary" onPress={a.press} />)}
           <Button key="f-open" label="Open" onPress={() => $.ui.open({ id: PANE, title: PANE_TITLE })} />
@@ -912,6 +1061,7 @@ export const register: Register = (on, options) => {
       )
     }
     const f = await read($, frame)
+    const t = await read($, now)
     const findings = r.reviews.filter(x => x.round === r.round && x.findings.length)
     const failed = r.checks.filter(c => !c.ok && !c.isMissing)
     return (
@@ -919,7 +1069,9 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           <Text bold color={ACCENT} wrap="truncate-end">{`🏭 ${titleOf(r.feature)}`}</Text>
           {titleOf(r.feature) !== r.feature.trim() ? <Text dimColor wrap="wrap">{r.feature.trim()}</Text> : null}
-          <Text dimColor wrap="truncate-end">{`${r.note} · ${tok(tokensOf(r))} tokens · spec ${r.specFile}`}</Text>
+          <Text color={waitsOnYou(r) ? '#d97706' : ACCENT}>{`${progressBar(progressOf(r), 24)} ${progressOf(r)}%${r.phaseSince ? ` · this step ${mmss(Math.max(0, t - r.phaseSince))}` : ''}`}</Text>
+          <Text color={waitsOnYou(r) || isQuiet(r, t) ? '#d97706' : undefined} dimColor={!(waitsOnYou(r) || isQuiet(r, t))} wrap="truncate-end">{`${statusOf(r, t)} · ${tok(tokensOf(r))} tokens · spec ${r.specFile}`}</Text>
+          <Text dimColor wrap="truncate-end">{`Based on ${r.baseRef || r.base.slice(0, 12)} · ask Claude "how is the factory run going?" for the details`}</Text>
           {r.stat || r.summary ? <Text wrap="wrap">{`Changed: ${[r.stat, r.summary].filter(Boolean).join(' · ')}`}</Text> : null}
           {r.recorded ? <Text dimColor wrap="truncate-end">{`What each step said: ${r.record}/`}</Text> : null}
         </Box>

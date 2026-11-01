@@ -10,7 +10,8 @@ export type Finding = { severity: Severity; where: string; text: string }
 export type SpecTask = { title: string; priority: 'high' | 'medium' | 'low'; dependsOn: number[] }
 // isMissing: the command couldn't start here (its program isn't installed): skipped, not failed, so the
 // builder isn't sent to fix what it can't.
-export type Check = { cmd: string; ok: boolean; tail: string; isMissing?: boolean }
+// isTimedOut: it ran past the checks' time limit: the person decides, not the builder.
+export type Check = { cmd: string; ok: boolean; tail: string; isMissing?: boolean; isTimedOut?: boolean }
 // agentId: the reviewer's agent this round (null until started), so a late answer from an earlier one is ignored.
 export type Review = { role: Reviewer; state: StepState; findings: Finding[]; tokens: number; round: number; agentId: string | null }
 // Where the run is: each phase waits on one thing (an agent, the checks, the person).
@@ -26,6 +27,8 @@ export type Blocked =
   | { on: 'checks' }
   | { on: 'setup' }
   | { on: 'start'; role: Role }
+  // The builder's branch no longer starts from the run's base: which branch it is on top of is asked.
+  | { on: 'base' }
 
 export type Run = {
   feature: string
@@ -78,6 +81,20 @@ export type Run = {
   skipped?: string[]
   // The followups to-do item the run came from: marked done once the PR is open.
   followupId?: string
+  // The command the checks (or the setup before them) are running now, its place among them and when
+  // it started: what the band and the pane show, so a long check reads as running, not stuck.
+  checking?: { cmd: string; index: number; total: number; since: number; isSetup?: boolean } | null
+  // The factory's question before it runs the checks it found is open: the run waits on the person.
+  isAskingChecks?: boolean
+  // The branch the run started from (the checkout's), and the one the PR goes into; base may move to
+  // another branch's commit when the builder built on top of it.
+  baseRef?: string
+  // When the run entered its current phase, and what its agents did last: the band shows the step's
+  // time and the latest action, so a run that is working never reads as stuck.
+  phaseSince?: number
+  activity?: { role: Role; text: string; at: number; calls: number }
+  // Where the progress stood when the run stopped to wait (needs-human) or was stopped.
+  lastProgress?: number
 }
 
 declare module 'claude-code' {
@@ -86,6 +103,7 @@ declare module 'claude-code' {
       run: Run | null
       frame: number
       theme: 'dark' | 'light'
+      now: number
       stoppedAgents: string[]
     }
   }

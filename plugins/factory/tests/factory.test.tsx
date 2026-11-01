@@ -29,9 +29,10 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, planResult = PLAN_APPROVED_FOR_FACTORY, checksOk = 'Run them' as string | null, missing = [] as string[], noRepo = false, stagedNew = [] as string[], committedNew = [] as string[] } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, planResult = PLAN_APPROVED_FOR_FACTORY, checksOk = 'Run them' as string | null, missing = [] as string[], noRepo = false, stagedNew = [] as string[], committedNew = [] as string[], holdAsk = false, baseGone = false, branch = '' } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
+  const limits: Record<string, number> = {}
   // The last commit of the files that define the checks: a test moves it to change them.
   let configCommit = 'c0'
   const sent: string[] = []
@@ -74,6 +75,7 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
   on('process.run', async (_, e) => {
     const cmd = e.argv.join(' ')
     ran.push(cmd)
+    limits[cmd] = (e as { init?: { timeoutMs?: number } }).init?.timeoutMs ?? 0
     if (cmd === hold) await held
     if (cmd === 'git rev-parse --show-toplevel') return noRepo ? ({ value: { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' } } as never) : ok('/repo\n')
     if (cmd === 'git rev-parse HEAD') return ok('abc123\n')
@@ -93,6 +95,13 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     if (cmd === 'git diff --cached --quiet') return { value: { exitCode: dirty ? 1 : 0, stdout: '', stderr: '' } } as never
     if (cmd === 'git rev-parse --git-path info/exclude') return ok('.git/info/exclude\n')
     if (cmd.startsWith('git commit') && commitFails) return { value: { exitCode: 1, stdout: '', stderr: 'Please tell me who you are.' } } as never
+    // The checkout's branch, and a builder that replaced the branch's history (`baseGone`): its base is no
+    // longer under HEAD; origin/pr-106 is, at def456.
+    if (cmd === 'git rev-parse --abbrev-ref HEAD') return ok(`${branch || 'HEAD'}\n`)
+    if (cmd === 'git merge-base --is-ancestor abc123 HEAD') return { value: { exitCode: baseGone ? 1 : 0, stdout: '', stderr: '' } } as never
+    if (cmd.startsWith('git for-each-ref')) return ok('origin/pr-106\nfactory/rate-limiter\norigin/HEAD\nmain\n')
+    if (cmd === 'git rev-parse --verify --quiet origin/pr-106^{commit}') return ok('def456\n')
+    if (cmd.startsWith('git rev-parse --verify')) return { value: { exitCode: 1, stdout: '', stderr: '' } } as never
     if (cmd.startsWith('git ')) return ok()
     if (missing.includes(cmd)) throw new Error(`spawn ${e.argv[0]} ENOENT`)
     if (cmd === 'sh-missing') return { value: { exitCode: 127, stdout: '', stderr: 'sh: vitest: not found' } } as never
@@ -134,11 +143,14 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
   on('tool.call', { tool: 'Edit' }, () => ({ result: 'edited' }) as never)
   // The engine's question dialog: the next answer, or dismissed when none is left.
   const asked: string[] = []
-  on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+  on('tool.call', { tool: 'AskUserQuestion' }, async (_, e) => {
     const q = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
     asked.push(q)
     // The checks question has its own answer, so the other dialogs' answers stay in order.
-    const a = q.startsWith('Before the factory runs the checks') ? (checksOk ?? undefined) : answers.shift()
+    const isChecks = q.startsWith('Before the factory runs the checks')
+    // `holdAsk`: the checks question stays open until the test releases it.
+    if (isChecks && holdAsk) await held
+    const a = isChecks ? (checksOk ?? undefined) : answers.shift()
     if (a === undefined) throw new Error('dismissed')
     return { result: { questions: (e as unknown as { questions: unknown }).questions, answers: { [q]: a } } } as never
   })
@@ -146,7 +158,7 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
-  return { spawned, ran, sent, toasts, written, release, asked, clock, sends, registered, setConfig: (c: string) => void (configCommit = c) }
+  return { limits, spawned, ran, sent, toasts, written, release, asked, clock, sends, registered, setConfig: (c: string) => void (configCommit = c) }
 }
 
 const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<unknown[]> }) =>
@@ -545,6 +557,40 @@ describe('the person decides', () => {
     expect(await bandText($)).not.toMatch(/🏭/)
   })
 
+  test('a check that runs long shows which one, its place and its time, in the band and the pane', async ($, on) => {
+    const w = engine(on, { hold: 'npm run lint', pkg: '{"scripts":{"test":"x","lint":"y","typecheck":"z"}}' })
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    await command($, 'plan-approved')
+    await answer($, 'a2', 'built')
+    expect(w.ran.at(-1)).toBe('npm run lint')
+    expect(await bandText($)).toMatch(/checks 2\/3 · npm run lint · 0:00/)
+    await w.clock.advance(65_000)
+    expect(await bandText($)).toMatch(/checks 2\/3 · npm run lint · 1:0\d/)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/checks 2\/3 · npm run lint · 1:0\d/)
+    expect(await texts(pane)).toMatch(/2\/3 npm run lint/)
+    await pane.unmount()
+    w.release()
+    await settled()
+    expect(await bandText($)).not.toMatch(/checks \d\/\d/)
+  })
+
+  test('while the question before the checks is open, the run reads as waiting for you', async ($, on) => {
+    const w = engine(on, { holdAsk: true })
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    await command($, 'plan-approved')
+    await answer($, 'a2', 'built')
+    expect(w.asked.at(-1)).toMatch(/^Before the factory runs the checks/)
+    expect(await bandText($)).toMatch(/waiting for your OK to run the checks/)
+    expect(w.ran.filter(c => c.startsWith('npm'))).toEqual([])
+    w.release()
+    await settled()
+    expect(await bandText($)).not.toMatch(/waiting for your OK/)
+    expect(w.ran).toContain('npm test')
+  })
+
   test('a Stop during the checks ends them: the commands left are not run', async ($, on) => {
     const w = engine(on, { hold: 'npm test', pkg: '{"scripts":{"test":"x","lint":"y","typecheck":"z"}}' })
     await startRun($)
@@ -696,6 +742,121 @@ describe("a plan goal-run approves isn't approved past it", () => {
     expect(await command($, 'approve')).toBe('Plan approved: the builder starts.')
     await settled()
     expect(last(w)).toMatchObject({ subagentType: 'factory:builder' })
+  })
+})
+
+describe('a run that seems stuck says where it is', () => {
+  const toBuild = async ($: Engine) => {
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    await command($, 'plan-approved')
+  }
+
+  test('a check that runs out of time stops the run for the person: the builder is not sent to fix it', async ($, on) => {
+    // npm test runs to the limit and fails there: killed at the timeout.
+    const w = engine(on, { hold: 'npm test', fails: 1 })
+    await toBuild($)
+    await answer($, 'a2', 'built')
+    expect(w.limits['npm test']).toBe(600_000)
+    await w.clock.advance(600_000)
+    w.release()
+    await settled()
+    expect(w.spawned.filter(a => a.subagentType === 'factory:builder')).toHaveLength(1)
+    expect(await bandText($)).toMatch(/npm test didn't finish in 10:00\. It may be slow or hung/)
+    expect(Object.entries(w.written).find(([k]) => /checks\.md$/.test(k))?.[1]).toMatch(/⏱ \(timed out after 10:00\) npm test/)
+    expect(String((await $.tool.call({ tool: 'mcp__factory__status' } as never)).result)).toMatch(/TIMED OUT: npm test/)
+  })
+
+  test('the checkTimeout option shortens the limit; Claude Code allows 10 minutes at most', { options: { checkTimeout: '5' } } as never, async ($: Engine, on: On) => {
+    const w = engine(on)
+    await toBuild($)
+    await answer($, 'a2', 'built')
+    await settled()
+    await w.clock.advance(10)
+    await settled()
+    expect(w.limits['npm test']).toBe(300_000)
+  })
+
+  test('a refusal that names timeoutMs is no timeout', () => {
+    expect(couldNotStart('init.timeoutMs is a whole number of ms, 1 to 600000')).toBe(true)
+    expect(couldNotStart('Command timed out after 600000 ms')).toBe(false)
+  })
+
+  test("a builder that replaced the branch's history: the person says which branch it is on, and everything compares with it", async ($, on) => {
+    const w = engine(on, { baseGone: true, branch: 'main', answers: ['origin/pr-106'] })
+    await toBuild($)
+    await answer($, 'a2', 'built')
+    await settled()
+    expect(w.asked.find(q => /no longer starts from main/.test(q))).toBeTruthy()
+    expect(w.ran).toContain('git diff --stat def456 HEAD')
+    expect(w.ran).not.toContain('git diff --stat abc123 HEAD')
+    expect(w.spawned.find(a => a.subagentType === 'factory:security-reviewer')?.prompt).toContain('since def456')
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    await answer($, 'a5', 'DECISION: APPROVE\nREASON: ok')
+    await command($, 'approve')
+    expect(w.sent.at(-1)).toMatch(/open a pull request from it into pr-106 \(the branch it is built on/)
+  })
+
+  test("unanswered, the run waits; /factory base <branch> moves it and the run goes on", async ($, on) => {
+    const w = engine(on, { baseGone: true, answers: ['Not now'] })
+    await toBuild($)
+    await answer($, 'a2', 'built')
+    await settled()
+    expect(await bandText($)).toMatch(/no longer starts from abc123/)
+    expect(await command($, 'base nope')).toMatch(/No branch or commit "nope"/)
+    expect(await command($, 'base origin/pr-106')).toMatch(/now based on origin\/pr-106/)
+    await settled()
+    expect(w.spawned.find(a => a.subagentType === 'factory:security-reviewer')?.prompt).toContain('since def456')
+  })
+
+  test("the PR goes into the branch the run started from", async ($, on) => {
+    const w = engine(on, { branch: 'feature/router' })
+    await toBuild($)
+    await answer($, 'a2', 'built')
+    await answer($, 'a3', PASS)
+    await answer($, 'a4', PASS)
+    await answer($, 'a5', 'DECISION: APPROVE\nREASON: ok')
+    await command($, 'approve')
+    expect(w.sent.at(-1)).toMatch(/into feature\/router/)
+  })
+
+  test("the band has a progress bar and the agent's last action; a quiet agent shows in orange how long", async ($, on) => {
+    const w = engine(on)
+    await toBuild($)
+    await $.tool.call({ tool: 'Edit', file_path: '/repo/.factory/rate-limiter/src/mw.ts', old_string: 'a', new_string: 'b', agentId: 'a2' } as never)
+    let t = await bandText($)
+    expect(t).toMatch(/▰+▱+ \d+%/)
+    expect(t).toMatch(/building · editing mw\.ts · 0:00 ago/)
+    await w.clock.advance(6 * 60_000 + 1_000)
+    t = await bandText($)
+    expect(t).toMatch(/building · no activity for 6:0\d/)
+    const status = String((await $.tool.call({ tool: 'mcp__factory__status' } as never)).result)
+    expect(status).toMatch(/^Factory run: Rate limiter/)
+    expect(status).toMatch(/Phase: build · \d+% · building · no activity/)
+    expect(status).toMatch(/Last agent action: builder editing mw\.ts, 6:0\d ago \(1 tool calls this step\)/)
+    expect(await command($, 'status')).toBe(status)
+  })
+
+  test('the progress only grows through a run that passes', async ($, on) => {
+    const w = engine(on)
+    const seen: number[] = []
+    const pct = async () => seen.push(Number(/(\d+)%/.exec(await bandText($))?.[1]))
+    await startRun($)
+    await pct()
+    await answer($, 'a1', SPEC_ANSWER)
+    await pct()
+    await command($, 'plan-approved')
+    await pct()
+    await answer($, 'a2', 'built')
+    await pct()
+    await answer($, 'a3', PASS)
+    await pct()
+    await answer($, 'a4', PASS)
+    await pct()
+    expect(seen).toEqual([...seen].sort((a, b) => a - b))
+    expect(seen.at(-1)).toBeGreaterThanOrEqual(85)
+    void w
   })
 })
 
@@ -1004,7 +1165,7 @@ describe('a long feature reads as a short title', () => {
     await $.command.run({ command: 'factory', args: LONG } as never)
     await settled()
     const t = await bandText($)
-    expect(t).toMatch(/^🏭 Fix the 9 model-router issues in ROUTER_ISSUES\.md, in both… \| · writing the spec/)
+    expect(t).toMatch(/^🏭 Fix the 9 model-router issues in ROUTER_ISSUES\.md, in both… \| ▱+ \d+% \| · writing the spec/)
     expect(t).not.toContain('Do not commit')
     const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
     expect(await texts(pane)).toContain('Do not commit or push.')

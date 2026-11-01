@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "description": "A software factory: /factory <feature> writes a spec, has you approve its plan (in goal-run when it's installed), builds it on a branch, runs the checks and parallel reviews, and has an approver agent decide; you then press Open PR and Claude opens it. Its pane draws where the run is",
   "author": {
     "name": "Amit Rosen",
@@ -42,6 +42,13 @@
         "off",
         "on"
       ]
+    },
+    "checkTimeout": {
+      "type": "string",
+      "title": "Check time limit (minutes)",
+      "description": "How long one check may run before it counts as timed out: the run then stops for you instead of sending the builder to fix it. Claude Code allows a command 10 minutes at most",
+      "default": "10",
+      "options": ["2", "5", "10"]
     },
     "models": {
       "type": "string",
