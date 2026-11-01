@@ -827,6 +827,11 @@ export const register: Register = (on, options) => {
       $.clock.after(1, () => void $.prompt.submit({ text: FROM_CONVERSATION }).catch(() => $.ui.toast('/factory <feature> starts a run')))
       return { text: 'Asked Claude to start a run from what this conversation is working on.' }
     }
+    // A run going and one word that isn't a subcommand: a mistyped one (plan-approve), not a feature.
+    const cur = await read($, run)
+    if (cur && isLive(cur.phase) && /^[\w-]+$/.test(arg)) {
+      return { text: `"/factory ${arg}" isn't a factory command. While a run goes: /factory approve, plan-approved (the plan goal-run approved), retry, rework <what to change>, stop.` }
+    }
     return { text: await start($, arg) }
   })
 

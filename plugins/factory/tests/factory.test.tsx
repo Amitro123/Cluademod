@@ -1067,6 +1067,14 @@ describe("the builder marks goal-run's tasks only when they are the factory's", 
     expect(last(w).prompt).toContain('Split the core task')
   })
 
+  test('a mistyped subcommand while a run goes is named as one, not taken for a new feature', async ($, on) => {
+    engine(on)
+    await startRun($)
+    await answer($, 'a1', OUT_OF_ORDER)
+    expect(await command($, 'plan-approve')).toMatch(/^"\/factory plan-approve" isn't a factory command\. .*plan-approved/)
+    expect(await command($, 'Add a cache to the API')).toMatch(/^A factory run is already going/)
+  })
+
   test('/factory approve on a plan goal-run holds says how to start it if goal-run already approved it', async ($, on) => {
     engine(on)
     await startRun($)
