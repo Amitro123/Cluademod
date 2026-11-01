@@ -13,6 +13,8 @@ import {
   NOTHING_RAN,
   detectSetup,
   isLive,
+  statusOf,
+  waitsOnYou,
   neverCommit,
   newRun,
   openFindings,
@@ -53,6 +55,8 @@ import { FACTORY_START_TOOL, factoryArgs, type GoalTask, parseFactoryArgs, parse
 const run = atom({ plugin: 'factory', key: 'run' } as const, null as Run | null)
 const frame = atom({ plugin: 'factory', key: 'frame' } as const, 0)
 const theme = atom({ plugin: 'factory', key: 'theme' } as const, 'dark' as Theme)
+// The time, kept while a check runs, so the band and the pane count its seconds.
+const now = atom({ plugin: 'factory', key: 'now' } as const, 0)
 // The agents of runs that were stopped, newest last: their tool calls stay refused after a new run starts.
 const stoppedAgents = atom({ plugin: 'factory', key: 'stoppedAgents' } as const, [] as string[])
 const MAX_STOPPED = 50
@@ -95,11 +99,11 @@ async function patch($: EngineInterface, fn: (r: Run) => Run): Promise<Run | nul
 }
 
 // A move to a phase the run works in clears what it was blocked on.
-const moveTo = (r: Run, phase: Phase, note: string): Run => ({ ...r, phase, note, blocked: null })
+const moveTo = (r: Run, phase: Phase, note: string): Run => ({ ...r, phase, note, blocked: null, checking: null, isAskingChecks: false })
 
 async function block($: EngineInterface, blocked: Blocked, note: string, fn: (r: Run) => Run = r => r) {
   // A run stopped meanwhile stays stopped.
-  await patch($, r => (isLive(r.phase) ? { ...fn(r), phase: 'needs-human', blocked, note } : r))
+  await patch($, r => (isLive(r.phase) ? { ...fn(r), phase: 'needs-human', blocked, note, checking: null, isAskingChecks: false } : r))
 }
 
 async function git($: EngineInterface, args: string[], cwd?: string) {
@@ -420,9 +424,9 @@ async function checkCommands($: EngineInterface, r: Run): Promise<DetectedChecks
 async function setUp($: EngineInterface, r: Run, files: string[]): Promise<boolean> {
   if (r.setupDone) return true
   const cmds = setupOption.trim() ? splitChecks(setupOption) : [detectSetup(files)].filter((c): c is string[] => c !== null)
-  for (const argv of cmds) {
+  for (const [k, argv] of cmds.entries()) {
     if (!(await stillIn($, 'checks'))) return false
-    await patch($, cur => ({ ...cur, note: `installing: ${argv.join(' ')}` }))
+    await nowRunning($, argv, k, cmds.length, true)
     const out = await run$($, argv, r.worktree)
     if (out.exitCode !== 0) {
       const check: Check = { cmd: argv.join(' '), ok: false, tail: tailOf(`${out.stdout}\n${out.stderr}`) }
@@ -430,7 +434,7 @@ async function setUp($: EngineInterface, r: Run, files: string[]): Promise<boole
       return false
     }
   }
-  await patch($, cur => ({ ...cur, setupDone: true }))
+  await patch($, cur => ({ ...cur, setupDone: true, checking: null }))
   return true
 }
 
@@ -470,17 +474,27 @@ async function approveAuto($: EngineInterface, r: Run, cmds: string[][]): Promis
   let answer = ''
   // Asked inside the run's serial queue, so nothing else of the run moves until it's answered: during
   // the checks no agent of the run is working, so nothing waits on it.
+  // The run waits on the person meanwhile: the band says so, in the color of a run waiting for them.
+  await patch($, cur => ({ ...cur, note: 'waiting for your OK to run the checks (a question in the conversation)', isAskingChecks: true }))
   try {
     answer = await $.ui.ask(question, { header: 'Factory checks', options: [RUN_THEM, NOT_NOW] })
   } catch {
     answer = ''
   }
+  await patch($, cur => ({ ...cur, isAskingChecks: false, note: 'running the checks' }))
   if (answer === RUN_THEM) {
     await patch($, cur => ({ ...cur, autoApproved: key }))
     return true
   }
   await block($, { on: 'checks' }, 'The checks wait for your OK to run the commands the factory found: Retry asks again, or set the checks and setup options.', cur => ({ ...cur, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: 'wait' } } }))
   return false
+}
+
+// The command starting now, for the band and the pane: a long one reads as running, with its seconds.
+async function nowRunning($: EngineInterface, argv: string[], k: number, total: number, isSetup = false) {
+  const t = await $.clock.now()
+  await update($, now, () => t)
+  await patch($, cur => ({ ...cur, note: `${isSetup ? 'installing' : 'running the checks'}: ${argv.join(' ')}`, checking: { cmd: argv.join(' '), index: k + 1, total, since: t, ...(isSetup ? { isSetup } : {}) } }))
 }
 
 async function stillIn($: EngineInterface, phase: Run['phase']) {
@@ -505,9 +519,10 @@ async function runChecks($: EngineInterface) {
   const cmds = found.checks
   await patch($, cur => ({ ...cur, note: 'running the checks' }))
   const results: Check[] = []
-  for (const argv of cmds) {
+  for (const [k, argv] of cmds.entries()) {
     // A Stop meanwhile ends the checks here: the rest don't run for nothing.
     if (!(await stillIn($, 'checks'))) return
+    await nowRunning($, argv, k, cmds.length)
     const out = await run$($, argv, r.worktree)
     results.push({ cmd: argv.join(' '), ok: out.exitCode === 0, tail: out.exitCode === 0 ? '' : tailOf(`${out.stdout}\n${out.stderr}`), ...(out.notStarted ? { isMissing: true } : {}) })
   }
@@ -524,7 +539,7 @@ async function runChecks($: EngineInterface) {
   ]
   const checksNote = notes.join(' ')
   if (!cmds.length) await record($, 'checks', checksNote || NOTHING_RAN)
-  const after = await patch($, cur => ({ ...cur, checks: results, checksNote, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: !ran.length ? 'skip' : failed.length ? 'fail' : 'pass' } } }))
+  const after = await patch($, cur => ({ ...cur, checks: results, checksNote, checking: null, steps: { ...cur.steps, checks: { ...cur.steps.checks, state: !ran.length ? 'skip' : failed.length ? 'fail' : 'pass' } } }))
   if (!after || after.phase !== 'checks') return
   if (!failed.length) return startReviews($)
   if (after.checkRound < MAX_CHECK_ROUNDS) return startBuild($, [], failed)
@@ -732,6 +747,10 @@ async function tick($: EngineInterface) {
   const r = await read($, run)
   if (!r || !isLive(r.phase)) return void timers.splice(0).forEach(t => t.cancel())
   if (!waitsOnPerson(r.phase)) await update($, frame, f => f + 1)
+  if (r.phase === 'checks' && r.checking) {
+    const t = await $.clock.now()
+    await update($, now, () => t)
+  }
 }
 
 async function ensureTicking($: EngineInterface) {
@@ -885,8 +904,8 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" gap={1} paddingX={1} alignItems="center">
-          <Text bold color={waitsOnPerson(r.phase) ? '#d97706' : ACCENT} wrap="truncate-end">{`🏭 ${titleOf(r.feature)}`}</Text>
-          <Text dimColor wrap="truncate-end">{`· ${r.note} · ${tok(tokensOf(r))} tokens`}</Text>
+          <Text bold color={waitsOnYou(r) ? '#d97706' : ACCENT} wrap="truncate-end">{`🏭 ${titleOf(r.feature)}`}</Text>
+          <Text dimColor wrap="truncate-end">{`· ${statusOf(r, await read($, now))} · ${tok(tokensOf(r))} tokens`}</Text>
           {r.phase === 'plan' && r.gate === 'factory' ? <Button key="f-approve-plan" label="Approve plan" variant="primary" onPress={() => approveNow($)} /> : null}
           {actions($, r).map(a => <Button key={`f-${a.key}`} label={a.label} variant="primary" onPress={a.press} />)}
           <Button key="f-open" label="Open" onPress={() => $.ui.open({ id: PANE, title: PANE_TITLE })} />
@@ -919,7 +938,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           <Text bold color={ACCENT} wrap="truncate-end">{`🏭 ${titleOf(r.feature)}`}</Text>
           {titleOf(r.feature) !== r.feature.trim() ? <Text dimColor wrap="wrap">{r.feature.trim()}</Text> : null}
-          <Text dimColor wrap="truncate-end">{`${r.note} · ${tok(tokensOf(r))} tokens · spec ${r.specFile}`}</Text>
+          <Text color={waitsOnYou(r) ? '#d97706' : undefined} dimColor={!waitsOnYou(r)} wrap="truncate-end">{`${statusOf(r, await read($, now))} · ${tok(tokensOf(r))} tokens · spec ${r.specFile}`}</Text>
           {r.stat || r.summary ? <Text wrap="wrap">{`Changed: ${[r.stat, r.summary].filter(Boolean).join(' · ')}`}</Text> : null}
           {r.recorded ? <Text dimColor wrap="truncate-end">{`What each step said: ${r.record}/`}</Text> : null}
         </Box>

@@ -29,7 +29,7 @@ type Spawned = { id: string; subagentType: string; prompt: string; description: 
 // The engine beneath: git and the checks, the agents the factory starts, its prompts, the commands there are.
 // `fails`: how many non-git commands fail first (setup and checks alike). `worktree`: the stderr of
 // each failing `git worktree add`, in turn. `dirty`: the builder left uncommitted work.
-function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, planResult = PLAN_APPROVED_FOR_FACTORY, checksOk = 'Run them' as string | null, missing = [] as string[], noRepo = false, stagedNew = [] as string[], committedNew = [] as string[] } = {}) {
+function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['package.json', 'node_modules'], pkg = '{"scripts":{"test":"vitest"}}', denyType = false, worktree = [] as string[], dirty = false, commitFails = false, answers = [] as string[], delivers = false, skills = '', keepsGoal = false, planResult = PLAN_APPROVED_FOR_FACTORY, checksOk = 'Run them' as string | null, missing = [] as string[], noRepo = false, stagedNew = [] as string[], committedNew = [] as string[], holdAsk = false } = {}) {
   const spawned: Spawned[] = []
   const ran: string[] = []
   // The last commit of the files that define the checks: a test moves it to change them.
@@ -134,11 +134,14 @@ function engine(on: On, { hold = '', goalRun = true, fails = 0, files = ['packag
   on('tool.call', { tool: 'Edit' }, () => ({ result: 'edited' }) as never)
   // The engine's question dialog: the next answer, or dismissed when none is left.
   const asked: string[] = []
-  on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+  on('tool.call', { tool: 'AskUserQuestion' }, async (_, e) => {
     const q = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
     asked.push(q)
     // The checks question has its own answer, so the other dialogs' answers stay in order.
-    const a = q.startsWith('Before the factory runs the checks') ? (checksOk ?? undefined) : answers.shift()
+    const isChecks = q.startsWith('Before the factory runs the checks')
+    // `holdAsk`: the checks question stays open until the test releases it.
+    if (isChecks && holdAsk) await held
+    const a = isChecks ? (checksOk ?? undefined) : answers.shift()
     if (a === undefined) throw new Error('dismissed')
     return { result: { questions: (e as unknown as { questions: unknown }).questions, answers: { [q]: a } } } as never
   })
@@ -543,6 +546,40 @@ describe('the person decides', () => {
     await answer($, 'a1', SPEC_ANSWER)
     expect(w.sent).toEqual([])
     expect(await bandText($)).not.toMatch(/🏭/)
+  })
+
+  test('a check that runs long shows which one, its place and its time, in the band and the pane', async ($, on) => {
+    const w = engine(on, { hold: 'npm run lint', pkg: '{"scripts":{"test":"x","lint":"y","typecheck":"z"}}' })
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    await command($, 'plan-approved')
+    await answer($, 'a2', 'built')
+    expect(w.ran.at(-1)).toBe('npm run lint')
+    expect(await bandText($)).toMatch(/checks 2\/3 · npm run lint · 0:00/)
+    await w.clock.advance(65_000)
+    expect(await bandText($)).toMatch(/checks 2\/3 · npm run lint · 1:0\d/)
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    expect(await texts(pane)).toMatch(/checks 2\/3 · npm run lint · 1:0\d/)
+    expect(await texts(pane)).toMatch(/2\/3 npm run lint/)
+    await pane.unmount()
+    w.release()
+    await settled()
+    expect(await bandText($)).not.toMatch(/checks \d\/\d/)
+  })
+
+  test('while the question before the checks is open, the run reads as waiting for you', async ($, on) => {
+    const w = engine(on, { holdAsk: true })
+    await startRun($)
+    await answer($, 'a1', SPEC_ANSWER)
+    await command($, 'plan-approved')
+    await answer($, 'a2', 'built')
+    expect(w.asked.at(-1)).toMatch(/^Before the factory runs the checks/)
+    expect(await bandText($)).toMatch(/waiting for your OK to run the checks/)
+    expect(w.ran.filter(c => c.startsWith('npm'))).toEqual([])
+    w.release()
+    await settled()
+    expect(await bandText($)).not.toMatch(/waiting for your OK/)
+    expect(w.ran).toContain('npm test')
   })
 
   test('a Stop during the checks ends them: the commands left are not run', async ($, on) => {

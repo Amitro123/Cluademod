@@ -395,6 +395,21 @@ export function newRun(feature: string, at: number, base: string, root: string, 
 export const isLive = (p: Phase) => p !== 'done' && p !== 'stopped'
 // Waiting for the person, not for an agent or a command.
 export const waitsOnPerson = (p: Phase) => p === 'plan' || p === 'ready' || p === 'needs-human'
+// Waiting for the person: a phase that waits on them, or the question before the checks run.
+export const waitsOnYou = (r: Pick<Run, 'phase' | 'isAskingChecks'>) => waitsOnPerson(r.phase) || !!r.isAskingChecks
+
+const mmss = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+// Where the run is, in a line: during the checks, which command runs and for how long.
+export function statusOf(run: Run, now: number): string {
+  const c = run.phase === 'checks' && !run.isAskingChecks ? run.checking : null
+  if (!c) return run.note
+  return `${c.isSetup ? 'installing' : 'checks'} ${c.index}/${c.total} · ${c.cmd} · ${mmss(now - c.since)}`
+}
+
 export const tokensOf = (run: Run) => Object.values(run.steps).reduce((n, s) => n + s.tokens, 0) + run.reviews.reduce((n, r) => n + r.tokens, 0)
 export const tok = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n}`)
 

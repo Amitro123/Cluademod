@@ -78,6 +78,11 @@ export type Run = {
   skipped?: string[]
   // The followups to-do item the run came from: marked done once the PR is open.
   followupId?: string
+  // The command the checks (or the setup before them) are running now, its place among them and when
+  // it started: what the band and the pane show, so a long check reads as running, not stuck.
+  checking?: { cmd: string; index: number; total: number; since: number; isSetup?: boolean } | null
+  // The factory's question before it runs the checks it found is open: the run waits on the person.
+  isAskingChecks?: boolean
 }
 
 declare module 'claude-code' {
@@ -86,6 +91,7 @@ declare module 'claude-code' {
       run: Run | null
       frame: number
       theme: 'dark' | 'light'
+      now: number
       stoppedAgents: string[]
     }
   }
