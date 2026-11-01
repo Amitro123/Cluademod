@@ -42,7 +42,7 @@ export function states(run: Run) {
 const checksLine = (run: Run) =>
   run.phase === 'checks' && run.isAskingChecks ? 'waiting for your OK'
   : run.phase === 'checks' && run.checking ? `${run.checking.index}/${run.checking.total} ${run.checking.cmd}`
-  : run.checks.length ? run.checks.map(c => `${c.cmd.split(' ').slice(-1)[0]} ${c.isMissing ? '–' : c.ok ? '✓' : '✗'}`).join(' · ') : run.steps.checks.state === 'skip' ? 'none ran' : ''
+  : run.checks.length ? run.checks.map(c => `${c.cmd.split(' ').slice(-1)[0]} ${c.isMissing ? '–' : c.isTimedOut ? '⏱' : c.ok ? '✓' : '✗'}`).join(' · ') : run.steps.checks.state === 'skip' ? 'none ran' : ''
 
 export function diagramSvg(run: Run, frame: number, theme: Theme = 'light'): string {
   const P = PALETTE[theme]
