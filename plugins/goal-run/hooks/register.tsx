@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Asking, Goal, Pace, Priority, Side, Task, TaskStatus } from '../types'
 import { TRACK_SIZE, trackSvg, trackText } from './art'
 import type { Pose } from './art'
-import { FACTORY_SOURCE, FACTORY_START_TOOL, factoryChosenForGoal, factoryPlanApprovedArgs, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
+import { FACTORY_SOURCE, FACTORY_START_TOOL, factoryChosenForGoal, factoryPlanApprovedArgs, factoryPlanResultArgs, GOAL_REACHED, goalClosedNote, goalPrompt, goalReachedToast, parseDoneResult, parseStartPrompt, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, PLAN_WAITING_FOR_FACTORY, planChangesForFactory, projectFrom, toolText } from './texts'
 // The goal-run tests import the start-prompt parser from here, as before it was shared.
 export { parseStartPrompt }
 
@@ -424,6 +424,13 @@ async function approve($: EngineInterface, pace: Pace) {
   void $.prompt.submit({ text: `The plan is approved (${PACE_TEXT[pace]}). Start with the first pending task.` }).catch(() => {})
 }
 
+// The plan tool's answer to a factory plan, also sent to the factory as a command once the tool call is
+// over: the factory hears the answer itself only from a hook that may run beneath this mod's.
+function tellFactory($: EngineInterface, result: string): string {
+  $.clock.after(0, () => void $.command.run({ command: 'factory', args: factoryPlanResultArgs(result) }).catch(() => {}))
+  return result
+}
+
 // The to-do items a followups Start prompt names, from its lines "- id <id>: <title>[ (bug)][ — detail][ [where: …]]".
 
 const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ')
@@ -678,7 +685,7 @@ export const register: Register = (on, options) => {
     const canFactory = !isFactory && isNew && (e as { agentId?: string }).agentId === undefined && (await checkFactory($))
     // A factory plan never takes over the person's own goal under way, and doesn't inherit its done
     // tasks. A goal still being planned (no plan approved yet) is the one the factory took over.
-    if (isFactory && before && before.source !== FACTORY_SOURCE && before.status !== 'done' && before.status !== 'planning') return { result: PLAN_KEPT_FOR_FACTORY }
+    if (isFactory && before && before.source !== FACTORY_SOURCE && before.status !== 'done' && before.status !== 'planning') return { result: tellFactory($, PLAN_KEPT_FOR_FACTORY) }
     const text = clip(String(input.goal ?? '').trim() || before?.text || 'Session goal', 200)
     // A plan with no goal set before it is a new goal, set now.
     const now = await $.clock.now()
@@ -698,10 +705,10 @@ export const register: Register = (on, options) => {
     if (isFactory) {
       if (answer === APPROVE_BUILD) {
         await setGoal($, g => (g ? { ...g, status: 'active', pace: 'run' } : g))
-        return { result: planApprovedForFactory(goalTasksOf(await read($, goal))) }
+        return { result: tellFactory($, planApprovedForFactory(goalTasksOf(await read($, goal)))) }
       }
       if (!answer.trim()) return { result: PLAN_WAITING_FOR_FACTORY }
-      return { result: planChangesForFactory(answer === CHANGE ? '' : answer) }
+      return { result: tellFactory($, planChangesForFactory(answer === CHANGE ? '' : answer)) }
     }
     if (canFactory && answer === RUN_FACTORY) {
       // A command can't run from inside a tool call, so Claude starts the run with the factory's tool.

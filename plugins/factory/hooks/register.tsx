@@ -48,7 +48,7 @@ import {
   progressNote,
   resumePrompt,
 } from './flow'
-import { FACTORY_START_TOOL, factoryArgs, type GoalTask, parseFactoryArgs, parsePlanApprovedArgs, parsePlanOutcome, toolText } from './texts'
+import { FACTORY_START_TOOL, factoryArgs, type GoalTask, parseFactoryArgs, parsePlanApprovedArgs, parsePlanOutcome, parsePlanResultArgs, toolText } from './texts'
 
 const run = atom({ plugin: 'factory', key: 'run' } as const, null as Run | null)
 const frame = atom({ plugin: 'factory', key: 'frame' } as const, 0)
@@ -315,6 +315,8 @@ async function onPlan($: EngineInterface, outcome: { approved: true; goalTasks?:
   }
   // The person has a goal of their own in goal-run: the factory's band asks instead.
   if ('kept' in outcome) {
+    // Heard twice (the hook and goal-run's command): the factory's own question is asked once.
+    if (r.gate === 'factory') return
     await patch($, cur => ({ ...cur, gate: 'factory', note: 'waiting for you to approve the plan (here: goal-run keeps your own goal)' }))
     return void askPlan($)
   }
@@ -654,7 +656,7 @@ async function addTokens($: EngineInterface, agentId: string, n: number) {
 // A plan whose gate is goal-run is approved there (its dialog or Goal pane, which passes the goal's task
 // ids on with /factory plan-approved): approved here, goal-run's goal would stay proposed and refuse
 // every task the builder marks. Only when goal-run is gone meanwhile does the factory approve it itself.
-const PLAN_IN_GOAL_RUN = "The plan waits for your approval in goal-run: its dialog, or Approve in the Goal pane (/session-goal opens it)."
+const PLAN_IN_GOAL_RUN = "The plan waits for your approval in goal-run: its dialog, or Approve in the Goal pane (/session-goal opens it). If goal-run already shows it approved, /factory plan-approved starts the build."
 
 async function approveNow($: EngineInterface, goalTasks?: GoalTask[], fromGoalRun = false): Promise<string> {
   const r = await read($, run)
@@ -805,6 +807,12 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'factory' }, async ($, e) => {
     const arg = e.args.trim()
+    // goal-run's answer to the plan, sent on as a command: heard whatever order the mods' hooks run in.
+    const told = parsePlanResultArgs(arg)
+    if (told !== undefined) {
+      if (told) void serial(() => onPlan($, told))
+      return { text: told ? "The factory has goal-run's answer to its plan." : "goal-run's answer to the plan couldn't be read." }
+    }
     const approved = parsePlanApprovedArgs(arg)
     if (arg === 'approve' || approved) return { text: await approveNow($, approved?.goalTasks, !!approved) }
     if (arg === 'retry') return { text: await retryNow($) }
@@ -818,6 +826,11 @@ export const register: Register = (on, options) => {
       // From a timer: a prompt submitted while the command's own hook still runs is refused.
       $.clock.after(1, () => void $.prompt.submit({ text: FROM_CONVERSATION }).catch(() => $.ui.toast('/factory <feature> starts a run')))
       return { text: 'Asked Claude to start a run from what this conversation is working on.' }
+    }
+    // A run going and one word that isn't a subcommand: a mistyped one (plan-approve), not a feature.
+    const cur = await read($, run)
+    if (cur && isLive(cur.phase) && /^[\w-]+$/.test(arg)) {
+      return { text: `"/factory ${arg}" isn't a factory command. While a run goes: /factory approve, plan-approved (the plan goal-run approved), retry, rework <what to change>, stop.` }
     }
     return { text: await start($, arg) }
   })

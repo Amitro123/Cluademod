@@ -103,8 +103,22 @@ export function parsePlanOutcome(text: string): { approved: true; goalTasks?: Go
     return goalTasks ? { approved: true, goalTasks } : { approved: true }
   }
   if (text.startsWith(PLAN_KEPT_FOR_FACTORY)) return { kept: true }
-  const m = /^The person wants changes: ([\s\S]*?)\nThe factory's spec-writer revises the spec/.exec(text)
+  // \s+, not \n: carried in a command's arguments, the line break may come back as a space.
+  const m = /^The person wants changes: ([\s\S]*?)\s+The factory's spec-writer revises the spec/.exec(text)
   return m ? { changes: m[1]!.trim() } : null
+}
+
+// goal-run → factory: the same answer, sent again as /factory's arguments. The factory hears the plan
+// tool's answer from its own hook only when that hook runs above goal-run's, which Claude Code doesn't
+// promise, or from PostToolUse; the command reaches it whatever the order. Twice is harmless: the
+// factory acts on a plan's answer only while the plan waits.
+export const FACTORY_PLAN_RESULT_ARG = 'plan-result'
+export const factoryPlanResultArgs = (result: string) => `${FACTORY_PLAN_RESULT_ARG} ${result}`
+// The outcome /factory's arguments carry; undefined for other arguments, null for an answer it can't read.
+export function parsePlanResultArgs(args: string): ReturnType<typeof parsePlanOutcome> | undefined {
+  const t = args.trim()
+  if (t !== FACTORY_PLAN_RESULT_ARG && !t.startsWith(`${FACTORY_PLAN_RESULT_ARG} `)) return undefined
+  return parsePlanOutcome(t.slice(FACTORY_PLAN_RESULT_ARG.length).trim())
 }
 
 // followups → factory: a to-do item run through the factory carries its id in /factory's arguments,

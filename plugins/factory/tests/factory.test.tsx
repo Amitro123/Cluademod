@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { cleanFeature, couldNotStart, detectChecks, detectSetup, leftOut, neverCommit, slugOf, untrackedOf, modelsFor, parseDecision, parseSize, parseSkills, progressNote, titleOf, parseTasks, parseVerdict, planPrompt, specPrompt, splitChecks } from '../hooks/flow'
-import { factoryArgs, goalPrompt, startLine, factoryPlanApprovedArgs, PLAN_APPROVED_FOR_FACTORY, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
+import { factoryArgs, goalPrompt, startLine, factoryPlanApprovedArgs, factoryPlanResultArgs, PLAN_APPROVED_FOR_FACTORY, planApprovedForFactory, PLAN_KEPT_FOR_FACTORY, planChangesForFactory } from '../hooks/texts'
 
 const PLAN = 'mcp__goal-run__plan'
 
@@ -1036,6 +1036,50 @@ describe("the builder marks goal-run's tasks only when they are the factory's", 
     await settled()
     expect(last(w)).toMatchObject({ subagentType: 'factory:builder' })
     expect(last(w).prompt).toContain('then done):\n- t1: Core\n- t2: Write docs')
+  })
+
+  test("goal-run's answer sent as a command reaches the factory when its own hook doesn't (the mods' order), once", async ($, on) => {
+    const w = engine(on)
+    await startRun($)
+    await answer($, 'a1', OUT_OF_ORDER)
+    // No plan tool call reaches the factory's hook here: only goal-run's command.
+    expect(await command($, factoryPlanResultArgs(planApprovedForFactory(IDS)))).toMatch(/has goal-run's answer/)
+    await settled()
+    expect(last(w)).toMatchObject({ subagentType: 'factory:builder' })
+    expect(last(w).prompt).toContain('then done):\n- t1: Core\n- t2: Write docs')
+    // The hook heard it too, or the command came twice: one builder.
+    await command($, factoryPlanResultArgs(planApprovedForFactory(IDS)))
+    await settled()
+    expect(w.spawned.filter(a => a.subagentType === 'factory:builder')).toHaveLength(1)
+  })
+
+  test("goal-run's changes and its kept goal, sent as commands: the spec is revised; the factory asks once", async ($, on) => {
+    const w = engine(on, { answers: [''] })
+    await startRun($)
+    await answer($, 'a1', OUT_OF_ORDER)
+    await command($, factoryPlanResultArgs(PLAN_KEPT_FOR_FACTORY))
+    await command($, factoryPlanResultArgs(PLAN_KEPT_FOR_FACTORY))
+    await settled()
+    expect(w.asked.filter(q => /^The factory's plan for/.test(q))).toHaveLength(1)
+    await command($, factoryPlanResultArgs(planChangesForFactory('Split the core task')))
+    await settled()
+    expect(last(w)).toMatchObject({ subagentType: 'factory:spec-writer' })
+    expect(last(w).prompt).toContain('Split the core task')
+  })
+
+  test('a mistyped subcommand while a run goes is named as one, not taken for a new feature', async ($, on) => {
+    engine(on)
+    await startRun($)
+    await answer($, 'a1', OUT_OF_ORDER)
+    expect(await command($, 'plan-approve')).toMatch(/^"\/factory plan-approve" isn't a factory command\. .*plan-approved/)
+    expect(await command($, 'Add a cache to the API')).toMatch(/^A factory run is already going/)
+  })
+
+  test('/factory approve on a plan goal-run holds says how to start it if goal-run already approved it', async ($, on) => {
+    engine(on)
+    await startRun($)
+    await answer($, 'a1', OUT_OF_ORDER)
+    expect(await command($, 'approve')).toMatch(/If goal-run already shows it approved, \/factory plan-approved starts the build/)
   })
 
   test("approved in the Goal pane: /factory plan-approved carries goal-run's ids", async ($, on) => {
